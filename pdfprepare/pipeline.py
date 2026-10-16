@@ -9,7 +9,7 @@ from pdfprepare.models import DocResult, PageInfo, Word
 from pdfprepare.ocr import ocr_image
 from pdfprepare.output import write_json, write_searchable_pdf
 from pdfprepare.page import has_native_text, is_blank, render
-from pdfprepare.preprocess import prepare
+from pdfprepare.preprocess import invert_deskew, prepare_with_angle
 from pdfprepare.quality import flag_pages, write_report
 
 #: Confidence assigned to words taken from a native digital text layer
@@ -88,24 +88,35 @@ def process_file(src: str, dst_dir: str, registry: dict[str, str]) -> DocResult:
                 blank = False
             else:
                 rendered = render(page)
-                prepared = prepare(rendered)
+                prepared, angle = prepare_with_angle(rendered)
                 words = ocr_image(prepared)
 
-                # OCR returns rendered-image pixels; convert to PDF points
-                # using the scale of the rendered image.
-                factor_x = rect.width / rendered.width
-                factor_y = rect.height / rendered.height
-                words = [
-                    Word(
-                        text=w.text,
-                        x0=w.x0 * factor_x,
-                        y0=w.y0 * factor_y,
-                        x1=w.x1 * factor_x,
-                        y1=w.y1 * factor_y,
-                        conf=w.conf,
+                # OCR returns boxes in *prepared*-image pixels. Invert
+                # prepare's transform (deskew rotation, then upscale) to map
+                # them to PDF points: un-rotate about the deskew center, then
+                # scale by page_rect / prepared_image_size (not the rendered
+                # image size, which may differ after upscaling).
+                factor_x = rect.width / prepared.width
+                factor_y = rect.height / prepared.height
+                converted = []
+                for w in words:
+                    if angle:
+                        x0, y0, x1, y1 = invert_deskew(
+                            w.x0, w.y0, w.x1, w.y1, angle, prepared.size
+                        )
+                    else:
+                        x0, y0, x1, y1 = w.x0, w.y0, w.x1, w.y1
+                    converted.append(
+                        Word(
+                            text=w.text,
+                            x0=x0 * factor_x,
+                            y0=y0 * factor_y,
+                            x1=x1 * factor_x,
+                            y1=y1 * factor_y,
+                            conf=w.conf,
+                        )
                     )
-                    for w in words
-                ]
+                words = converted
                 full_text = " ".join(w.text for w in words)
                 blank = is_blank(
                     words, (rect.x0, rect.y0, rect.x1, rect.y1)

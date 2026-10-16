@@ -1,3 +1,6 @@
+import pytest
+
+
 def test_process_file_builds_structure(tmp_path, monkeypatch):
     import fitz
     import pdfprepare.pipeline as pl
@@ -43,3 +46,38 @@ def test_raster_page_blank_boundary(tmp_path, monkeypatch):
     result = pl.process_file(str(src), str(dst), {})
     assert result.pages[0].is_blank is True
     assert result.pages[0].system_code == ""
+
+
+def test_ocr_boxes_scale_from_prepared_image(tmp_path, monkeypatch):
+    import fitz
+    import pdfprepare.pipeline as pl
+    from pdfprepare.models import Word
+    from pdfprepare.page import render
+    from pdfprepare.preprocess import prepare
+
+    # A tiny page: rendering at 300 dpi yields < 300 px on the short side, so
+    # ``prepare`` upscales and the prepared image is larger than the rendered
+    # one. OCR boxes must scale by prepared size, not rendered size.
+    src = tmp_path / "in.pdf"
+    d = fitz.open(); d.new_page(width=50, height=50); d.save(str(src)); d.close()
+
+    # Recompute the exact prepared size the pipeline will use.
+    with fitz.open(str(src)) as doc:
+        rendered = render(doc[0])
+        rect = doc[0].rect
+    prepared = prepare(rendered)
+    assert prepared.width != rendered.width
+
+    # A word at a known prepared-image pixel.
+    monkeypatch.setattr(pl, "ocr_image",
+        lambda img, lang="rus+eng": [Word("X", 30, 40, 60, 80, 0.9)])
+
+    dst = tmp_path / "out"; dst.mkdir()
+    result = pl.process_file(str(src), str(dst), {})
+    word = result.pages[0].words[0]
+
+    # PDF-point coordinates = prepared-pixel * page_rect / prepared_size.
+    assert word.x0 == pytest.approx(30 * rect.width / prepared.width)
+    assert word.y0 == pytest.approx(40 * rect.height / prepared.height)
+    assert word.x1 == pytest.approx(60 * rect.width / prepared.width)
+    assert word.y1 == pytest.approx(80 * rect.height / prepared.height)
