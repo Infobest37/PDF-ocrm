@@ -2,6 +2,11 @@
 
 import sqlite3
 
+#: Current schema version. Additive changes (new ``CREATE TABLE IF NOT
+#: EXISTS`` tables) are applied on every open; :class:`Store` bumps the
+#: recorded version of older databases to this value (see __init__).
+SCHEMA_VERSION = 2
+
 
 class Store:
     """Store graph entities, relationships, and searchable page text."""
@@ -11,7 +16,7 @@ class Store:
         self._connection.execute("PRAGMA journal_mode=WAL")
         self._connection.execute("PRAGMA foreign_keys=ON")
         self._connection.executescript(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS nodes (
                 id INTEGER PRIMARY KEY,
                 kind TEXT NOT NULL,
@@ -71,9 +76,17 @@ class Store:
             );
 
             INSERT INTO meta (key, value)
-            VALUES ('schema_version', '2')
+            VALUES ('schema_version', '{SCHEMA_VERSION}')
             ON CONFLICT (key) DO NOTHING;
             """
+        )
+        # Migrate on open: the additive tables above bring an old database
+        # to the current shape, so its recorded version must follow —
+        # otherwise meta would keep claiming a schema it no longer has.
+        self._connection.execute(
+            "UPDATE meta SET value = ? "
+            "WHERE key = 'schema_version' AND CAST(value AS INTEGER) < ?",
+            (str(SCHEMA_VERSION), SCHEMA_VERSION),
         )
         self._connection.commit()
 

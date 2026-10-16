@@ -256,3 +256,24 @@ def test_cli_build_report_garbage_lines_ignored(fx_prepared_dir, tmp_path,
         assert reader.defect_sheets() == [("РТЭ кн.1.pdf", 9)]
     finally:
         reader.close()
+
+
+def test_cli_build_broken_report_warns_and_continues(fx_prepared_dir, tmp_path,
+                                                     capsys):
+    """Доработка ревью-раунда: байтовый мусор вместо UTF-8 в отчёте не рвёт
+    build — только предупреждение в stderr, дефектов ноль."""
+    from pdfgraph.cli import main
+    from pdfgraph.store import Store
+
+    report = os.path.join(fx_prepared_dir, "РТЭ кн.1.pdf.report.txt")
+    with open(report, "wb") as handle:
+        handle.write(b"\xff\xfe\x00\x01 page 47: low_confidence (conf=0.50)\n")
+    store = str(tmp_path / "g.db")
+    assert main(["build", str(fx_prepared_dir), store, "--type", "Ми-8МТВ"]) == 0
+    err = capsys.readouterr().err
+    assert "warning" in err and "report" in err
+    reader = Store(store)
+    try:
+        assert reader.defect_sheets() == []
+    finally:
+        reader.close()

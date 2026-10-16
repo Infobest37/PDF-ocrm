@@ -100,7 +100,7 @@ def _mark_defects(store: Store,
         try:
             with open(report, encoding="utf-8") as handle:
                 lines = handle.readlines()
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:  # corrupt UTF-8 must not kill build
             print(f"warning: cannot read report {report!r}: {exc}",
                   file=sys.stderr)
             continue

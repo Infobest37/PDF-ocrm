@@ -116,6 +116,42 @@ def test_mark_defect_is_idempotent_and_defect_sheets_sorted(tmp_path):
         reopened.close()
 
 
+def test_old_database_migrates_schema_version_on_open(tmp_path):
+    """Revue 2.7, находка 2: БД, созданная до таблицы defects
+    (schema_version '1'), при открытии получает defects и актуальную
+    версию '2'; узлы, рёбра и строки листов остаются на месте."""
+    from pdfgraph.store import Store
+
+    database = str(tmp_path / "g.db")
+    store = Store(database)
+    system = store.add_node("system", "023.00.00",
+                            label="СВЯЗНОЕ РАДИООБОРУДОВАНИЕ")
+    sheet = store.add_node("sheet", "d.pdf:1", document="d.pdf", page=1)
+    store.add_edge(sheet, system, "contained_in", document="d.pdf", page=1)
+    store.upsert_page("d.pdf", 1, "Ми-8МТВ", "023.00.00", "",
+                      "текст листа", "текст листа")
+    store.close()
+
+    # откатить файл к состоянию «до defects»: таблицу удалить, версию снизить
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE defects")
+        connection.execute("UPDATE meta SET value = '1' WHERE key = 'schema_version'")
+
+    reopened = Store(database)
+    try:
+        assert reopened.page_text("d.pdf", 1) == "текст листа"
+        assert reopened.stats() == {"nodes": 2, "edges": 1, "sheets": 1, "pending": 0}
+        assert reopened.defect_sheets() == []
+    finally:
+        reopened.close()
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "2"
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'defects'"
+        ).fetchone() == (1,)
+
+
 def test_find_node_id_and_has_node_are_read_only(tmp_path):
     from pdfgraph.store import Store
 
