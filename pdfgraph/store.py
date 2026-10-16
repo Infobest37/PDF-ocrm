@@ -9,6 +9,7 @@ class Store:
     def __init__(self, path: str):
         self._connection = sqlite3.connect(path)
         self._connection.execute("PRAGMA journal_mode=WAL")
+        self._connection.execute("PRAGMA foreign_keys=ON")
         self._connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS nodes (
@@ -29,10 +30,12 @@ class Store:
                 document TEXT NOT NULL DEFAULT '',
                 page INTEGER NOT NULL DEFAULT -1,
                 detail TEXT NOT NULL DEFAULT '',
-                UNIQUE (src, dst, kind, document, page, detail),
+                -- One edge per endpoint/type/document/page; detail is replaceable OCR text.
+                UNIQUE (src, dst, kind, document, page),
                 FOREIGN KEY (src) REFERENCES nodes (id),
                 FOREIGN KEY (dst) REFERENCES nodes (id)
             );
+            CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges (dst, kind);
 
             CREATE TABLE IF NOT EXISTS pages (
                 document TEXT NOT NULL,
@@ -43,7 +46,10 @@ class Store:
                 text TEXT NOT NULL,
                 PRIMARY KEY (document, page)
             );
+            CREATE INDEX IF NOT EXISTS idx_pages_system
+                ON pages (system_code, subsystem_code);
 
+            -- FTS5 UNINDEXED columns are stored as text: queries must bind page as str.
             CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(
                 document UNINDEXED,
                 page UNINDEXED,
@@ -80,9 +86,9 @@ class Store:
             INSERT INTO nodes (kind, key, label, document, page)
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT (kind, key) DO UPDATE SET
-                label = excluded.label,
-                document = excluded.document,
-                page = excluded.page
+                label = CASE WHEN excluded.label <> '' THEN excluded.label ELSE nodes.label END,
+                document = CASE WHEN excluded.document <> '' THEN excluded.document ELSE nodes.document END,
+                page = CASE WHEN excluded.page >= 0 THEN excluded.page ELSE nodes.page END
             RETURNING id
             """,
             (kind, key, label, document, page),
@@ -103,8 +109,10 @@ class Store:
         """Insert an edge only if this exact relationship is not present."""
         self._connection.execute(
             """
-            INSERT OR IGNORE INTO edges (src, dst, kind, document, page, detail)
+            INSERT INTO edges (src, dst, kind, document, page, detail)
             VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (src, dst, kind, document, page)
+            DO UPDATE SET detail = excluded.detail
             """,
             (src, dst, kind, document, page, detail),
         )
@@ -120,7 +128,11 @@ class Store:
         text: str,
         search_text: str,
     ) -> None:
-        """Insert or replace page data and its corresponding FTS row."""
+        """Insert or replace page data and its corresponding FTS row.
+
+        ``search_text`` must already be normalized by the caller (for example,
+        with ``normalize_for_search``); this store does not normalize it.
+        """
         with self._connection:
             self._connection.execute(
                 """
