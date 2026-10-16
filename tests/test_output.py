@@ -1,3 +1,5 @@
+import pytest
+
 from pdfprepare.output import write_json, write_searchable_pdf
 
 
@@ -27,3 +29,17 @@ def test_write_json_shape(tmp_path):
     import json
     data = json.loads(out.read_text(encoding="utf-8"))
     assert data["pages"][0]["system_code"] == "023.00.00"
+
+
+def test_write_searchable_pdf_missing_font_raises(tmp_path):
+    import fitz
+    from pdfprepare.models import Word, PageInfo
+    src = tmp_path / "s.pdf"
+    d = fitz.open(); d.new_page(); d.save(str(src)); d.close()
+    p = PageInfo(page_index=0, is_native_text=False, is_blank=False,
+                 system_code="", subsystem_code="",
+                 full_text="ПРИМЕР", words=[Word("ПРИМЕР", 72, 72, 130, 82, 0.9)])
+    missing = tmp_path / "missing.ttf"
+    with pytest.raises(FileNotFoundError, match="font"):
+        write_searchable_pdf(str(src), [p], str(tmp_path / "o.pdf"),
+                             font_path=str(missing))
