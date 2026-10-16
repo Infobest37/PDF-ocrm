@@ -4,7 +4,14 @@ from dataclasses import asdict
 
 import fitz
 
-from pdfprepare.models import DocResult, PageInfo
+from pdfprepare.models import (
+    DocResult,
+    Figure,
+    PageInfo,
+    Reference,
+    Table,
+    Word,
+)
 
 # Environment variable and candidate paths for the Cyrillic-capable TTF used to
 # build the searchable text layer. PyMuPDF's built-in Base-14 fonts ("helv"
@@ -17,7 +24,7 @@ _BUNDLED_FONT = os.path.join(os.path.dirname(__file__), "fonts", "arial.ttf")
 _SYSTEM_FONT = r"C:\Windows\Fonts\arial.ttf"
 
 
-def _resolve_font(font_path: str | None) -> str:
+def resolve_font(font_path: str | None) -> str:
     """Return the first existing candidate TTF, or raise a clear error."""
     if font_path is not None:
         candidates = [font_path]
@@ -59,7 +66,7 @@ def write_searchable_pdf(
     environment variable, a bundled font next to this module, or the Windows
     system font. Raises :class:`FileNotFoundError` if no candidate exists.
     """
-    font_path = _resolve_font(font_path)
+    font_path = resolve_font(font_path)
     doc = fitz.open(src_pdf)
     try:
         for p in pages:
@@ -89,11 +96,55 @@ def write_searchable_pdf(
 
 
 def write_json(result: DocResult, out_path: str) -> None:
-    """Write a :class:`DocResult` as indented UTF-8 JSON.
+    """Write a :class:`DocResult` as indented UTF-8 JSON (schema v2).
 
-    Output carries the keys ``source_path``, ``page_count``, ``system_names``
-    and ``pages`` (each page and word serialized as a plain dict).
+    Output carries the keys ``schema_version``, ``source_path``,
+    ``page_count``, ``system_names`` and ``pages``; each page serializes its
+    words and the structural fields ``tables``, ``figures`` and
+    ``references`` as plain dicts (``Table.bbox`` becomes a JSON list,
+    restored to a tuple by :func:`read_result`).
     """
     data = asdict(result)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def read_result(path: str) -> DocResult:
+    """Load a :class:`DocResult` back from JSON written by :func:`write_json`.
+
+    Round-trips the v2 schema; older files without the v2 keys stay readable:
+    missing per-page ``tables``/``figures``/``references`` become empty lists
+    and a missing ``schema_version`` is reported as ``1``.
+    """
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+
+    pages = [
+        PageInfo(
+            page_index=p["page_index"],
+            is_native_text=p["is_native_text"],
+            is_blank=p["is_blank"],
+            system_code=p["system_code"],
+            subsystem_code=p["subsystem_code"],
+            full_text=p["full_text"],
+            words=[Word(**w) for w in p.get("words", [])],
+            tables=[
+                Table(
+                    page_index=t["page_index"],
+                    bbox=tuple(t["bbox"]),
+                    rows=t["rows"],
+                )
+                for t in p.get("tables", [])
+            ],
+            figures=[Figure(**fig) for fig in p.get("figures", [])],
+            references=[Reference(**ref) for ref in p.get("references", [])],
+        )
+        for p in data.get("pages", [])
+    ]
+    return DocResult(
+        source_path=data["source_path"],
+        page_count=data["page_count"],
+        pages=pages,
+        system_names=data.get("system_names", {}),
+        schema_version=data.get("schema_version", 1),
+    )

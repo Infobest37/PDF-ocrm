@@ -10,9 +10,9 @@ import fitz
 
 
 def _write_sheet(doc: fitz.Document, text: str) -> None:
-    from pdfprepare.output import _resolve_font
+    from pdfprepare.output import resolve_font
     page = doc.new_page()
-    page.insert_font(fontname="f0", fontfile=_resolve_font(None))
+    page.insert_font(fontname="f0", fontfile=resolve_font(None))
     page.insert_text((72, 72), text, fontname="f0")
 
 

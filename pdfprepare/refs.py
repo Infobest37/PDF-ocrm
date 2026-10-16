@@ -22,7 +22,7 @@ _CODE_TOKEN_RE = re.compile(r"[,;]?\s*(" + _CODE_FIND_RE.pattern + ")")
 
 #: A figure token (``рис. 1`` / ``рисунок 1`` / ``рис. № 1``), with the same
 #: optional separator. Group 1 is the whole ``рис. N`` text, group 2 the number.
-_FIG_TOKEN_RE = re.compile(r"(?i)[,;]?\s*(рис\.?\s*№?\s*(\d{1,3}))")
+_FIG_TOKEN_RE = re.compile(r"(?i)[,;]?\s*(рис(?:\.|унок)?\s*№?\s*(\d{1,3}))")
 
 
 def extract_references(text: str, page_index: int) -> list[Reference]:

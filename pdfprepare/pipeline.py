@@ -5,12 +5,15 @@ import os
 import fitz
 
 from pdfprepare.codes import extract_codes, system_of
-from pdfprepare.models import DocResult, PageInfo, Word
+from pdfprepare.figures import extract_figures
+from pdfprepare.models import DocResult, PageInfo, Table, Word
 from pdfprepare.ocr import ocr_image
 from pdfprepare.output import write_json, write_searchable_pdf
 from pdfprepare.page import has_native_text, is_blank, render
 from pdfprepare.preprocess import invert_deskew, prepare_with_angle
 from pdfprepare.quality import flag_pages, write_report
+from pdfprepare.refs import extract_references
+from pdfprepare.tables import extract_tables
 
 #: Confidence assigned to words taken from a native digital text layer
 #: (no OCR involved, so they are treated as fully trusted).
@@ -67,9 +70,11 @@ def process_file(
 
     Per page: native pages keep their ``get_text`` output and words (already
     in PDF points); raster pages are rendered, preprocessed, and OCR'd, with
-    OCR pixel coordinates converted to PDF points. Writes ``<stem>.pdf``,
-    ``<stem>.json`` and ``<stem>.report.txt`` into ``dst_dir`` and returns the
-    :class:`DocResult`.
+    OCR pixel coordinates converted to PDF points. Tables are detected on
+    raster pages only (in pixel space, then scaled to points like the words);
+    figures and cross-references are extracted from every page's text. Writes
+    ``<stem>.pdf``, ``<stem>.json`` and ``<stem>.report.txt`` into ``dst_dir``
+    and returns the :class:`DocResult`.
 
     ``force_ocr`` bypasses native-text detection and OCRs every page, so an
     operator can replace a poor existing text layer (e.g. a scan with an old
@@ -92,10 +97,21 @@ def process_file(
                     for w in raw_words
                 ]
                 blank = False
+                # Grid detection is an image-analysis step and this iteration
+                # builds table geometry for raster pages only (project
+                # decision); native pages carry no ``tables``.
+                tables: list[Table] = []
             else:
                 rendered = render(page)
                 prepared, angle = prepare_with_angle(rendered)
                 words = ocr_image(prepared)
+
+                # Table detection works in *prepared*-image pixels (the
+                # coordinate contract of pdfprepare.tables): it must see the
+                # raw OCR words before the conversion below, and its pixel
+                # bboxes are then mapped to PDF points with the same
+                # transform as the words.
+                raw_tables = extract_tables(prepared, words, page_index)
 
                 # OCR returns boxes in *prepared*-image pixels. Invert
                 # prepare's transform (deskew rotation, then upscale) to map
@@ -123,12 +139,36 @@ def process_file(
                         )
                     )
                 words = converted
+                tables = []
+                for t in raw_tables:
+                    x0, y0, x1, y1 = t.bbox
+                    if angle:
+                        x0, y0, x1, y1 = invert_deskew(
+                            x0, y0, x1, y1, angle, prepared.size
+                        )
+                    tables.append(
+                        Table(
+                            page_index=t.page_index,
+                            bbox=(
+                                x0 * factor_x,
+                                y0 * factor_y,
+                                x1 * factor_x,
+                                y1 * factor_y,
+                            ),
+                            rows=t.rows,
+                        )
+                    )
                 full_text = " ".join(w.text for w in words)
                 blank = is_blank(
                     words, (rect.x0, rect.y0, rect.x1, rect.y1)
                 )
 
             system_code, subsystem_code = _page_codes(full_text)
+            # Figures and cross-references are text-level extraction, so they
+            # run on every page — native and blank ones included (a reference
+            # on a boundary sheet must not be lost).
+            figures = extract_figures(full_text, page_index)
+            references = extract_references(full_text, page_index)
             pages.append(
                 PageInfo(
                     page_index=page_index,
@@ -138,6 +178,9 @@ def process_file(
                     subsystem_code=subsystem_code,
                     full_text=full_text,
                     words=words,
+                    tables=tables,
+                    figures=figures,
+                    references=references,
                 )
             )
     finally:
