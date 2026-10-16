@@ -1,4 +1,8 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+#: Version of the structural-data schema; bumped when the dataclass shapes
+#: below change (fields added/removed/renamed).
+SCHEMA_VERSION: int = 2
 
 
 @dataclass
@@ -12,6 +16,28 @@ class Word:
 
 
 @dataclass
+class Table:
+    page_index: int
+    bbox: tuple[float, float, float, float]
+    rows: list[list[str]]
+
+
+@dataclass
+class Figure:
+    page_index: int
+    number: str
+    caption: str
+
+
+@dataclass
+class Reference:
+    page_index: int
+    kind: str
+    target: str
+    raw: str
+
+
+@dataclass
 class PageInfo:
     page_index: int
     is_native_text: bool
@@ -20,6 +46,9 @@ class PageInfo:
     subsystem_code: str
     full_text: str
     words: list[Word]
+    tables: list[Table] = field(default_factory=list)
+    figures: list[Figure] = field(default_factory=list)
+    references: list[Reference] = field(default_factory=list)
 
 
 @dataclass
@@ -28,6 +57,7 @@ class DocResult:
     page_count: int
     pages: list[PageInfo]
     system_names: dict[str, str]
+    schema_version: int = SCHEMA_VERSION
 
 
 @dataclass
