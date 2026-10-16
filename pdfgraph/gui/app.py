@@ -12,6 +12,8 @@ The «Проверено» cell is a stamp mark in a fixed cell: filled pine squ
 means verified, hollow graphite square means not.
 """
 
+import os
+
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from pdfgraph.answer import build_answer
@@ -36,6 +38,10 @@ COLUMNS = ("Ответ", "Документ", "Лист", "Код", "Провер
 
 _AWAITING_TEXT = "Пока вопрос не задан — показываем только ответы, подтверждённые на листах"
 _SNIPPET_HINT = "Фрагмент подтверждённого ответа появится здесь"
+#: Missing graph file is not a refusal: name the problem and its recovery,
+#: calmly (no plate, no red) — SQLite would otherwise create an empty base.
+_MISSING_STORE_TEXT = ("Хранилище не найдено: файл графа отсутствует — "
+                       "сначала постройте граф (pdfgraph build)")
 
 
 class _VerifiedDelegate(QtWidgets.QStyledItemDelegate):
@@ -130,9 +136,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # -- store lifecycle ----------------------------------------------------
 
-    def _open_store(self) -> None:
-        if self._store is None:
+    def _open_store(self) -> bool:
+        """Open the graph on demand; False when the file simply is not there.
+
+        SQLite would otherwise create an empty database silently and the
+        window would show a misleading refusal, so an absent file is reported
+        by callers as a calm message and nothing is created.
+        """
+        if self._store is None and os.path.isfile(self.store_path):
             self._store = Store(self.store_path)
+        return self._store is not None
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
         if self._store is not None:
@@ -232,7 +245,13 @@ class MainWindow(QtWidgets.QMainWindow):
         Citations are machine-checked before anything is shown; the row list
         is returned for tests and callers, UI updates happen as a side effect.
         """
-        self._open_store()
+        if not self._open_store():
+            self._rows = []
+            self._fill_table([])
+            self._set_snippet("")
+            self._set_verdict_plate("none")
+            self.verdict_label.setText(_MISSING_STORE_TEXT)
+            return []
         assert self._store is not None
         answer = build_answer(self._store, question)
         checks = verify_citations(answer, self._store)
@@ -251,12 +270,14 @@ class MainWindow(QtWidgets.QMainWindow):
         return rows
 
     def open_sheet(self, document: str, page: int) -> None:
-        """Show the stored text of one sheet; missing or blank sheets are calm."""
-        self._open_store()
-        assert self._store is not None
-        missing = not self._store.has_node("sheet", f"{document}:{page}")
-        text = self._store.page_text(document, page)
-        body = text if (text and text.strip()) else self._blank_sheet_note(document, page, missing)
+        """Show the stored text of one sheet; missing sheets/stores stay calm."""
+        if not self._open_store():
+            body = _MISSING_STORE_TEXT
+        else:
+            assert self._store is not None
+            missing = not self._store.has_node("sheet", f"{document}:{page}")
+            text = self._store.page_text(document, page)
+            body = text if (text and text.strip()) else self._blank_sheet_note(document, page, missing)
 
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle(f"Лист {page} — {document}")
