@@ -1,5 +1,18 @@
-.superpowers/
+# Встроенный Tesseract (~60 МБ бинарников и языковых моделей) — не в git.
 pdfprepare/tesseract/
-build/
-dist/
 *.egg-info/
+
+# Тяжёлые данные и рабочие артефакты.
+venv/
+.venv/
+__pycache__/
+*.pyc
+pdfs/
+OCRfile/
+out/
+dist/
+build/
+*.db
+.codebase-memory/
+.superpowers/
+.idea/
