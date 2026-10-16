@@ -74,5 +74,22 @@ def test_fragment_is_a_dataclass_with_declared_fields(fx_store):
                       "snippet", "char_start", "char_end", "score", "kind"}
 
 
+def test_text_query_falls_back_to_or_and_is_penalized(fx_store):
+    # Fix round 1: разговорный «рисунок 12» обязан найти лист с «Рис. 12»
+    # (AND по токенам не проходит — спасает OR с пониженным баллом).
+    from pdfprepare.normalize import normalize_for_search
+
+    text = "СХЕМА МОНТАЖА. СМ. РИС. 12"
+    fx_store.upsert_page("РТЭ кн.1.pdf", 77, "Ми-8МТВ",
+                         "023.00.00", "023.11.30", text,
+                         normalize_for_search(text))
+    hits = search(fx_store, "рисунок 12")
+    assert hits and hits[0].page == 77 and hits[0].kind == "text"
+    assert 0.0 < hits[0].score <= 0.8           # балл OR-ветки урезан множителем
+    assert text[hits[0].char_start:hits[0].char_end] == hits[0].snippet
+    # неизвестная тема обязана оставаться пустой и после OR-ретрай
+    assert search(fx_store, "совершенно отсутствующая тема") == []
+
+
 def test_whitespace_query_returns_nothing(fx_store):
     assert search(fx_store, "   ") == []

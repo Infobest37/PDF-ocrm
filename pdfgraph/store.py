@@ -164,6 +164,109 @@ class Store:
         ).fetchone()
         return row[0] if row is not None else ""
 
+    def find_node_id(self, kind: str, key: str) -> int | None:
+        """Return the ID of the (kind, key) node, or None when it is absent.
+
+        Read-only probe used to resolve references without creating a node.
+        """
+        row = self._connection.execute(
+            "SELECT id FROM nodes WHERE kind = ? AND key = ?", (kind, key)
+        ).fetchone()
+        return row[0] if row is not None else None
+
+    def has_node(self, kind: str, key: str) -> bool:
+        """Return True when a node of this kind and key exists."""
+        return self.find_node_id(kind, key) is not None
+
+    def sheets_by_code(
+        self,
+        code: str,
+        aircraft_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[tuple[str, int, str, str]]:
+        """Sheets whose stored system_code or subsystem_code equals ``code``.
+
+        Returns tuples ``(document, page, system_code, subsystem_code)``,
+        ordered by document then page. ``aircraft_type`` (when given) keeps
+        only sheets of that aircraft type; ``limit`` caps the row count.
+        """
+        sql = (
+            "SELECT document, page, system_code, subsystem_code FROM pages "
+            "WHERE (system_code = ? OR subsystem_code = ?)"
+        )
+        args: list[object] = [code, code]
+        if aircraft_type is not None:
+            sql += " AND aircraft_type = ?"
+            args.append(aircraft_type)
+        sql += " ORDER BY document, page"
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(limit)
+        return self._connection.execute(sql, args).fetchall()
+
+    def sheets_with_part(
+        self,
+        part_key: str,
+        aircraft_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[tuple[str, int, str, str]]:
+        """Sheets carrying a ``has_part`` edge to the part node with this key.
+
+        Same tuple, ordering and filtering semantics as :meth:`sheets_by_code`;
+        results are deduplicated per sheet and joined against ``pages`` for
+        the code columns.
+        """
+        sql = (
+            "SELECT pg.document, pg.page, pg.system_code, pg.subsystem_code "
+            "FROM edges e "
+            "JOIN nodes dst ON dst.id = e.dst "
+            "AND dst.kind = 'part' AND dst.key = ? "
+            "JOIN pages pg ON pg.document = e.document AND pg.page = e.page "
+            "WHERE e.kind = 'has_part'"
+        )
+        args: list[object] = [part_key]
+        if aircraft_type is not None:
+            sql += " AND pg.aircraft_type = ?"
+            args.append(aircraft_type)
+        sql += " GROUP BY pg.document, pg.page ORDER BY pg.document, pg.page"
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(limit)
+        return self._connection.execute(sql, args).fetchall()
+
+    def search_pages(
+        self,
+        match_expr: str,
+        aircraft_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[tuple[str, int, str, str, float]]:
+        """FTS5 search over the stored (already normalized) page bodies.
+
+        ``match_expr`` is a ready FTS5 MATCH expression — building and
+        escaping it is the caller's job. Returns tuples
+        ``(document, page, system_code, subsystem_code, bm25)``, best rank
+        first (bm25 is negative; smaller means better). The FTS table keeps
+        page as a string, so rows are matched back to ``pages`` through
+        ``CAST(pages_fts.page AS INTEGER)``.
+        """
+        sql = (
+            "SELECT pg.document, pg.page, pg.system_code, pg.subsystem_code, "
+            "bm25(pages_fts) AS rank "
+            "FROM pages_fts "
+            "JOIN pages pg ON pg.document = pages_fts.document "
+            "AND pg.page = CAST(pages_fts.page AS INTEGER) "
+            "WHERE pages_fts MATCH ?"
+        )
+        args: list[object] = [match_expr]
+        if aircraft_type is not None:
+            sql += " AND pg.aircraft_type = ?"
+            args.append(aircraft_type)
+        sql += " ORDER BY rank"
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(limit)
+        return self._connection.execute(sql, args).fetchall()
+
     def stats(self) -> dict[str, int]:
         """Return counts of graph records and selected node types."""
         nodes = self._connection.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]

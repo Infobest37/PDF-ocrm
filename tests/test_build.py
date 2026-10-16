@@ -105,13 +105,67 @@ def test_build_skips_blank_cells_in_tables(tmp_path):
         subsystem_code="",
         full_text="023.00.00",
         words=[],
-        tables=[Table(1, (0, 0, 10, 10), [["", "  ", "ПАРМ-406А"]])],
+        tables=[Table(1, (0, 0, 10, 10), [["", "  ", "8МТ.6101.100"]])],
     )
     store = Store(str(tmp_path / "g.db"))
     build([DocResult("d.pdf", 1, [page], {})], "Ми-8МТВ", {}, store)
     parts = {row[0] for row in _rows(store, "SELECT key FROM nodes WHERE kind = 'part'")}
-    # пустые ячейки не создают узлов; содержательная — создаёт
-    assert parts == {"ПАРМ-406А"}
+    # пустые ячейки не создают узлов; обозначение с буквами и точкой — создаёт
+    assert parts == {"8МТ.6101.100"}
+    store.close()
+
+
+def test_part_cells_require_letter_dot_and_min_length(tmp_path):
+    # Правило fix round 1: ячейка даёт part только если ключ normalize_part_number
+    # содержит букву (кириллицу/латиницу) И точку, и длина ключа >= 6.
+    from pdfprepare.models import DocResult, PageInfo, Table
+    from pdfgraph.build import build
+    from pdfgraph.store import Store
+
+    page = PageInfo(
+        page_index=1,
+        is_native_text=False,
+        is_blank=False,
+        system_code="023.00.00",
+        subsystem_code="",
+        full_text="023.00.00",
+        words=[],
+        tables=[Table(1, (0, 0, 10, 10), [["8МТ.6101.100", "1.", "3"]])],
+    )
+    store = Store(str(tmp_path / "g.db"))
+    build([DocResult("d.pdf", 1, [page], {})], "Ми-8МТВ", {}, store)
+    parts = {row[0] for row in _rows(store, "SELECT key FROM nodes WHERE kind = 'part'")}
+    assert parts == {"8МТ.6101.100"}        # «1.» и «3» — служебные ячейки, не детали
+    edges = _rows(store, "SELECT COUNT(*) FROM edges WHERE kind = 'has_part'")[0][0]
+    assert edges == 1
+    store.close()
+
+
+def test_part_filter_edges(tmp_path):
+    from pdfprepare.models import DocResult, PageInfo, Table
+    from pdfgraph.build import build
+    from pdfgraph.store import Store
+
+    page = PageInfo(
+        page_index=2,
+        is_native_text=False,
+        is_blank=False,
+        system_code="023.00.00",
+        subsystem_code="",
+        full_text="023.00.00",
+        words=[],
+        tables=[Table(2, (0, 0, 10, 10), [
+            ["МИ-8.100-01"],   # буквы + точка + длина>=6 — деталь
+            ["869309"],        # без точки — мимо
+            ["РИС."],          # короткое (<6) — мимо
+            ["12345678."],     # без букв — мимо
+            ["8MTB.7226.000"], # латиница тоже подходит
+        ])],
+    )
+    store = Store(str(tmp_path / "g.db"))
+    build([DocResult("d.pdf", 1, [page], {})], "Ми-8МТВ", {}, store)
+    parts = {row[0] for row in _rows(store, "SELECT key FROM nodes WHERE kind = 'part'")}
+    assert parts == {"МИ-8.100-01", "8MTB.7226.000"}
     store.close()
 
 

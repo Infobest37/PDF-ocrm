@@ -16,6 +16,7 @@ evidence strings (raw cell, raw reference clause, caption) travel on edges.
 """
 
 import os
+import re
 
 from pdfprepare.codes import normalize_code, system_of
 from pdfprepare.models import DocResult
@@ -24,6 +25,29 @@ from pdfgraph.store import Store
 
 #: Longest page-text-derived label kept for codes missing from the registry.
 _MAX_LABEL_CHARS = 120
+
+#: Shortest normalized cell key accepted as a part designation (fix round 1:
+#: bare ordinals/quantities like ``1.`` or ``3`` are table noise, not parts).
+_PART_MIN_KEY_LEN = 6
+
+#: At least one Cyrillic or Latin letter; keys are upper-cased by the
+#: normalizer, both cases are listed for robustness.
+_PART_LETTER_RE = re.compile(r"[A-Za-zА-Яа-яЁё]")
+
+
+def _is_part_designation(key: str) -> bool:
+    """Whether a normalized table cell qualifies as a part designation.
+
+    Agreed rule (fix round 1): the ``normalize_part_number`` key must contain
+    at least one Cyrillic or Latin letter, at least one dot, and be at least
+    6 characters long. Everything else — empty cells, pure digits, ordinals,
+    quantities, letterless codes — is skipped silently; nothing is guessed.
+    """
+    return (
+        len(key) >= _PART_MIN_KEY_LEN
+        and "." in key
+        and _PART_LETTER_RE.search(key) is not None
+    )
 
 
 def _document_key(source_path: str) -> str:
@@ -55,14 +79,6 @@ def _system_label(code: str, registry: dict[str, str], names: dict[str, str],
     return ""
 
 
-def _node_id_if_exists(store: Store, kind: str, key: str) -> int | None:
-    """Read-only existence probe for a (kind, key) node."""
-    row = store._connection.execute(
-        "SELECT id FROM nodes WHERE kind = ? AND key = ?", (kind, key)
-    ).fetchone()
-    return row[0] if row else None
-
-
 def build(
     results: list[DocResult],
     aircraft_type: str,
@@ -74,7 +90,8 @@ def build(
     Creates the aircraft-type node, the systems/subsystems actually met in the
     pages (labelled from ``registry``, else ``DocResult.system_names``, else a
     page-text line for unnamed third-level codes), one document node, one sheet
-    node per page, part nodes from table cells and figure nodes, plus edges.
+    node per page, part nodes from table cells that pass the designation
+    filter (:func:`_is_part_designation`), figure nodes, plus edges.
     Cross-references are resolved in a second pass, so a forward reference to a
     figure that appears later in the same document still resolves; missing
     targets become ``pending_reference`` nodes keyed ``system:<код>`` /
@@ -150,8 +167,8 @@ def build(
                 for row in table.rows:
                     for cell in row:
                         part_key = normalize_part_number(cell)
-                        if not part_key:
-                            continue  # empty cell — nothing is guessed
+                        if not _is_part_designation(part_key):
+                            continue  # empty or non-designation cell, skipped
                         part_id = store.add_node("part", part_key)
                         store.add_edge(sheet_id, part_id, "has_part",
                                        detail=cell,
@@ -167,9 +184,9 @@ def build(
                     target = normalize_code(ref.target)
                     if not target:
                         continue
-                    dst = _node_id_if_exists(store, "subsystem", target)
+                    dst = store.find_node_id("subsystem", target)
                     if dst is None:
-                        dst = _node_id_if_exists(store, "system", target)
+                        dst = store.find_node_id("system", target)
                     if dst is None:
                         dst = store.add_node(
                             "pending_reference", f"system:{target}", label=target,
@@ -181,7 +198,7 @@ def build(
                     number = ref.target.strip()
                     if not number:
                         continue
-                    dst = _node_id_if_exists(store, "figure", f"{doc_key}:{number}")
+                    dst = store.find_node_id("figure", f"{doc_key}:{number}")
                     if dst is None:
                         dst = store.add_node(
                             "pending_reference", f"figure:{doc_key}:{number}",

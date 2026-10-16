@@ -9,8 +9,10 @@ Three deterministic branches, tried in order:
    matches an existing ``part`` node returns the sheets whose tables carry it
    (``kind="part"``, ``score=1.0``).
 3. **Free text** — FTS5 ``MATCH`` over the stored search text with ``bm25()``
-   ranking, ``score = 1 / (1 + |bm25|)`` (``kind="text"``). Unknown topic →
-   no hits.
+   ranking, ``score = 1 / (1 + |bm25|)`` (``kind="text"``). The query is first
+   tried as all-tokens AND; when nothing matches, a tolerant OR retry runs
+   with the score multiplied by ``OR_PENALTY``. A topic absent from the index
+   returns no hits.
 
 Snippet honesty (anti-goal "не искажать документ"): ``Fragment.snippet`` is
 always a verbatim slice of the ORIGINAL stored page text —
@@ -30,6 +32,8 @@ from pdfgraph.store import Store
 SNIPPET_CHARS = 200
 #: Preferred number of original-text characters kept before the match.
 SNIPPET_LEAD = 60
+#: Score multiplier for the tolerant OR retry of the text branch (fix round 1).
+OR_PENALTY = 0.8
 
 
 @dataclass
@@ -122,10 +126,9 @@ def _fragment(store: Store, document: str, page: int, system_code: str,
     )
 
 
-def _node_exists(store: Store, kind: str, key: str) -> bool:
-    return store._connection.execute(
-        "SELECT 1 FROM nodes WHERE kind = ? AND key = ?", (kind, key)
-    ).fetchone() is not None
+def _fts_expr(tokens: list[str], joiner: str) -> str:
+    """Join search tokens into an FTS5 MATCH expression of quoted phrases."""
+    return joiner.join('"{}"'.format(token.replace('"', '""')) for token in tokens)
 
 
 def search(
@@ -137,8 +140,10 @@ def search(
     """Return ranked fragments for ``query`` across the graph.
 
     Branches: normalized code → sheets of that code; existing part-number key
-    → sheets carrying that part; otherwise FTS5/BM25. ``aircraft_type``
-    restricts hits to pages of that type. An unknown topic returns ``[]``.
+    → sheets carrying that part; otherwise FTS5/BM25 over the whole query
+    (all tokens, AND) and — when nothing matches — a tolerant OR retry with
+    the score multiplied by :data:`OR_PENALTY`. ``aircraft_type`` restricts
+    hits to pages of that type. A topic absent from the index returns ``[]``.
     """
     stripped = query.strip()
     if not stripped:
@@ -149,7 +154,7 @@ def search(
         return _by_code(store, code, aircraft_type, limit)
 
     part_key = normalize_part_number(stripped)
-    if part_key and _node_exists(store, "part", part_key):
+    if part_key and store.has_node("part", part_key):
         return _by_part(store, part_key, aircraft_type, limit)
 
     needle = normalize_for_search(stripped)
@@ -160,69 +165,38 @@ def search(
 
 def _by_code(store: Store, code: str, aircraft_type: str | None,
              limit: int) -> list[Fragment]:
-    sql = (
-        "SELECT document, page, system_code, subsystem_code FROM pages "
-        "WHERE (system_code = ? OR subsystem_code = ?)"
-    )
-    args: list = [code, code]
-    if aircraft_type is not None:
-        sql += " AND aircraft_type = ?"
-        args.append(aircraft_type)
-    sql += " ORDER BY document, page LIMIT ?"
-    args.append(limit)
-    rows = store._connection.execute(sql, args).fetchall()
+    needle = normalize_for_search(code)
     return [
         _fragment(store, document, page, system_code, subsystem_code,
-                  1.0, "code", normalize_for_search(code))
-        for document, page, system_code, subsystem_code in rows
+                  1.0, "code", needle)
+        for document, page, system_code, subsystem_code
+        in store.sheets_by_code(code, aircraft_type, limit)
     ]
 
 
 def _by_part(store: Store, part_key: str, aircraft_type: str | None,
              limit: int) -> list[Fragment]:
-    sql = (
-        "SELECT pg.document, pg.page, pg.system_code, pg.subsystem_code "
-        "FROM edges e "
-        "JOIN nodes dst ON dst.id = e.dst AND dst.kind = 'part' AND dst.key = ? "
-        "JOIN pages pg ON pg.document = e.document AND pg.page = e.page "
-        "WHERE e.kind = 'has_part'"
-    )
-    args: list = [part_key]
-    if aircraft_type is not None:
-        sql += " AND pg.aircraft_type = ?"
-        args.append(aircraft_type)
-    sql += " GROUP BY pg.document, pg.page ORDER BY pg.document, pg.page LIMIT ?"
-    args.append(limit)
-    rows = store._connection.execute(sql, args).fetchall()
+    needle = normalize_for_search(part_key)
     return [
         _fragment(store, document, page, system_code, subsystem_code,
-                  1.0, "part", normalize_for_search(part_key))
-        for document, page, system_code, subsystem_code in rows
+                  1.0, "part", needle)
+        for document, page, system_code, subsystem_code
+        in store.sheets_with_part(part_key, aircraft_type, limit)
     ]
 
 
 def _by_fts(store: Store, needle: str, aircraft_type: str | None,
             limit: int) -> list[Fragment]:
-    match_expr = " AND ".join(
-        '"{}"'.format(token.replace('"', '""')) for token in needle.split()
-    )
-    sql = (
-        "SELECT pg.document, pg.page, pg.system_code, pg.subsystem_code, "
-        "bm25(pages_fts) AS rank "
-        "FROM pages_fts "
-        "JOIN pages pg ON pg.document = pages_fts.document "
-        "AND pg.page = CAST(pages_fts.page AS INTEGER) "
-        "WHERE pages_fts MATCH ?"
-    )
-    args: list = [match_expr]
-    if aircraft_type is not None:
-        sql += " AND pg.aircraft_type = ?"
-        args.append(aircraft_type)
-    sql += " ORDER BY rank LIMIT ?"
-    args.append(limit)
-    rows = store._connection.execute(sql, args).fetchall()
+    tokens = needle.split()
+    rows = store.search_pages(_fts_expr(tokens, " AND "), aircraft_type, limit)
+    penalty = 1.0
+    if not rows:
+        # Tolerant retry (fix round 3): a conversational query ("рисунок 12")
+        # must still find documents phrased differently ("Рис. 12").
+        rows = store.search_pages(_fts_expr(tokens, " OR "), aircraft_type, limit)
+        penalty = OR_PENALTY
     return [
         _fragment(store, document, page, system_code, subsystem_code,
-                  1.0 / (1.0 + abs(rank)), "text", needle)
+                  penalty / (1.0 + abs(rank)), "text", needle)
         for document, page, system_code, subsystem_code, rank in rows
     ]
