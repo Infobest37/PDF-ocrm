@@ -12,7 +12,10 @@ The «Проверено» cell is a stamp mark in a fixed cell: filled pine squ
 means verified, hollow graphite square means not.
 """
 
+import argparse
 import os
+import sqlite3
+import sys
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -141,10 +144,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
         SQLite would otherwise create an empty database silently and the
         window would show a misleading refusal, so an absent file is reported
-        by callers as a calm message and nothing is created.
+        by callers as a calm message and nothing is created. A file that
+        exists but is not a readable database (corrupt store) takes the very
+        same calm path: the window never crashes on a broken graph file.
         """
         if self._store is None and os.path.isfile(self.store_path):
-            self._store = Store(self.store_path)
+            try:
+                self._store = Store(self.store_path)
+            except sqlite3.Error:
+                return False
         return self._store is not None
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # noqa: N802
@@ -362,3 +370,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.verdict_label.setProperty("plate", kind)
         self.verdict_label.style().unpolish(self.verdict_label)
         self.verdict_label.style().polish(self.verdict_label)
+
+
+def main(argv=None) -> int:
+    """Entry point of the windowed ``pdfgraph.exe``: show the graph window.
+
+    An absent or broken store file is not fatal: :class:`MainWindow` keeps
+    the calm "store not found" verdict path, so the window always opens and
+    explains itself. Returns the Qt event-loop code (0 after the window is
+    closed).
+    """
+    parser = argparse.ArgumentParser(
+        prog="pdfgraph",
+        description="Оконный интерфейс графа знаний Ми-8МТВ: вопрос — "
+                    "ответ с проверенными цитатами.",
+    )
+    parser.add_argument(
+        "--store", default="graph.db", metavar="PATH",
+        help="SQLite graph file produced by 'pdfgraph build' "
+             "(default: graph.db in the current directory).")
+    parser.add_argument(
+        "--registry", default="Коды систем Вертолета.txt", metavar="PATH",
+        help="ATA-100 code registry file (reserved for navigation).")
+    args = parser.parse_args(argv)
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(args.store, args.registry)
+    window.show()
+    return int(app.exec_())
+
+
+if __name__ == "__main__":
+    sys.exit(main())

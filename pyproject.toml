@@ -10,4 +10,13 @@ dependencies = [
     "numpy",
     "opencv-python-headless",
     "pytest",
+    # pdfgraph.gui (task 3.2/3.3): the windowed knowledge-graph UI.
+    "pyqt5",
+]
+
+[project.optional-dependencies]
+# Packaging (task 3.3): python -m PyInstaller pdfgraph.spec builds the
+# portable dist/pdfgraph/ folder with pdfgraph.exe + pdfgraph-cli.exe.
+build = [
+    "pyinstaller>=6.0",
 ]
