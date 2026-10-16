@@ -45,6 +45,11 @@ _SNIPPET_HINT = "Фрагмент подтверждённого ответа п
 #: calmly (no plate, no red) — SQLite would otherwise create an empty base.
 _MISSING_STORE_TEXT = ("Хранилище не найдено: файл графа отсутствует — "
                        "сначала постройте граф (pdfgraph build)")
+#: Same calm treatment for a file that opens but breaks on the first query
+#: (corrupted data pages): neutral plate, recovery named, no crash (fix
+#: round 1 of the task 3.3 review).
+_CORRUPT_STORE_TEXT = ("Хранилище повреждено: файл графа не читается — "
+                       "пересоздайте граф (pdfgraph build)")
 
 
 class _VerifiedDelegate(QtWidgets.QStyledItemDelegate):
@@ -161,6 +166,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self._store = None
         super().closeEvent(event)
 
+    def _drop_store(self) -> None:
+        """Forget the current store connection (after a query-level failure).
+
+        Corruption of the data pages is only discovered when a query reads
+        them; the half-broken connection must not be reused. The next
+        question reopens from scratch (and reports calmly if still broken).
+        """
+        if self._store is not None:
+            try:
+                self._store.close()
+            except sqlite3.Error:
+                pass
+            self._store = None
+
+    def _show_store_note(self, text: str) -> None:
+        """Calm store-problem verdict: no rows, empty panel, neutral plate."""
+        self._rows = []
+        self._fill_table([])
+        self._set_snippet("")
+        self._set_verdict_plate("none")
+        self.verdict_label.setText(text)
+
     # -- widgets ------------------------------------------------------------
 
     def _build_central(self) -> None:
@@ -254,15 +281,18 @@ class MainWindow(QtWidgets.QMainWindow):
         is returned for tests and callers, UI updates happen as a side effect.
         """
         if not self._open_store():
-            self._rows = []
-            self._fill_table([])
-            self._set_snippet("")
-            self._set_verdict_plate("none")
-            self.verdict_label.setText(_MISSING_STORE_TEXT)
+            self._show_store_note(_MISSING_STORE_TEXT)
             return []
         assert self._store is not None
-        answer = build_answer(self._store, question)
-        checks = verify_citations(answer, self._store)
+        try:
+            answer = build_answer(self._store, question)
+            checks = verify_citations(answer, self._store)
+        except sqlite3.Error:
+            # The file opened but a query hit broken data pages: same calm
+            # treatment as an absent store, never an unhandled exception.
+            self._drop_store()
+            self._show_store_note(_CORRUPT_STORE_TEXT)
+            return []
         rows = answer_rows(answer, checks)
 
         self._rows = rows
@@ -278,14 +308,23 @@ class MainWindow(QtWidgets.QMainWindow):
         return rows
 
     def open_sheet(self, document: str, page: int) -> None:
-        """Show the stored text of one sheet; missing sheets/stores stay calm."""
+        """Show the stored text of one sheet; missing/broken stores stay calm."""
         if not self._open_store():
             body = _MISSING_STORE_TEXT
         else:
             assert self._store is not None
-            missing = not self._store.has_node("sheet", f"{document}:{page}")
-            text = self._store.page_text(document, page)
-            body = text if (text and text.strip()) else self._blank_sheet_note(document, page, missing)
+            try:
+                missing = not self._store.has_node("sheet", f"{document}:{page}")
+                text = self._store.page_text(document, page)
+            except sqlite3.Error:
+                # Corrupted data pages surface only on the read (fix round 1).
+                self._drop_store()
+                body = _CORRUPT_STORE_TEXT
+            else:
+                if text and text.strip():
+                    body = text
+                else:
+                    body = self._blank_sheet_note(document, page, missing)
 
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle(f"Лист {page} — {document}")
@@ -376,9 +415,9 @@ def main(argv=None) -> int:
     """Entry point of the windowed ``pdfgraph.exe``: show the graph window.
 
     An absent or broken store file is not fatal: :class:`MainWindow` keeps
-    the calm "store not found" verdict path, so the window always opens and
-    explains itself. Returns the Qt event-loop code (0 after the window is
-    closed).
+    the calm verdict paths ("store not found" / "store corrupted"), so the
+    window always opens and explains itself. Returns the Qt event-loop code
+    (0 after the window is closed).
     """
     parser = argparse.ArgumentParser(
         prog="pdfgraph",

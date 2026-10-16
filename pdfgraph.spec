@@ -6,8 +6,9 @@ Build from the repository root with:
     <venv>/Scripts/python.exe -m PyInstaller pdfgraph.spec
 
 which produces one portable folder ``dist/pdfgraph/`` carrying two
-executables over one shared ``_internal`` payload (interpreter, PyQt5,
-PyMuPDF, OpenCV, Tesseract + rus/eng tessdata):
+executables over one shared ``_internal`` payload (interpreter, SQLite,
+PyQt5, PyMuPDF, Pillow/numpy, Tesseract + rus/eng tessdata; OpenCV is not
+inside — the pdfgraph entry chain never imports ``cv2``/``pytesseract``):
 
 * ``pdfgraph.exe``    — windowed UI (``pdfgraph/gui/app.py``:main, console=False,
   double-click launch);
