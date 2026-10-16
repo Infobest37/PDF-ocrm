@@ -9,6 +9,47 @@ def test_code_query_returns_every_sheet_of_that_code(fx_store):
     assert {h.page for h in hits} == {47, 48}          # оба листа подсистемы
 
 
+def test_code_query_is_not_truncated_by_default_limit(tmp_path):
+    from pdfgraph.store import Store
+    from pdfprepare.normalize import normalize_for_search
+
+    store = Store(str(tmp_path / "many-code-sheets.db"))
+    try:
+        for page in range(12):
+            text = f"Лист {page}"
+            store.upsert_page(
+                "manual.pdf", page, "Ми-8МТВ", "023.00.00", "023.11.30",
+                text, normalize_for_search(text),
+            )
+        assert len(search(store, "023.11.30")) == 12
+        assert len(search(store, "023.11.30", limit=1)) == 12
+    finally:
+        store.close()
+
+
+def test_part_query_is_not_truncated_by_default_limit(tmp_path):
+    from pdfgraph.store import Store
+    from pdfprepare.normalize import normalize_for_search
+
+    store = Store(str(tmp_path / "many-part-sheets.db"))
+    try:
+        part_id = store.add_node("part", "8МТ.6101.100")
+        for page in range(12):
+            text = f"Лист {page}"
+            store.upsert_page(
+                "manual.pdf", page, "Ми-8МТВ", "023.00.00", "023.11.30",
+                text, normalize_for_search(text),
+            )
+            sheet_id = store.add_node(
+                "sheet", f"manual.pdf:{page}", document="manual.pdf", page=page,
+            )
+            store.add_edge(sheet_id, part_id, "has_part", document="manual.pdf", page=page)
+        assert len(search(store, "8МТ.6101.100")) == 12
+        assert len(search(store, "8МТ.6101.100", limit=1)) == 12
+    finally:
+        store.close()
+
+
 def test_part_number_query_hits_table_sheet(fx_store):
     hits = search(fx_store, "8МТ.6101.100")
     assert hits[0].kind == "part" and hits[0].page == 47

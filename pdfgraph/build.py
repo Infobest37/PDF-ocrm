@@ -67,10 +67,17 @@ def _looks_like_part_number(key: str) -> bool:
     )
 
 
-def _document_key(source_path: str) -> str:
-    """Stable per-document key: the file name, independent of the folder it
-    was prepared in (keeps the graph identical across machines)."""
-    return os.path.basename(source_path)
+def _document_key(source_path: str, root: str | None = None) -> str:
+    """Document key relative to ``root``, or basename for legacy callers.
+
+    Relative POSIX paths retain identity when different subfolders contain
+    same-named PDFs while remaining portable across Windows and POSIX.
+    """
+    if root is None:
+        return os.path.basename(source_path)
+    return os.path.relpath(
+        os.path.abspath(source_path), os.path.abspath(root)
+    ).replace(os.sep, "/")
 
 
 def _label_from_page_text(text: str, code: str) -> str:
@@ -101,8 +108,12 @@ def build(
     aircraft_type: str,
     registry: dict[str, str],
     store: Store,
+    root: str | None = None,
 ) -> dict[str, int]:
     """Fill ``store`` with the graph described by ``results``; return stats.
+
+    When ``root`` is supplied, document keys are POSIX-normalized paths relative
+    to it; otherwise direct callers retain the legacy basename key.
 
     Creates the aircraft-type node, the systems/subsystems actually met in the
     pages (labelled from ``registry``, else ``DocResult.system_names``, else a
@@ -122,7 +133,7 @@ def build(
     # Pass 1 — structural nodes/edges; remember sheets for reference linking.
     sheets: dict[tuple[str, int], int] = {}
     for result in results:
-        doc_key = _document_key(result.source_path)
+        doc_key = _document_key(result.source_path, root)
         doc_id = store.add_node("document", doc_key, label=doc_key)
         for page in result.pages:
             system_code = normalize_code(page.system_code)
@@ -181,8 +192,12 @@ def build(
                                document=doc_key, page=page.page_index)
 
             for table in page.tables:
-                for row in table.rows:
-                    for cell in row:
+                for row_index, row in enumerate(table.rows):
+                    for cell_index, cell in enumerate(row):
+                        if (row_index < len(table.ambiguous)
+                                and cell_index < len(table.ambiguous[row_index])
+                                and table.ambiguous[row_index][cell_index]):
+                            continue
                         part_key = normalize_part_number(cell)
                         if not _looks_like_part_number(part_key):
                             continue  # not a designation — silently skipped
@@ -193,7 +208,7 @@ def build(
 
     # Pass 2 — references (all structural nodes exist by now).
     for result in results:
-        doc_key = _document_key(result.source_path)
+        doc_key = _document_key(result.source_path, root)
         for page in result.pages:
             sheet_id = sheets[(doc_key, page.page_index)]
             for ref in page.references:

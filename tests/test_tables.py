@@ -29,6 +29,19 @@ def test_detect_and_extract_three_by_three():
     assert len(tables) == 1 and len(tables[0].rows) == 3
     assert tables[0].page_index == 7
     assert tables[0].rows[1][1] == "8МТ.6101.100"
+    assert tables[0].ambiguous[1][1] is False
+
+
+def test_low_confidence_cell_is_blank_and_marked_ambiguous():
+    from pdfprepare.models import Word
+    from pdfprepare.tables import extract_tables
+
+    img = _grid_image(3, 2, {})
+    words = [Word("8МТ.6101.100", 220, 220, 400, 240, 0.3)]
+    table = extract_tables(img, words, page_index=0)[0]
+
+    assert table.rows[1][1] == ""
+    assert table.ambiguous[1][1] is True
 
 
 def test_empty_cell_is_not_guessed():

@@ -80,7 +80,8 @@ def _load_registry(path: str | None) -> dict[str, str]:
 
 
 def _mark_defects(store: Store,
-                  entries: list[tuple[str, DocResult]]) -> int:
+                  entries: list[tuple[str, DocResult]],
+                  root: str | None = None) -> int:
     """Mark re-scan sheets from the pipeline reports that lie next to JSONs.
 
     ``entries`` pairs ``(json_path, DocResult)``. For every ``<stem>.json``
@@ -104,7 +105,7 @@ def _mark_defects(store: Store,
             print(f"warning: cannot read report {report!r}: {exc}",
                   file=sys.stderr)
             continue
-        document = _document_key(result.source_path)
+        document = _document_key(result.source_path, root)
         for line in lines:
             match = _REPORT_LINE_RE.match(line.strip())
             if match:
@@ -125,7 +126,21 @@ def _cmd_build(args: argparse.Namespace) -> int:
     results = []
     for path in paths:
         try:
-            results.append(read_result(path))
+            result = read_result(path)
+            # The JSON's position in the recursively searched prepared tree is
+            # the stable identity; the source PDF may live elsewhere or share
+            # its basename with another input. Its matching prepared PDF has
+            # the same relative path with a .pdf suffix.
+            relative_pdf = os.path.splitext(os.path.relpath(
+                path, args.prepared_dir
+            ))[0]
+            if not relative_pdf.lower().endswith(".pdf"):
+                relative_pdf += ".pdf"
+            result = dataclasses.replace(
+                result,
+                source_path=os.path.join(args.prepared_dir, relative_pdf),
+            )
+            results.append(result)
         except (OSError, ValueError) as exc:  # JSONDecodeError ⊂ ValueError
             print(f"error: cannot read {path!r}: {exc}", file=sys.stderr)
             return 2
@@ -134,8 +149,10 @@ def _cmd_build(args: argparse.Namespace) -> int:
     if store is None:
         return 2
     try:
-        stats = build(results, args.aircraft_type, registry, store)
-        defects = _mark_defects(store, list(zip(paths, results)))
+        stats = build(results, args.aircraft_type, registry, store,
+                      root=args.prepared_dir)
+        defects = _mark_defects(store, list(zip(paths, results)),
+                                root=args.prepared_dir)
     finally:
         store.close()
 

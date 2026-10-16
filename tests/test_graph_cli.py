@@ -19,6 +19,55 @@ def test_cli_build_then_ask_json(fx_prepared_dir, tmp_path):
     # вывод перехватывается capsys; проверяем форму и вердикт
     assert rc == 0
 
+
+def test_cli_keeps_same_named_documents_in_distinct_subfolders(tmp_path):
+    from pdfgraph.cli import main
+    from pdfgraph.store import Store
+    from pdfprepare.models import DocResult, PageInfo
+    from pdfprepare.output import write_json
+    from pdfgraph.query import search
+    from pdfgraph.verify import verify_citations
+
+    prepared = tmp_path / "prepared"
+    results = [
+        ("left", "Левый оригинальный текст"),
+        ("right", "Правый оригинальный текст"),
+    ]
+    for folder, text in results:
+        out = prepared / folder
+        out.mkdir(parents=True)
+        result = DocResult(
+            source_path="techcard.pdf", page_count=1,
+            pages=[PageInfo(
+                page_index=0, is_native_text=True, is_blank=False,
+                system_code="023.00.00", subsystem_code="023.11.30",
+                full_text=text, words=[],
+            )],
+            system_names={},
+        )
+        write_json(result, str(out / "techcard.json"))
+
+    store_path = str(tmp_path / "graph.db")
+    assert main(["build", str(prepared), store_path, "--type", "Ми-8МТВ"]) == 0
+    store = Store(store_path)
+    try:
+        docs = {row[0] for row in store._connection.execute(
+            "SELECT key FROM nodes WHERE kind = 'document'"
+        )}
+        assert docs == {"left/techcard.pdf", "right/techcard.pdf"}
+        hits = search(store, "023.11.30")
+        assert {(hit.document, hit.page) for hit in hits} == {
+            ("left/techcard.pdf", 0), ("right/techcard.pdf", 0),
+        }
+        assert store.page_text("left/techcard.pdf", 0) == "Левый оригинальный текст"
+        assert store.page_text("right/techcard.pdf", 0) == "Правый оригинальный текст"
+        assert all(check.ok for check in verify_citations(
+            __import__("pdfgraph.answer", fromlist=["build_answer"]).build_answer(
+                store, "023.11.30"), store,
+        ))
+    finally:
+        store.close()
+
 def test_cli_ask_unknown_topic_refuses(fx_prepared_dir, tmp_path, capsys):
     from pdfgraph.cli import main
     store = str(tmp_path / "g.db")

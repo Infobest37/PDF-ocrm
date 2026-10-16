@@ -285,6 +285,8 @@ def graph_corpus(tmp_path_factory):
     docs_dir.mkdir()
     prepared_dir = base / "prepared"
     prepared_dir.mkdir()
+    prepared_docs_dir = prepared_dir / "docs"
+    prepared_docs_dir.mkdir()
     fontfile = resolve_font(None)
     registry_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -297,7 +299,7 @@ def graph_corpus(tmp_path_factory):
                  [[(60, 90, 26, GC_SYSTEM_CODE)]], fontfile)
 
     for name in GC_DOCS:
-        process_file(str(docs_dir / name), str(prepared_dir), registry)
+        process_file(str(docs_dir / name), str(prepared_docs_dir), registry)
 
     store_path = str(base / "graph.db")
     assert graph_main(["build", str(prepared_dir), store_path,

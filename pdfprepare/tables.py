@@ -18,6 +18,10 @@ from pdfprepare.models import Table, Word
 
 _HORIZONTAL_KERNEL = (60, 1)
 _VERTICAL_KERNEL = (1, 60)
+# Tesseract confidence is normalized to [0, 1]. Below 0.5 even one token makes
+# a cell unsafe to use as a designation, so we retain the uncertainty flag but
+# do not guess a possibly consequential part number.
+MIN_CELL_CONF = 0.5
 
 
 def _line_masks(img: Image.Image) -> tuple[np.ndarray, np.ndarray]:
@@ -92,9 +96,11 @@ def detect_table_bzones(img: Image.Image) -> list[tuple[float, float, float, flo
 def extract_tables(img: Image.Image, words: list[Word], page_index: int) -> list[Table]:
     """Detect grids and return their cells populated from OCR ``words``.
 
-    A word is assigned by its box center. Words in a cell are joined with one
-    space in left-to-right order; cells without words remain exactly ``""``.
-    Input word boxes and returned table boxes use pixel coordinates of ``img``.
+    A word is assigned by its box center. Words in a clear cell are joined with
+    one space in left-to-right order; a cell containing any word below
+    :data:`MIN_CELL_CONF` is left empty and marked ambiguous instead of guessed.
+    Cells without words remain exactly ``""`` and are not ambiguous. Input
+    word boxes and returned table boxes use pixel coordinates of ``img``.
     """
     horizontal, vertical = _line_masks(img)
     boxes = detect_table_bboxes(img)
@@ -122,13 +128,24 @@ def extract_tables(img: Image.Image, words: list[Word], page_index: int) -> list
             if 0 <= row < row_count and 0 <= col < col_count:
                 cells[row][col].append(word)
 
-        rows = [
-            [
-                " ".join(word.text for word in sorted(cell, key=lambda item: (item.x0, item.y0)))
-                for cell in row
-            ]
-            for row in cells
-        ]
-        tables.append(Table(page_index=page_index, bbox=box, rows=rows))
+        rows: list[list[str]] = []
+        ambiguous: list[list[bool]] = []
+        for row in cells:
+            text_row = []
+            ambiguous_row = []
+            for cell in row:
+                uncertain = bool(cell) and min(word.conf for word in cell) < MIN_CELL_CONF
+                ambiguous_row.append(uncertain)
+                text_row.append(
+                    "" if uncertain else " ".join(
+                        word.text for word in sorted(
+                            cell, key=lambda item: (item.x0, item.y0)
+                        )
+                    )
+                )
+            rows.append(text_row)
+            ambiguous.append(ambiguous_row)
+        tables.append(Table(page_index=page_index, bbox=box, rows=rows,
+                            ambiguous=ambiguous))
 
     return tables

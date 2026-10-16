@@ -4,7 +4,8 @@
 OCR ``pdfprepare`` → сборка графа ``pdfgraph`` (через CLI ``build``) →
 ответы на «золотые» вопросы с обязательной машинной проверкой цитат.
 Тесты и вопросы перенесены дословно из брифа; ожидание документов — базовые
-имена файлов (ключ документа в графе = basename, ``pdfgraph/build.py``).
+пути файлов относительно каталога подготовленных JSON (например,
+``docs/techcard.pdf``).
 Обозначение детали в Q2 заменено на чисто цифровое ``869309.001-03``
 (рулинг ревью-раунда 1: Tesseract rus+eng кириллические ``МТ`` систематически
 выдаёт латиницей ``MT``, кириллический запрос через реальный OCR недостижим,
@@ -15,15 +16,15 @@ OCR ``pdfprepare`` → сборка графа ``pdfgraph`` (через CLI ``bu
 import pytest
 
 QUESTIONS = [
-    ("023.11.30",                        {"023.11.30"}, {"techcard.pdf"}, {1}),
-    ("869309.001-03",                    None,          {"techcard.pdf"}, {1}),
-    ("аварийный переносной радиомаяк",   None,          {"techcard.pdf"}, {1}),
-    ("рисунок 12",                        None,         {"figure.pdf"},   {1}),
-    ("что сказано про ремонт двигателя", "ОТКАЗ",       set(),            set()),
+    ("023.11.30",                        {"023.11.30"}, {("docs/techcard.pdf", 1)}),
+    ("869309.001-03",                    None,          {("docs/techcard.pdf", 1)}),
+    ("аварийный переносной радиомаяк",   None,          {("docs/techcard.pdf", 1)}),
+    ("рисунок 12",                        None,         {("docs/figure.pdf", 1)}),
+    ("что сказано про ремонт двигателя", "ОТКАЗ",       set()),
 ]
 
-@pytest.mark.parametrize("question,expect_code,expect_docs,expect_pages", QUESTIONS)
-def test_acceptance_answers_with_verified_citations(graph_corpus, question, expect_code, expect_docs, expect_pages):
+@pytest.mark.parametrize("question,expect_code,expect_pairs", QUESTIONS)
+def test_acceptance_answers_with_verified_citations(graph_corpus, question, expect_code, expect_pairs):
     store, _ = graph_corpus
     from pdfgraph.answer import build_answer
     from pdfgraph.verify import verify_citations, all_verified
@@ -34,8 +35,7 @@ def test_acceptance_answers_with_verified_citations(graph_corpus, question, expe
     assert a.refusal is False
     checks = verify_citations(a, store)                 # ни одной неподтверждённой
     assert all_verified(checks) is True
-    assert {f.document for f in a.fragments} & expect_docs
-    assert {f.page for f in a.fragments} & expect_pages
+    assert {(f.document, f.page) for f in a.fragments} & expect_pairs
 
 def test_verse_every_sheet_with_code_is_reachable(graph_corpus):
     store, _ = graph_corpus
@@ -58,6 +58,6 @@ def test_part_query_flows_through_ocr_table(graph_corpus):
     fragments = search(store, "869309.001-03")
     assert fragments
     assert all(f.kind == "part" for f in fragments)
-    assert {(f.document, f.page) for f in fragments} == {("techcard.pdf", 1)}
+    assert {(f.document, f.page) for f in fragments} == {("docs/techcard.pdf", 1)}
     assert store.sheets_with_part("869309.001-03") == [
-        ("techcard.pdf", 1, "023.00.00", "023.11.30")]
+        ("docs/techcard.pdf", 1, "023.00.00", "023.11.30")]

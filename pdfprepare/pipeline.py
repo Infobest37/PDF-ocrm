@@ -156,6 +156,7 @@ def process_file(
                                 y1 * factor_y,
                             ),
                             rows=t.rows,
+                            ambiguous=t.ambiguous,
                         )
                     )
                 full_text = " ".join(w.text for w in words)

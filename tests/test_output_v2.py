@@ -187,3 +187,26 @@ def test_read_result_old_json_without_new_keys(tmp_path):
     assert page.tables == [] and page.figures == [] and page.references == []
     assert page.words[0].text == "023.11.30"
     assert page.words[0].x0 == pytest.approx(72.0)
+
+
+def test_table_ambiguity_is_optional_in_v2_json(tmp_path):
+    import json
+
+    from pdfprepare.models import DocResult, PageInfo, Table
+    from pdfprepare.output import read_result, write_json
+
+    page = PageInfo(
+        page_index=0, is_native_text=False, is_blank=False,
+        system_code="", subsystem_code="", full_text="", words=[],
+        tables=[Table(0, (0, 0, 10, 10), [["", "8МТ.6101.100"]],
+                      ambiguous=[[True, False]])],
+    )
+    result = DocResult("a.pdf", 1, [page], {})
+    path = tmp_path / "ambiguous.json"
+    write_json(result, str(path))
+    assert read_result(str(path)).pages[0].tables[0].ambiguous == [[True, False]]
+
+    legacy = json.loads(path.read_text(encoding="utf-8"))
+    del legacy["pages"][0]["tables"][0]["ambiguous"]
+    path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+    assert read_result(str(path)).pages[0].tables[0].ambiguous == []

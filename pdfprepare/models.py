@@ -20,6 +20,7 @@ class Table:
     page_index: int
     bbox: tuple[float, float, float, float]
     rows: list[list[str]]
+    ambiguous: list[list[bool]] = field(default_factory=list)
 
 
 @dataclass

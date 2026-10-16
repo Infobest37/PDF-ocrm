@@ -115,6 +115,31 @@ def test_build_skips_blank_cells_in_tables(tmp_path):
     store.close()
 
 
+def test_build_does_not_extract_part_from_ambiguous_cell(tmp_path):
+    from pdfprepare.models import DocResult, PageInfo, Table
+    from pdfgraph.build import build
+    from pdfgraph.store import Store
+
+    page = PageInfo(
+        page_index=1,
+        is_native_text=False,
+        is_blank=False,
+        system_code="023.00.00",
+        subsystem_code="",
+        full_text="023.00.00",
+        words=[],
+        tables=[Table(
+            1, (0, 0, 10, 10), [["8МТ.6101.100"]], ambiguous=[[True]],
+        )],
+    )
+    store = Store(str(tmp_path / "ambiguous-part.db"))
+    try:
+        build([DocResult("d.pdf", 1, [page], {})], "Ми-8МТВ", {}, store)
+        assert _rows(store, "SELECT key FROM nodes WHERE kind = 'part'") == []
+    finally:
+        store.close()
+
+
 def test_part_cells_require_letter_dot_and_min_length(tmp_path):
     # Правило fix round 1: ячейка даёт part только если ключ normalize_part_number
     # содержит букву (кириллицу/латиницу) И точку, и длина ключа >= 6.

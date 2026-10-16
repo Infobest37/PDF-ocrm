@@ -133,6 +133,7 @@ def read_result(path: str) -> DocResult:
                     page_index=t["page_index"],
                     bbox=tuple(t["bbox"]),
                     rows=t["rows"],
+                    ambiguous=t.get("ambiguous", []),
                 )
                 for t in p.get("tables", [])
             ],

@@ -151,11 +151,11 @@ def search(
 
     code = normalize_code(stripped)
     if code:
-        return _by_code(store, code, aircraft_type, limit)
+        return _by_code(store, code, aircraft_type)
 
     part_key = normalize_part_number(stripped)
     if part_key and store.has_node("part", part_key):
-        return _by_part(store, part_key, aircraft_type, limit)
+        return _by_part(store, part_key, aircraft_type)
 
     needle = normalize_for_search(stripped)
     if not needle:
@@ -163,25 +163,25 @@ def search(
     return _by_fts(store, needle, aircraft_type, limit)
 
 
-def _by_code(store: Store, code: str, aircraft_type: str | None,
-             limit: int) -> list[Fragment]:
+def _by_code(store: Store, code: str,
+             aircraft_type: str | None) -> list[Fragment]:
     needle = normalize_for_search(code)
     return [
         _fragment(store, document, page, system_code, subsystem_code,
                   1.0, "code", needle)
         for document, page, system_code, subsystem_code
-        in store.sheets_by_code(code, aircraft_type, limit)
+        in store.sheets_by_code(code, aircraft_type)
     ]
 
 
-def _by_part(store: Store, part_key: str, aircraft_type: str | None,
-             limit: int) -> list[Fragment]:
+def _by_part(store: Store, part_key: str,
+             aircraft_type: str | None) -> list[Fragment]:
     needle = normalize_for_search(part_key)
     return [
         _fragment(store, document, page, system_code, subsystem_code,
                   1.0, "part", needle)
         for document, page, system_code, subsystem_code
-        in store.sheets_with_part(part_key, aircraft_type, limit)
+        in store.sheets_with_part(part_key, aircraft_type)
     ]
 
 
