@@ -1,0 +1,233 @@
+"""Console interface for the PDF knowledge graph: ``python -m pdfgraph``.
+
+Subcommands
+-----------
+``build <prepared_dir> <store_path> --type <ВС> [--registry <path>]``
+    Reads every ``*.json`` under ``prepared_dir`` (recursively) with
+    :func:`pdfprepare.output.read_result`, assembles the graph with
+    :func:`pdfgraph.build.build` and prints :meth:`pdfgraph.store.Store.stats`.
+
+``ask "<вопрос>" --store <path> [--type <ВС>] [--json]``
+    Answers through :func:`pdfgraph.answer.build_answer` and **always** reports
+    the :func:`pdfgraph.verify.verify_citations` result: one line per citation
+    (document, sheet, system code) plus a verdict — how many citations were
+    confirmed, or the refusal reason.
+
+Exit codes (project contract: an answer is only trustworthy with verified
+citations):
+    0 — answered and every citation verified;
+    1 — refusal, or at least one citation failed verification
+        (in ``--json`` mode the same fact is the ``verified`` field);
+    2 — usage/environment error (no JSON to build from, unreadable JSON,
+        store file missing or not a database; a missing registry file is
+        only a warning).
+"""
+
+import argparse
+import dataclasses
+import glob
+import json
+import os
+import sqlite3
+import sys
+
+from pdfgraph.answer import Answer, build_answer
+from pdfgraph.build import build
+from pdfgraph.store import Store
+from pdfgraph.verify import CitationCheck, all_verified, verify_citations
+from pdfprepare.output import read_result
+from pdfprepare.registry import parse_registry
+
+#: Default ATA-100 code -> name registry file (project root).
+_DEFAULT_REGISTRY = "Коды систем Вертолета.txt"
+
+
+def _open_store(path: str) -> Store | None:
+    """Open the SQLite store, reporting failures instead of crashing."""
+    try:
+        return Store(path)
+    except sqlite3.Error as exc:
+        print(f"error: cannot open store {path!r}: {exc}", file=sys.stderr)
+        return None
+
+
+def _cmd_build(args: argparse.Namespace) -> int:
+    """Fill the store from prepared-document JSON; report stats."""
+    paths = sorted(glob.glob(os.path.join(args.prepared_dir, "**", "*.json"),
+                              recursive=True))
+    if not paths:
+        print(f"error: no *.json under {args.prepared_dir!r}", file=sys.stderr)
+        return 2
+
+    if os.path.isfile(args.registry):
+        registry = parse_registry(args.registry)
+    else:
+        print(
+            f"warning: registry file not found: {args.registry!r}; "
+            "system labels come from page text only",
+            file=sys.stderr,
+        )
+        registry = {}
+
+    results = []
+    for path in paths:
+        try:
+            results.append(read_result(path))
+        except (OSError, ValueError) as exc:  # JSONDecodeError ⊂ ValueError
+            print(f"error: cannot read {path!r}: {exc}", file=sys.stderr)
+            return 2
+
+    store = _open_store(args.store_path)
+    if store is None:
+        return 2
+    try:
+        stats = build(results, args.aircraft_type, registry, store)
+    finally:
+        store.close()
+
+    print(
+        f"nodes={stats['nodes']} edges={stats['edges']} "
+        f"sheets={stats['sheets']} pending={stats['pending']} "
+        f"(документов: {len(results)})"
+    )
+    return 0
+
+
+def _evidence_rows(answer: Answer, checks: list[CitationCheck]) -> list[dict]:
+    """One row per citation: where it points, the sheet's code and the verdict."""
+    by_sheet = {(fragment.document, fragment.page): fragment
+                for fragment in answer.fragments}
+    rows = []
+    for check in checks:
+        fragment = by_sheet.get((check.document, check.page))
+        rows.append({
+            "claim_index": check.claim_index,
+            "document": check.document,
+            "page": check.page,
+            "system_code": fragment.system_code if fragment else "",
+            "subsystem_code": fragment.subsystem_code if fragment else "",
+            "ok": check.ok,
+            "reason": check.reason,
+        })
+    return rows
+
+
+def _print_json(answer: Answer, rows: list[dict], verified: bool) -> None:
+    """Machine-readable answer: claims with citations, fragments, verdict."""
+    claims = [
+        {
+            "text": claim.text,
+            "evidence": list(claim.evidence),
+            "citations": [row for row in rows if row["claim_index"] == index],
+        }
+        for index, claim in enumerate(answer.claims)
+    ]
+    payload = {
+        "question": answer.question,
+        "refusal": answer.refusal,
+        "reason": answer.reason,
+        "verified": verified,
+        "claims": claims,
+        "fragments": [dataclasses.asdict(fragment)
+                      for fragment in answer.fragments],
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _print_text(answer: Answer, rows: list[dict], verified: bool) -> None:
+    """Human-readable answer: claims, «Доказательства» block, verdict."""
+    print(f"Вопрос: {answer.question}")
+    if answer.claims:
+        print("Ответ:")
+        for claim in answer.claims:
+            print(f"  - {claim.text}")
+    if rows:
+        print("Доказательства:")
+        for row in rows:
+            sheet = f"{row['document'] or '?'} лист {row['page']}"
+            code = row["system_code"] or row["subsystem_code"] or "без кода"
+            mark = "ok" if row["ok"] else "НЕ ПОДТВЕРЖДЕНА"
+            line = f"  [{mark}] {sheet} код {code}"
+            if not row["ok"] and row["reason"]:
+                line += f" — {row['reason']}"
+            print(line)
+    # Результат verify_citations печатается всегда: количество цитат и вердикт.
+    ok = sum(1 for row in rows if row["ok"])
+    print(f"Подтверждено {ok} из {len(rows)}")
+    if answer.refusal:
+        # Причина отказа печатается на stdout: она и есть ответ инструмента.
+        print(f"Отказ: {answer.reason}")
+    elif not verified:
+        print("Вердикт: ответ неполный — есть неподтверждённые цитаты")
+    else:
+        print("Вердикт: все цитаты подтверждены")
+
+
+def _cmd_ask(args: argparse.Namespace) -> int:
+    """Answer a question and always report citation verification."""
+    if not os.path.isfile(args.store_path):
+        print(f"error: store not found: {args.store_path!r} "
+              "(run 'pdfgraph build' first)", file=sys.stderr)
+        return 2
+
+    store = _open_store(args.store_path)
+    if store is None:
+        return 2
+    try:
+        answer = build_answer(store, args.question, args.aircraft_type)
+        checks = verify_citations(answer, store)
+    finally:
+        store.close()
+
+    verified = all_verified(checks) and not answer.refusal
+    rows = _evidence_rows(answer, checks)
+    if args.as_json:
+        _print_json(answer, rows, verified)
+    else:
+        _print_text(answer, rows, verified)
+    return 0 if verified else 1
+
+
+def main(argv: list[str]) -> int:
+    """Dispatch ``pdfgraph`` subcommands; return the process exit code."""
+    parser = argparse.ArgumentParser(
+        prog="pdfgraph",
+        description="Knowledge graph over prepared PDF documents: build the "
+                    "store and answer questions with machine-verified "
+                    "citations.",
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    build_parser = commands.add_parser(
+        "build", help="build the graph from prepared-document JSON.")
+    build_parser.add_argument(
+        "prepared_dir",
+        help="Directory containing schema-v2 *.json results (searched "
+             "recursively).")
+    build_parser.add_argument(
+        "store_path", help="SQLite graph file to create or update.")
+    build_parser.add_argument(
+        "--type", dest="aircraft_type", required=True, metavar="ВС",
+        help="Aircraft type the documents belong to (e.g. Ми-8МТВ).")
+    build_parser.add_argument(
+        "--registry", default=_DEFAULT_REGISTRY, metavar="PATH",
+        help="ATA-100 code -> name registry file (default: %(default)s).")
+    build_parser.set_defaults(handler=_cmd_build)
+
+    ask_parser = commands.add_parser(
+        "ask", help="Answer a question; always print the citation verdict.")
+    ask_parser.add_argument("question", help="Question in plain language.")
+    ask_parser.add_argument(
+        "--store", dest="store_path", required=True, metavar="PATH",
+        help="SQLite graph file produced by 'build'.")
+    ask_parser.add_argument(
+        "--type", dest="aircraft_type", default=None, metavar="ВС",
+        help="Restrict answers to sheets of this aircraft type.")
+    ask_parser.add_argument(
+        "--json", dest="as_json", action="store_true",
+        help="Print the answer as JSON (verified citations are the "
+             "'verified' field).")
+    ask_parser.set_defaults(handler=_cmd_ask)
+
+    args = parser.parse_args(argv)
+    return args.handler(args)
