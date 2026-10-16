@@ -11,8 +11,10 @@ on a clean Windows PC with no Python, Tesseract, or Ghostscript installed.
    powershell -ExecutionPolicy Bypass -File scripts\bundle_tesseract.ps1
    ```
 
-   This copies `tesseract.exe` and `tessdata/{rus,eng}.traineddata` from
-   `C:\Program Files\Tesseract-OCR\` into `pdfprepare\tesseract\`.
+   This copies `tesseract.exe`, its sibling `*.dll` files (required — the
+   executable is dynamically linked against them), and
+   `tessdata/{rus,eng}.traineddata` from `C:\Program Files\Tesseract-OCR\` into
+   `pdfprepare\tesseract\`.
 
 2. **Build the one-folder bundle** (from the repository root):
 
@@ -41,7 +43,10 @@ dist\pdfprepare\pdfprepare.exe <src_dir> <dst_dir> [--registry <registry.txt>]
 - `<src_dir>` — directory of scanned PDFs (non-recursive).
 - `<dst_dir>` — directory where outputs are written.
 - `--registry` — optional ATA-100 code -> name file
-  (default: `Коды систем Вертолета.txt` in the current directory).
+  (default: `Коды систем Вертолета.txt`). The default path is resolved
+  relative to the **current working directory**, not the exe folder, so run the
+  tool from the directory that contains the registry (or pass an explicit
+  path).
 
 For each `<name>.pdf` in `src`, the tool writes `<name>.pdf` (with a searchable
 text layer), `<name>.json` (per-page structure), and `<name>.report.txt`

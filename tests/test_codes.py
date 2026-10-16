@@ -22,3 +22,13 @@ def test_extract_codes_ordered_unique():
 
 def test_no_codes_returns_empty():
     assert extract_codes("нет кодов здесь") == []
+
+
+def test_extract_codes_ignores_longer_digit_run():
+    # A part number like 078.00.5700 must not yield the bogus 078.00.57.
+    assert extract_codes("078.00.5700") == []
+
+
+def test_extract_codes_ignores_date_like_prefix():
+    # A date 2026.10.16 must not yield 026.10.16; a real code still matches.
+    assert extract_codes("дата 2026.10.16, см. 028.10.00") == ["028.10.00"]

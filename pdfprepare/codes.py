@@ -1,7 +1,7 @@
 import re
 
 _CODE_RE = re.compile(r"^\d{3}\.\d{2}\.\d{2}$")
-_CODE_FIND_RE = re.compile(r"\d{3}[.\s]*\d{2}[.\s]*\d{2}")
+_CODE_FIND_RE = re.compile(r"(?<!\d)\d{3}[.\s]*\d{2}[.\s]*\d{2}(?!\d)")
 
 
 def normalize_code(raw: str) -> str:

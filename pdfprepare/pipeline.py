@@ -60,7 +60,9 @@ def _page_codes(full_text: str) -> tuple[str, str]:
     return system_code, ""
 
 
-def process_file(src: str, dst_dir: str, registry: dict[str, str]) -> DocResult:
+def process_file(
+    src: str, dst_dir: str, registry: dict[str, str], *, force_ocr: bool = False
+) -> DocResult:
     """Prepare one PDF: OCR raster pages, keep native text, write outputs.
 
     Per page: native pages keep their ``get_text`` output and words (already
@@ -68,13 +70,17 @@ def process_file(src: str, dst_dir: str, registry: dict[str, str]) -> DocResult:
     OCR pixel coordinates converted to PDF points. Writes ``<stem>.pdf``,
     ``<stem>.json`` and ``<stem>.report.txt`` into ``dst_dir`` and returns the
     :class:`DocResult`.
+
+    ``force_ocr`` bypasses native-text detection and OCRs every page, so an
+    operator can replace a poor existing text layer (e.g. a scan with an old
+    OCR layer) for that run.
     """
     doc = fitz.open(src)
     try:
         pages: list[PageInfo] = []
         for page in doc:
             page_index = page.number
-            native = has_native_text(page)
+            native = has_native_text(page) and not force_ocr
             rect = page.rect  # fitz.Rect, PDF points
 
             if native:
