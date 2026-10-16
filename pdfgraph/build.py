@@ -29,14 +29,16 @@ _MAX_LABEL_CHARS = 120
 #: Shortest normalized cell key accepted as a part designation.
 _PART_MIN_KEY_LEN = 6
 
-#: Designation shape (fix round 2): starts alphanumeric, then only digits,
-#: uppercase letters and ``.`` / ``-``. No spaces, brackets, ``®``, pipes —
-#: OCR noise like ``КОЛИЧ. НА ЕД. СБ.`` fails on the very first character class.
-_PART_SHAPE_RE = re.compile(r"^[0-9A-ZА-Я][0-9A-ZА-Я.\-]*$")
+#: Designation shape (fix round 3 added ``Ё``: normalize_part_number's
+#: ``.upper()`` keeps ``Ё`` as U+0401, which lies outside the plain ``А-Я``
+#: range). Starts alphanumeric, then only digits, uppercase letters (incl. Ё)
+#: and ``.`` / ``-``. No spaces, brackets, ``®``, pipes — OCR noise like
+#: ``КОЛИЧ. НА ЕД. СБ.`` fails on the very first character class.
+_PART_SHAPE_RE = re.compile(r"^[0-9A-ZА-ЯЁ][0-9A-ZА-ЯЁ.\-]*$")
 
 #: At least one Cyrillic or Latin letter (keys are upper-cased by the
-#: normalizer, so uppercase ranges suffice).
-_PART_LETTER_RE = re.compile(r"[A-ZА-Я]")
+#: normalizer, so uppercase suffices; Ё counted explicitly).
+_PART_LETTER_RE = re.compile(r"[A-ZА-ЯЁ]")
 
 #: A run of five or more leading digits — the alternative to having a letter
 #: (keeps pure-numeric designations like ``869309.001-03``).
@@ -47,7 +49,8 @@ def _looks_like_part_number(key: str) -> bool:
     """Whether a normalized table-cell key is a part designation.
 
     Rule agreed with the coordinator (fix round 2, justified by real Каталог
-    Д-1701 data): the key must match ``^[0-9A-ZА-Я][0-9A-ZА-Я.\\-]*$``
+    Д-1701 data; round 3 widens the classes with ``Ё``): the key must match
+    ``^[0-9A-ZА-ЯЁ][0-9A-ZА-ЯЁ.\\-]*$``
     (no spaces, no punctuation beyond dot and hyphen, no ®), contain at least
     one dot, be at least 6 characters long, and contain at least one letter
     OR start with five or more digits (pure-numeric designations are kept).

@@ -171,8 +171,9 @@ def test_part_filter_edges(tmp_path):
 
 
 def test_part_cells_designation_pattern(tmp_path):
-    # Правило fix round 2 (ровно из задания координатора): строка из шести
-    # ячеек даёт ровно два узла part — 8МТ.6101.100 и 869309.001-03.
+    # Правило fix round 2 (ровно из задания координатора) + fix round 3:
+    # Ё (после .upper() в normalize_part_number) обязана приниматься.
+    # Строка ячеек даёт ровно три узла part.
     from pdfprepare.models import DocResult, PageInfo, Table
     from pdfgraph.build import build
     from pdfgraph.store import Store
@@ -187,15 +188,16 @@ def test_part_cells_designation_pattern(tmp_path):
         words=[],
         tables=[Table(1, (0, 0, 10, 10), [
             ["8МТ.6101.100", "1.", "КОЛИЧ. НА ЕД. СБ.",
-             "960-2. ® A OOO ®", "869309.001-03", "3"],
+             "960-2. ® A OOO ®", "869309.001-03", "3",
+             "8мё.7226.000"],  # строчная «ё» → после нормализации «Ё» — деталь
         ])],
     )
     store = Store(str(tmp_path / "g.db"))
     build([DocResult("d.pdf", 1, [page], {})], "Ми-8МТВ", {}, store)
     parts = {row[0] for row in _rows(store, "SELECT key FROM nodes WHERE kind = 'part'")}
-    assert parts == {"8МТ.6101.100", "869309.001-03"}
+    assert parts == {"8МТ.6101.100", "869309.001-03", "8МЁ.7226.000"}
     edges = _rows(store, "SELECT COUNT(*) FROM edges WHERE kind = 'has_part'")[0][0]
-    assert edges == 2
+    assert edges == 3
     store.close()
 
 
