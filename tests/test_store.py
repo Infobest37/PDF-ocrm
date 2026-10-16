@@ -76,7 +76,7 @@ def test_schema_wal_and_stats_include_sheet_and_pending_nodes(tmp_path):
 
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
-        assert connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "1"
+        assert connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "2"
         indexes = {
             row[0]
             for row in connection.execute(
@@ -92,6 +92,28 @@ def test_page_text_returns_empty_string_for_missing_page(tmp_path):
     store = Store(str(tmp_path / "g.db"))
     assert store.page_text("missing.pdf", 1) == ""
     store.close()
+
+
+def test_mark_defect_is_idempotent_and_defect_sheets_sorted(tmp_path):
+    """Задача 2.7: листы из отчёта о пересканировании (пустые листы туда
+    не попадают — это свойство ``pdfprepare.quality``, здесь — хранилище)."""
+    from pdfgraph.store import Store
+
+    database = str(tmp_path / "g.db")
+    store = Store(database)
+    assert store.defect_sheets() == []
+    store.mark_defect("d.pdf", 47)
+    store.mark_defect("d.pdf", 12)
+    store.mark_defect("a.pdf", 3)
+    store.mark_defect("d.pdf", 47)  # идемпотентно: повтор не дублирует
+    assert store.defect_sheets() == [("a.pdf", 3), ("d.pdf", 12), ("d.pdf", 47)]
+    store.close()
+
+    reopened = Store(database)
+    try:
+        assert reopened.defect_sheets() == [("a.pdf", 3), ("d.pdf", 12), ("d.pdf", 47)]
+    finally:
+        reopened.close()
 
 
 def test_find_node_id_and_has_node_are_read_only(tmp_path):

@@ -194,3 +194,65 @@ def test_module_entry_point_runs():
     )
     assert result.returncode == 0
     assert "usage:" in result.stdout
+
+
+# --- помечание дефектов из отчёта о пересканировании (задача 2.7, рулинг 2) ---
+
+def test_cli_build_marks_defects_from_report(fx_prepared_dir, tmp_path, capsys):
+    """Рядом с ``<stem>.json`` лежит ``<stem>.report.txt`` конвейера — CLI
+    ``build`` после сборки читает его и помечает листы через
+    ``Store.mark_defect``; ``build()`` остаётся чистой функцией."""
+    from pdfgraph.cli import main
+    from pdfgraph.store import Store
+
+    report = os.path.join(fx_prepared_dir, "РТЭ кн.1.pdf.report.txt")
+    with open(report, "w", encoding="utf-8") as handle:
+        handle.write("page 47: low_confidence (conf=0.55, coverage=0.0100)\n"
+                     "page 12: low_text_coverage (conf=0.80, coverage=0.0050)\n")
+    store = str(tmp_path / "g.db")
+    assert main(["build", str(fx_prepared_dir), store, "--type", "Ми-8МТВ"]) == 0
+    assert "defects=2" in capsys.readouterr().out
+
+    reader = Store(store)
+    try:
+        assert reader.defect_sheets() == [("РТЭ кн.1.pdf", 12),
+                                          ("РТЭ кн.1.pdf", 47)]
+    finally:
+        reader.close()
+
+    # повторный build поверх той же БД идемпотентен
+    assert main(["build", str(fx_prepared_dir), store, "--type", "Ми-8МТВ"]) == 0
+    assert "defects=2" in capsys.readouterr().out
+
+    # без отчёта рядом с JSON — ни одного помеченного листа
+    os.remove(report)
+    store2 = str(tmp_path / "g2.db")
+    assert main(["build", str(fx_prepared_dir), store2, "--type", "Ми-8МТВ"]) == 0
+    assert "defects=0" in capsys.readouterr().out
+    reader2 = Store(store2)
+    try:
+        assert reader2.defect_sheets() == []
+    finally:
+        reader2.close()
+
+
+def test_cli_build_report_garbage_lines_ignored(fx_prepared_dir, tmp_path,
+                                                capsys):
+    """Неразборчивые строки отчёта не ломают сборку; пустой отчёт (пустые
+    листы в него не попадают) не помечает ничего."""
+    from pdfgraph.cli import main
+    from pdfgraph.store import Store
+
+    report = os.path.join(fx_prepared_dir, "РТЭ кн.1.pdf.report.txt")
+    with open(report, "w", encoding="utf-8") as handle:
+        handle.write("Отчёт о пересканировании\n")
+        handle.write("page : low_confidence\n")
+        handle.write("page 9: low_text_coverage (conf=0.80, coverage=0.0010)\n")
+    store = str(tmp_path / "g.db")
+    assert main(["build", str(fx_prepared_dir), store, "--type", "Ми-8МТВ"]) == 0
+    assert "defects=1" in capsys.readouterr().out
+    reader = Store(store)
+    try:
+        assert reader.defect_sheets() == [("РТЭ кн.1.pdf", 9)]
+    finally:
+        reader.close()

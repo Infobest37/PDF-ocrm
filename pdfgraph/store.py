@@ -56,13 +56,22 @@ class Store:
                 body
             );
 
+            -- Sheets that landed in the re-scan report (task 2.7). Blank
+            -- divider sheets never appear in that report, so they are never
+            -- listed here; callers add rows only through mark_defect().
+            CREATE TABLE IF NOT EXISTS defects (
+                document TEXT NOT NULL,
+                page INTEGER NOT NULL,
+                PRIMARY KEY (document, page)
+            );
+
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
 
             INSERT INTO meta (key, value)
-            VALUES ('schema_version', '1')
+            VALUES ('schema_version', '2')
             ON CONFLICT (key) DO NOTHING;
             """
         )
@@ -163,6 +172,25 @@ class Store:
             (document, page),
         ).fetchone()
         return row[0] if row is not None else ""
+
+    def mark_defect(self, document: str, page: int) -> None:
+        """Record that a sheet landed in the re-scan report (idempotent).
+
+        Blank divider sheets are section boundaries, not scan defects, and
+        never reach this method: the report the caller parses
+        (``pdfprepare.quality.flag_pages``) already excludes them.
+        """
+        with self._connection:
+            self._connection.execute(
+                "INSERT OR IGNORE INTO defects (document, page) VALUES (?, ?)",
+                (document, page),
+            )
+
+    def defect_sheets(self) -> list[tuple[str, int]]:
+        """Sheets flagged for re-scan, ``(document, page)`` sorted."""
+        return self._connection.execute(
+            "SELECT document, page FROM defects ORDER BY document, page"
+        ).fetchall()
 
     def find_node_id(self, kind: str, key: str) -> int | None:
         """Return the ID of the (kind, key) node, or None when it is absent.

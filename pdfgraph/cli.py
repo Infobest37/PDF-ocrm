@@ -6,9 +6,12 @@ Subcommands
     Reads every ``*.json`` under ``prepared_dir`` (recursively) with
     :func:`pdfprepare.output.read_result`, assembles the graph with
     :func:`pdfgraph.build.build` and prints :meth:`pdfgraph.store.Store.stats`.
-    Without ``--registry`` no registry is read at all (``registry = {}``);
-    with ``--registry`` but a missing file, a warning goes to stderr and the
-    registry stays empty.
+    Then it parses the ``<stem>.report.txt`` re-scan report lying next to
+    every JSON and marks those sheets with :meth:`Store.mark_defect`
+    (idempotent; blank divider sheets are never in the report, hence never
+    marked). Without ``--registry`` no registry is read at all
+    (``registry = {}``); with ``--registry`` but a missing file, a warning
+    goes to stderr and the registry stays empty.
 
 ``ask "<вопрос>" --store <path> [--type <ВС>] [--json]``
     Answers through :func:`pdfgraph.answer.build_answer` and **always** reports
@@ -31,15 +34,20 @@ import dataclasses
 import glob
 import json
 import os
+import re
 import sqlite3
 import sys
 
 from pdfgraph.answer import Answer, build_answer
-from pdfgraph.build import build
+from pdfgraph.build import _document_key, build
 from pdfgraph.store import Store
 from pdfgraph.verify import CitationCheck, all_verified, verify_citations
+from pdfprepare.models import DocResult
 from pdfprepare.output import read_result
 from pdfprepare.registry import parse_registry
+
+#: One re-scan report line written by ``pdfprepare.quality.write_report``.
+_REPORT_LINE_RE = re.compile(r"^page (\d+): \S")
 
 
 def _open_store(path: str) -> Store | None:
@@ -71,6 +79,39 @@ def _load_registry(path: str | None) -> dict[str, str]:
     return {}
 
 
+def _mark_defects(store: Store,
+                  entries: list[tuple[str, DocResult]]) -> int:
+    """Mark re-scan sheets from the pipeline reports that lie next to JSONs.
+
+    ``entries`` pairs ``(json_path, DocResult)``. For every ``<stem>.json``
+    the pipeline left ``<stem>.report.txt`` beside it (lines
+    ``page N: low_confidence (...)`` from
+    :func:`pdfprepare.quality.write_report`); every such page is recorded
+    with the idempotent :meth:`Store.mark_defect` under the same document
+    key the graph uses (:func:`pdfgraph.build._document_key`). Blank
+    divider sheets never appear in the report, so they are never marked.
+    A report line that does not parse is ignored. Returns the number of
+    marked sheets.
+    """
+    for path, result in entries:
+        report = os.path.splitext(path)[0] + ".report.txt"
+        if not os.path.isfile(report):
+            continue
+        try:
+            with open(report, encoding="utf-8") as handle:
+                lines = handle.readlines()
+        except OSError as exc:
+            print(f"warning: cannot read report {report!r}: {exc}",
+                  file=sys.stderr)
+            continue
+        document = _document_key(result.source_path)
+        for line in lines:
+            match = _REPORT_LINE_RE.match(line.strip())
+            if match:
+                store.mark_defect(document, int(match.group(1)))
+    return len(store.defect_sheets())
+
+
 def _cmd_build(args: argparse.Namespace) -> int:
     """Fill the store from prepared-document JSON; report stats."""
     paths = sorted(glob.glob(os.path.join(args.prepared_dir, "**", "*.json"),
@@ -94,12 +135,14 @@ def _cmd_build(args: argparse.Namespace) -> int:
         return 2
     try:
         stats = build(results, args.aircraft_type, registry, store)
+        defects = _mark_defects(store, list(zip(paths, results)))
     finally:
         store.close()
 
     print(
         f"nodes={stats['nodes']} edges={stats['edges']} "
         f"sheets={stats['sheets']} pending={stats['pending']} "
+        f"defects={defects} "
         f"(документов: {len(results)})"
     )
     return 0

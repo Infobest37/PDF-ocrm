@@ -6,6 +6,8 @@ sheets: 47 (подсистема 023.11.30, деталь в таблице), 48 
 12 (код 028.10.00, без деталей).
 """
 
+import os
+
 import pytest
 
 from pdfgraph.store import Store
@@ -99,3 +101,173 @@ def fx_prepared_dir(tmp_path):
     out_dir.mkdir()
     write_json(result, str(out_dir / (FX_DOCUMENT + ".json")))
     return str(out_dir)
+
+
+# ---------------------------------------------------------------------------
+# graph_corpus (задача 2.7): приёмочный корпус «граф точно работает».
+#
+# Три PDF в docs/ собираются PyMuPDF один раз за сессию, прогоняются через
+# реальный конвейер pdfprepare и через CLI ``pdfgraph build`` в отдельную
+# базу. Состав листов:
+#   techcard.pdf — стр. 0: растеризованный пустой лист-разделитель (код
+#     023.00.00, реальный OCR), стр. 1: цифровой лист техкарты 023.11.30
+#     (таблица 3×3, деталь 8МТ.6101.100, «Аварийный переносной радиомаяк
+#     ПАРМ-406А»). Цифровой — не по лени: Tesseract rus+eng на шрифте
+#     Arial кириллические МТ в обозначении «8МТ.6101.100» систематически
+#     выдаёт латиницей «MT» (проверено на 9 шрифтах × 5 контекстах), а
+#     проект запрещает транслитерацию — золотой вопрос «8МТ.6101.100»
+#     с кириллицей тогда не совпал бы никогда. Текст этого листа конвейер
+#     читает native-путём (так же ведут себя уже распознанные PDF в pdfs/).
+#   figure.pdf — стр. 0: такой же лист-разделитель (OCR), стр. 1: растр 150
+#     dpi «скан» листа с подписью «Рис. 12 …» и ссылкой «См. 028.10.00,
+#     рис. 1» — текст переживает реальный OCR (проверено).
+#   divider.pdf — отдельный пустой лист-разделитель с кодом 023.00.00.
+# ---------------------------------------------------------------------------
+
+GC_PAGE = (595.0, 842.0)  # A4 в точках
+GC_SCAN_DPI = 150
+GC_SYSTEM_CODE = "023.00.00"
+GC_DOCS = ("divider.pdf", "figure.pdf", "techcard.pdf")
+
+
+def _gc_text(page, items, fontfile):
+    """Набор строк (x, y, размер, текст) на странице PyMuPDF."""
+    for x, y, size, text in items:
+        page.insert_text((x, y), text, fontname="gc", fontfile=fontfile,
+                         fontsize=size)
+
+
+def _gc_raster_page(scratch_page, final_doc):
+    """Страница-макет → растр GC_SCAN_DPI dpi и как единственная картинка
+    в новую страницу final_doc: текстового слоя нет — конвейер идёт OCR."""
+    pix = scratch_page.get_pixmap(dpi=GC_SCAN_DPI)
+    page = final_doc.new_page(width=GC_PAGE[0], height=GC_PAGE[1])
+    page.insert_image(page.rect, stream=pix.tobytes("png"))
+
+
+def _gc_scan_pdf(path, pages, fontfile):
+    """Собрать PDF из «сканов»: каждая items-страница растрируется."""
+    import fitz
+    scratch = fitz.open()
+    final = fitz.open()
+    try:
+        for items in pages:
+            sp = scratch.new_page(width=GC_PAGE[0], height=GC_PAGE[1])
+            _gc_text(sp, items, fontfile)
+            _gc_raster_page(sp, final)
+        final.save(str(path))
+    finally:
+        final.close()
+        scratch.close()
+
+
+def _gc_blank_scan_page(final, fontfile):
+    """Растеризованный пустой лист-разделитель: в углу только код системы."""
+    import fitz
+    scratch = fitz.open()
+    sp = scratch.new_page(width=GC_PAGE[0], height=GC_PAGE[1])
+    _gc_text(sp, [(60, 90, 26, GC_SYSTEM_CODE)], fontfile)
+    _gc_raster_page(sp, final)
+    scratch.close()
+
+
+def _gc_techcard_pdf(path, fontfile):
+    """techcard.pdf: растр-разделитель (лист 0) + цифровой лист техкарты
+    (лист 1): код 023.11.30, заголовок, таблица 3×3 с деталью в ячейке."""
+    import fitz
+    final = fitz.open()
+    _gc_blank_scan_page(final, fontfile)
+    page = final.new_page(width=GC_PAGE[0], height=GC_PAGE[1])
+    _gc_text(page, [
+        (60, 90, 22, "023.11.30"),
+        (300, 90, 18, "ТЕХНОЛОГИЧЕСКАЯ КАРТА"),
+        (60, 150, 26, "Аварийный переносной"),
+        (60, 185, 26, "радиомаяк ПАРМ-406А"),
+    ], fontfile)
+    # таблица 3×3: 4 вертикальные и 4 горизонтальные линейки
+    xs = [60.0, 220.0, 380.0, 540.0]
+    ys = [250.0, 320.0, 390.0, 460.0]
+    for x in xs:
+        page.draw_line(fitz.Point(x, ys[0]), fitz.Point(x, ys[-1]), width=1.0)
+    for y in ys:
+        page.draw_line(fitz.Point(xs[0], y), fitz.Point(xs[-1], y), width=1.0)
+    cells = [["N", "ОБОЗНАЧЕНИЕ", "КОЛ"],
+             ["1", FX_PART, "1"],
+             ["2", "8МТ.6101.200", "1"]]
+    for row_index, row in enumerate(cells):
+        for col_index, text in enumerate(row):
+            page.insert_text((xs[col_index] + 14, ys[row_index] + 46), text,
+                             fontname="gc", fontfile=fontfile, fontsize=20)
+    _gc_text(page, [
+        (60, 520, 22, "Обозначение детали:"),
+        (60, 550, 22, FX_PART),
+        (60, 800, 20, "023.11.30"),
+    ], fontfile)
+    final.save(str(path))
+    final.close()
+
+
+def _gc_figure_pdf(path, fontfile):
+    """figure.pdf: растр-разделитель (лист 0) + растр-«скан» листа с
+    рисунком (лист 1): подпись «Рис. 12 …» и ссылка «См. 028.10.00, рис. 1»."""
+    import fitz
+    final = fitz.open()
+    _gc_blank_scan_page(final, fontfile)
+    scratch = fitz.open()
+    sp = scratch.new_page(width=GC_PAGE[0], height=GC_PAGE[1])
+    _gc_text(sp, [
+        (60, 90, 26, "023.20.00"),
+        (60, 150, 26, "Схема электрическая"),
+        (60, 185, 22, "Аварийный переносной"),
+        (60, 210, 22, "радиомаяк ПАРМ-406А"),
+        (60, 320, 26, "Рис. 12 Монтаж"),
+        (60, 355, 26, "аппаратуры на грузовой"),
+        (60, 390, 26, "полке кабины экипажа"),
+        (60, 430, 26, "См. 028.10.00, рис. 1"),
+    ], fontfile)
+    _gc_raster_page(sp, final)
+    scratch.close()
+    final.save(str(path))
+    final.close()
+
+
+@pytest.fixture(scope="session")
+def graph_corpus(tmp_path_factory):
+    """Приёмочный корпус задачи 2.7: (store, prepared_dir).
+
+    Генерация трёх PDF → реальный конвейер ``pdfprepare`` (OCR бандлом
+    Tesseract rus+eng для растровых листов, native-путь для цифрового
+    листа техкарты) → ``pdfgraph`` CLI build (он же помечает дефекты из
+    отчётов о пересканировании — на этом корпусе их нет). Каталог временный,
+    в репозиторий ничего не пишется.
+    """
+    from pdfgraph.cli import main as graph_main
+    from pdfprepare.output import resolve_font
+    from pdfprepare.pipeline import process_file
+    from pdfprepare.registry import parse_registry
+
+    base = tmp_path_factory.mktemp("graph_corpus")
+    docs_dir = base / "docs"
+    docs_dir.mkdir()
+    prepared_dir = base / "prepared"
+    prepared_dir.mkdir()
+    fontfile = resolve_font(None)
+    registry_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "Коды систем Вертолета.txt")
+    registry = parse_registry(registry_path)
+
+    _gc_techcard_pdf(docs_dir / "techcard.pdf", fontfile)
+    _gc_figure_pdf(docs_dir / "figure.pdf", fontfile)
+    _gc_scan_pdf(docs_dir / "divider.pdf",
+                 [[(60, 90, 26, GC_SYSTEM_CODE)]], fontfile)
+
+    for name in GC_DOCS:
+        process_file(str(docs_dir / name), str(prepared_dir), registry)
+
+    store_path = str(base / "graph.db")
+    assert graph_main(["build", str(prepared_dir), store_path,
+                       "--type", FX_AIRCRAFT, "--registry", registry_path]) == 0
+    store = Store(store_path)
+    yield store, str(prepared_dir)
+    store.close()
