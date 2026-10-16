@@ -158,14 +158,44 @@ def test_part_filter_edges(tmp_path):
             ["МИ-8.100-01"],   # буквы + точка + длина>=6 — деталь
             ["869309"],        # без точки — мимо
             ["РИС."],          # короткое (<6) — мимо
-            ["12345678."],     # без букв — мимо
+            ["1234.6"],        # без букв и ведущих цифр <5 — мимо
             ["8MTB.7226.000"], # латиница тоже подходит
+            ["54321.00"],      # 5 ведущих цифр без букв — подходит (чисто цифровое)
         ])],
     )
     store = Store(str(tmp_path / "g.db"))
     build([DocResult("d.pdf", 1, [page], {})], "Ми-8МТВ", {}, store)
     parts = {row[0] for row in _rows(store, "SELECT key FROM nodes WHERE kind = 'part'")}
-    assert parts == {"МИ-8.100-01", "8MTB.7226.000"}
+    assert parts == {"МИ-8.100-01", "8MTB.7226.000", "54321.00"}
+    store.close()
+
+
+def test_part_cells_designation_pattern(tmp_path):
+    # Правило fix round 2 (ровно из задания координатора): строка из шести
+    # ячеек даёт ровно два узла part — 8МТ.6101.100 и 869309.001-03.
+    from pdfprepare.models import DocResult, PageInfo, Table
+    from pdfgraph.build import build
+    from pdfgraph.store import Store
+
+    page = PageInfo(
+        page_index=1,
+        is_native_text=False,
+        is_blank=False,
+        system_code="023.00.00",
+        subsystem_code="",
+        full_text="023.00.00",
+        words=[],
+        tables=[Table(1, (0, 0, 10, 10), [
+            ["8МТ.6101.100", "1.", "КОЛИЧ. НА ЕД. СБ.",
+             "960-2. ® A OOO ®", "869309.001-03", "3"],
+        ])],
+    )
+    store = Store(str(tmp_path / "g.db"))
+    build([DocResult("d.pdf", 1, [page], {})], "Ми-8МТВ", {}, store)
+    parts = {row[0] for row in _rows(store, "SELECT key FROM nodes WHERE kind = 'part'")}
+    assert parts == {"8МТ.6101.100", "869309.001-03"}
+    edges = _rows(store, "SELECT COUNT(*) FROM edges WHERE kind = 'has_part'")[0][0]
+    assert edges == 2
     store.close()
 
 

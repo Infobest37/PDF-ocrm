@@ -26,27 +26,41 @@ from pdfgraph.store import Store
 #: Longest page-text-derived label kept for codes missing from the registry.
 _MAX_LABEL_CHARS = 120
 
-#: Shortest normalized cell key accepted as a part designation (fix round 1:
-#: bare ordinals/quantities like ``1.`` or ``3`` are table noise, not parts).
+#: Shortest normalized cell key accepted as a part designation.
 _PART_MIN_KEY_LEN = 6
 
-#: At least one Cyrillic or Latin letter; keys are upper-cased by the
-#: normalizer, both cases are listed for robustness.
-_PART_LETTER_RE = re.compile(r"[A-Za-zА-Яа-яЁё]")
+#: Designation shape (fix round 2): starts alphanumeric, then only digits,
+#: uppercase letters and ``.`` / ``-``. No spaces, brackets, ``®``, pipes —
+#: OCR noise like ``КОЛИЧ. НА ЕД. СБ.`` fails on the very first character class.
+_PART_SHAPE_RE = re.compile(r"^[0-9A-ZА-Я][0-9A-ZА-Я.\-]*$")
+
+#: At least one Cyrillic or Latin letter (keys are upper-cased by the
+#: normalizer, so uppercase ranges suffice).
+_PART_LETTER_RE = re.compile(r"[A-ZА-Я]")
+
+#: A run of five or more leading digits — the alternative to having a letter
+#: (keeps pure-numeric designations like ``869309.001-03``).
+_PART_LEADING_DIGITS_RE = re.compile(r"^[0-9]{5}")
 
 
-def _is_part_designation(key: str) -> bool:
-    """Whether a normalized table cell qualifies as a part designation.
+def _looks_like_part_number(key: str) -> bool:
+    """Whether a normalized table-cell key is a part designation.
 
-    Agreed rule (fix round 1): the ``normalize_part_number`` key must contain
-    at least one Cyrillic or Latin letter, at least one dot, and be at least
-    6 characters long. Everything else — empty cells, pure digits, ordinals,
-    quantities, letterless codes — is skipped silently; nothing is guessed.
+    Rule agreed with the coordinator (fix round 2, justified by real Каталог
+    Д-1701 data): the key must match ``^[0-9A-ZА-Я][0-9A-ZА-Я.\\-]*$``
+    (no spaces, no punctuation beyond dot and hyphen, no ®), contain at least
+    one dot, be at least 6 characters long, and contain at least one letter
+    OR start with five or more digits (pure-numeric designations are kept).
+    Drops ``1.``, ``3``, ``КОЛИЧ. НА ЕД. СБ.``, ``960-2. ® A OOO ®``;
+    keeps ``8МТ.6101.100``, ``869309.001-03``. Keys arrive already upper-cased
+    by :func:`pdfprepare.normalize.normalize_part_number`.
     """
     return (
         len(key) >= _PART_MIN_KEY_LEN
+        and _PART_SHAPE_RE.match(key) is not None
         and "." in key
-        and _PART_LETTER_RE.search(key) is not None
+        and (_PART_LETTER_RE.search(key) is not None
+             or _PART_LEADING_DIGITS_RE.match(key) is not None)
     )
 
 
@@ -91,7 +105,7 @@ def build(
     pages (labelled from ``registry``, else ``DocResult.system_names``, else a
     page-text line for unnamed third-level codes), one document node, one sheet
     node per page, part nodes from table cells that pass the designation
-    filter (:func:`_is_part_designation`), figure nodes, plus edges.
+    pattern (:func:`_looks_like_part_number`), figure nodes, plus edges.
     Cross-references are resolved in a second pass, so a forward reference to a
     figure that appears later in the same document still resolves; missing
     targets become ``pending_reference`` nodes keyed ``system:<код>`` /
@@ -167,8 +181,8 @@ def build(
                 for row in table.rows:
                     for cell in row:
                         part_key = normalize_part_number(cell)
-                        if not _is_part_designation(part_key):
-                            continue  # empty or non-designation cell, skipped
+                        if not _looks_like_part_number(part_key):
+                            continue  # not a designation — silently skipped
                         part_id = store.add_node("part", part_key)
                         store.add_edge(sheet_id, part_id, "has_part",
                                        detail=cell,
