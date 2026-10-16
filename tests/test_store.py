@@ -117,7 +117,7 @@ def test_mark_defect_is_idempotent_and_defect_sheets_sorted(tmp_path):
 
 
 def test_old_database_migrates_schema_version_on_open(tmp_path):
-    """Revue 2.7, находка 2: БД, созданная до таблицы defects
+    """Review 2.7, находка 2: БД, созданная до таблицы defects
     (schema_version '1'), при открытии получает defects и актуальную
     версию '2'; узлы, рёбра и строки листов остаются на месте."""
     from pdfgraph.store import Store

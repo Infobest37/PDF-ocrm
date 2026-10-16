@@ -108,19 +108,24 @@ def fx_prepared_dir(tmp_path):
 #
 # Три PDF в docs/ собираются PyMuPDF один раз за сессию, прогоняются через
 # реальный конвейер pdfprepare и через CLI ``pdfgraph build`` в отдельную
-# базу. Состав листов:
-#   techcard.pdf — стр. 0: растеризованный пустой лист-разделитель (код
-#     023.00.00, реальный OCR), стр. 1: цифровой лист техкарты 023.11.30
-#     (таблица 3×3, деталь 8МТ.6101.100, «Аварийный переносной радиомаяк
-#     ПАРМ-406А»). Цифровой — не по лени: Tesseract rus+eng на шрифте
-#     Arial кириллические МТ в обозначении «8МТ.6101.100» систематически
-#     выдаёт латиницей «MT» (проверено на 9 шрифтах × 5 контекстах), а
-#     проект запрещает транслитерацию — золотой вопрос «8МТ.6101.100»
-#     с кириллицей тогда не совпал бы никогда. Текст этого листа конвейер
-#     читает native-путём (так же ведут себя уже распознанные PDF в pdfs/).
-#   figure.pdf — стр. 0: такой же лист-разделитель (OCR), стр. 1: растр 150
-#     dpi «скан» листа с подписью «Рис. 12 …» и ссылкой «См. 028.10.00,
-#     рис. 1» — текст переживает реальный OCR (проверено).
+# базу. ВСЕ пять листов — реальный OCR: содержательные страницы
+# растеризуются в «скан» 150 dpi (текстового слоя нет — native-путь
+# конвейера не срабатывает). Состав листов:
+#   techcard.pdf — лист 0: пустой лист-разделитель (код 023.00.00), лист 1:
+#     скан техкарты 023.11.30 с таблицей 3×3 (обозначение детали
+#     869309.001-03 в ячейке, «Аварийный переносной радиомаяк ПАРМ-406А»).
+#     Сетка — со «смещёнными щелями» (по одной на линию, шахматкой):
+#     замкнутая сетка заставляет tesseract --psm 6 выбрасывать весь текст
+#     ячеек, а сомкнутые линии нужны детекции tables.py — компромисс найден
+#     свипом сквозь реальный конвейер (артефакты в журнале:
+#     task-2.7-grid-sweep{,2,3}.py / .log). Обозначение детали чисто
+#     цифровое: Tesseract rus+eng кириллические М/Т в «8МТ…» систематически
+#     выдаёт латиницей «MT» (свип 17 шрифтов × 5 контекстов, лог в
+#     журнале), а транслитерация запрещён политикой normalize —
+#     кириллический золотой запрос через реальный OCR не достигался бы.
+#   figure.pdf — лист 0: такой же разделитель, лист 1: скан листа с
+#     подписью «Рис. 12 …» и ссылкой «См. 028.10.00, рис. 1» (переживает
+#     реальный OCR — проверено).
 #   divider.pdf — отдельный пустой лист-разделитель с кодом 023.00.00.
 # ---------------------------------------------------------------------------
 
@@ -128,6 +133,9 @@ GC_PAGE = (595.0, 842.0)  # A4 в точках
 GC_SCAN_DPI = 150
 GC_SYSTEM_CODE = "023.00.00"
 GC_DOCS = ("divider.pdf", "figure.pdf", "techcard.pdf")
+#: Обозначение детали в приёмочном корпусе — цифровое, переживает OCR.
+GC_PART = "869309.001-03"
+GC_PART2 = "869309.002-03"
 
 
 def _gc_text(page, items, fontfile):
@@ -165,46 +173,68 @@ def _gc_blank_scan_page(final, fontfile):
     """Растеризованный пустой лист-разделитель: в углу только код системы."""
     import fitz
     scratch = fitz.open()
-    sp = scratch.new_page(width=GC_PAGE[0], height=GC_PAGE[1])
-    _gc_text(sp, [(60, 90, 26, GC_SYSTEM_CODE)], fontfile)
-    _gc_raster_page(sp, final)
-    scratch.close()
+    try:
+        sp = scratch.new_page(width=GC_PAGE[0], height=GC_PAGE[1])
+        _gc_text(sp, [(60, 90, 26, GC_SYSTEM_CODE)], fontfile)
+        _gc_raster_page(sp, final)
+    finally:
+        scratch.close()
 
 
 def _gc_techcard_pdf(path, fontfile):
-    """techcard.pdf: растр-разделитель (лист 0) + цифровой лист техкарты
-    (лист 1): код 023.11.30, заголовок, таблица 3×3 с деталью в ячейке."""
+    """techcard.pdf: растр-разделитель (лист 0) + растр-«скан» техкарты
+    (лист 1): колонтитул 023.11.30, заголовок, сетка 3×3 со смещёнными
+    щелями (lw 3.0, щель 60pt по шахматке), деталь GC_PART в ячейке.
+    Геометрия варнанта X7 свипа: единственный, где реальный конвейер И
+    детектировал таблицу, И прочитал все ячейки без мусора."""
     import fitz
-    final = fitz.open()
-    _gc_blank_scan_page(final, fontfile)
-    page = final.new_page(width=GC_PAGE[0], height=GC_PAGE[1])
-    _gc_text(page, [
-        (60, 90, 22, "023.11.30"),
-        (300, 90, 18, "ТЕХНОЛОГИЧЕСКАЯ КАРТА"),
-        (60, 150, 26, "Аварийный переносной"),
-        (60, 185, 26, "радиомаяк ПАРМ-406А"),
-    ], fontfile)
-    # таблица 3×3: 4 вертикальные и 4 горизонтальные линейки
-    xs = [60.0, 220.0, 380.0, 540.0]
-    ys = [250.0, 320.0, 390.0, 460.0]
-    for x in xs:
-        page.draw_line(fitz.Point(x, ys[0]), fitz.Point(x, ys[-1]), width=1.0)
-    for y in ys:
-        page.draw_line(fitz.Point(xs[0], y), fitz.Point(xs[-1], y), width=1.0)
+    xs = [40.0, 212.0, 384.0, 556.0]     # 3 колонки по 172pt
+    ys = [240.0, 315.0, 390.0, 465.0]    # 3 строки по 75pt
+    gap, line_width, cell_size = 60.0, 3.0, 18
     cells = [["N", "ОБОЗНАЧЕНИЕ", "КОЛ"],
-             ["1", FX_PART, "1"],
-             ["2", "8МТ.6101.200", "1"]]
-    for row_index, row in enumerate(cells):
-        for col_index, text in enumerate(row):
-            page.insert_text((xs[col_index] + 14, ys[row_index] + 46), text,
-                             fontname="gc", fontfile=fontfile, fontsize=20)
-    _gc_text(page, [
-        (60, 520, 22, "Обозначение детали:"),
-        (60, 550, 22, FX_PART),
-        (60, 800, 20, "023.11.30"),
-    ], fontfile)
-    final.save(str(path))
-    final.close()
+             ["1", GC_PART, "2"],
+             ["2", GC_PART2, "2"]]
+    final = fitz.open()
+    try:
+        _gc_blank_scan_page(final, fontfile)
+        scratch = fitz.open()
+        try:
+            page = scratch.new_page(width=GC_PAGE[0], height=GC_PAGE[1])
+            _gc_text(page, [
+                (40, 90, 24, "023.11.30"),
+                (300, 90, 20, "ТЕХКАРТА"),
+                (40, 140, 26, "Аварийный переносной"),
+                (40, 175, 26, "радиомаяк ПАРМ-406А"),
+                (40, 520, 20, "Изготовление по настоящему разделу."),
+            ], fontfile)
+            # горизонтальные линейки: щель в центре «своего» столбца j % 3
+            for j, y in enumerate(ys):
+                m = (xs[j % 3] + xs[j % 3 + 1]) / 2
+                page.draw_line(fitz.Point(xs[0], y), fitz.Point(m - gap / 2, y),
+                               width=line_width)
+                page.draw_line(fitz.Point(m + gap / 2, y), fitz.Point(xs[-1], y),
+                               width=line_width)
+            # вертикальные линейки: щель в центре «своего» ряда (i + 1) % 3
+            for i, x in enumerate(xs):
+                m = (ys[(i + 1) % 3] + ys[(i + 1) % 3 + 1]) / 2
+                page.draw_line(fitz.Point(x, ys[0]), fitz.Point(x, m - gap / 2),
+                               width=line_width)
+                page.draw_line(fitz.Point(x, m + gap / 2), fitz.Point(x, ys[-1]),
+                               width=line_width)
+            font = fitz.Font(fontfile=fontfile)
+            for r, row in enumerate(cells):
+                for c, text in enumerate(row):
+                    width = font.text_length(text, fontsize=cell_size)
+                    x0 = xs[c] + ((xs[c + 1] - xs[c]) - width) / 2
+                    baseline = (ys[r] + ys[r + 1]) / 2 + cell_size * 0.35
+                    page.insert_text((x0, baseline), text, fontname="gc",
+                                     fontfile=fontfile, fontsize=cell_size)
+            _gc_raster_page(page, final)
+        finally:
+            scratch.close()
+        final.save(str(path))
+    finally:
+        final.close()
 
 
 def _gc_figure_pdf(path, fontfile):
@@ -212,34 +242,38 @@ def _gc_figure_pdf(path, fontfile):
     рисунком (лист 1): подпись «Рис. 12 …» и ссылка «См. 028.10.00, рис. 1»."""
     import fitz
     final = fitz.open()
-    _gc_blank_scan_page(final, fontfile)
-    scratch = fitz.open()
-    sp = scratch.new_page(width=GC_PAGE[0], height=GC_PAGE[1])
-    _gc_text(sp, [
-        (60, 90, 26, "023.20.00"),
-        (60, 150, 26, "Схема электрическая"),
-        (60, 185, 22, "Аварийный переносной"),
-        (60, 210, 22, "радиомаяк ПАРМ-406А"),
-        (60, 320, 26, "Рис. 12 Монтаж"),
-        (60, 355, 26, "аппаратуры на грузовой"),
-        (60, 390, 26, "полке кабины экипажа"),
-        (60, 430, 26, "См. 028.10.00, рис. 1"),
-    ], fontfile)
-    _gc_raster_page(sp, final)
-    scratch.close()
-    final.save(str(path))
-    final.close()
+    try:
+        _gc_blank_scan_page(final, fontfile)
+        scratch = fitz.open()
+        try:
+            sp = scratch.new_page(width=GC_PAGE[0], height=GC_PAGE[1])
+            _gc_text(sp, [
+                (60, 90, 26, "023.20.00"),
+                (60, 150, 26, "Схема электрическая"),
+                (60, 185, 22, "Аварийный переносной"),
+                (60, 210, 22, "радиомаяк ПАРМ-406А"),
+                (60, 320, 26, "Рис. 12 Монтаж"),
+                (60, 355, 26, "аппаратуры на грузовой"),
+                (60, 390, 26, "полке кабины экипажа"),
+                (60, 430, 26, "См. 028.10.00, рис. 1"),
+            ], fontfile)
+            _gc_raster_page(sp, final)
+        finally:
+            scratch.close()
+        final.save(str(path))
+    finally:
+        final.close()
 
 
 @pytest.fixture(scope="session")
 def graph_corpus(tmp_path_factory):
     """Приёмочный корпус задачи 2.7: (store, prepared_dir).
 
-    Генерация трёх PDF → реальный конвейер ``pdfprepare`` (OCR бандлом
-    Tesseract rus+eng для растровых листов, native-путь для цифрового
-    листа техкарты) → ``pdfgraph`` CLI build (он же помечает дефекты из
-    отчётов о пересканировании — на этом корпусе их нет). Каталог временный,
-    в репозиторий ничего не пишется.
+    Генерация трёх PDF → реальный конвейер ``pdfprepare`` (все пять листов
+    — растр 150 dpi, сквозной OCR бандлом Tesseract rus+eng) → ``pdfgraph``
+    CLI build (он же помечает дефекты из отчётов о пересканировании — на
+    этом корпусе их нет). Каталог временный, в репозиторий ничего не
+    пишется.
     """
     from pdfgraph.cli import main as graph_main
     from pdfprepare.output import resolve_font
