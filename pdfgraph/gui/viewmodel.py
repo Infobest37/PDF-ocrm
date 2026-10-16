@@ -30,16 +30,19 @@ class AnswerRow:
 def answer_rows(answer: Answer, checks: list[CitationCheck]) -> list[AnswerRow]:
     """Build one :class:`AnswerRow` per claim using its citation checks.
 
-    A claim is ``verified`` only when it has citation checks and every one of
-    them is ``ok``. A claim without references, or one whose checks are
-    missing, shows as unverified. Row links (document/page/code) and the
+    A claim is ``verified`` only when it has references, citation checks and
+    every one of them is ``ok``. A refusal answer always yields no rows. Row links (document/page/code) and the
     snippet come from the claim's earliest confirmed fragment, falling back to
     its first available fragment.
     """
     rows: list[AnswerRow] = []
+    if answer.refusal:
+        return rows
     for claim_index, claim in enumerate(answer.claims):
         claim_checks = [c for c in checks if c.claim_index == claim_index]
-        verified = bool(claim_checks) and all(c.ok for c in claim_checks)
+        verified = bool(claim.evidence) and bool(claim_checks) and all(
+            c.ok for c in claim_checks
+        )
 
         indexes = list(claim.evidence)
         confirmed = [
