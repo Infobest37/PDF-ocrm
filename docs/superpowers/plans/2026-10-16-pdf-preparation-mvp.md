@@ -435,7 +435,7 @@ git commit -m "feat(output): write searchable PDF text layer and JSON structure"
 **Interfaces:**
 - Consumes: `PageInfo`, `DocResult`, `QualityFlag` (Task 1).
 - Produces:
-  - `MIN_CONF = 60.0`, `MIN_COVERAGE = 0.02` (module constants).
+  - `MIN_CONF = 0.60`, `MIN_COVERAGE = 0.02` (module constants; confidence is 0..1).
   - `flag_pages(result: DocResult) -> list[QualityFlag]` — for each **non-blank, non-native** page: `avg_conf` = mean word conf, `text_coverage` = word area ÷ page area (page area from words' bbox or fixed 612×792 if no words); emit a flag when `avg_conf < MIN_CONF` OR `text_coverage < MIN_COVERAGE`, with reason `"low_confidence"` or `"low_text_coverage"`.
   - `write_report(flags: list[QualityFlag], out_path: str) -> None` — writes a UTF-8 text file, one line per flag: `page {page_index}: {reason} (conf={avg_conf:.2f}, coverage={text_coverage:.4f})`.
 
