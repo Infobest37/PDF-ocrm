@@ -6,6 +6,9 @@ Subcommands
     Reads every ``*.json`` under ``prepared_dir`` (recursively) with
     :func:`pdfprepare.output.read_result`, assembles the graph with
     :func:`pdfgraph.build.build` and prints :meth:`pdfgraph.store.Store.stats`.
+    Without ``--registry`` no registry is read at all (``registry = {}``);
+    with ``--registry`` but a missing file, a warning goes to stderr and the
+    registry stays empty.
 
 ``ask "<вопрос>" --store <path> [--type <ВС>] [--json]``
     Answers through :func:`pdfgraph.answer.build_answer` and **always** reports
@@ -38,9 +41,6 @@ from pdfgraph.verify import CitationCheck, all_verified, verify_citations
 from pdfprepare.output import read_result
 from pdfprepare.registry import parse_registry
 
-#: Default ATA-100 code -> name registry file (project root).
-_DEFAULT_REGISTRY = "Коды систем Вертолета.txt"
-
 
 def _open_store(path: str) -> Store | None:
     """Open the SQLite store, reporting failures instead of crashing."""
@@ -51,6 +51,26 @@ def _open_store(path: str) -> Store | None:
         return None
 
 
+def _load_registry(path: str | None) -> dict[str, str]:
+    """Registry for ``build``: ``--registry`` absent or unreadable -> ``{}``.
+
+    Without the flag no file is consulted at all (contract of task 2.6,
+    review round 1). With the flag but a missing file: a warning on stderr
+    and an empty registry, mirroring the warning style of
+    :func:`pdfprepare.cli.main`.
+    """
+    if path is None:
+        return {}
+    if os.path.isfile(path):
+        return parse_registry(path)
+    print(
+        f"warning: registry file not found: {path!r}; "
+        "system labels come from page text only",
+        file=sys.stderr,
+    )
+    return {}
+
+
 def _cmd_build(args: argparse.Namespace) -> int:
     """Fill the store from prepared-document JSON; report stats."""
     paths = sorted(glob.glob(os.path.join(args.prepared_dir, "**", "*.json"),
@@ -59,15 +79,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
         print(f"error: no *.json under {args.prepared_dir!r}", file=sys.stderr)
         return 2
 
-    if os.path.isfile(args.registry):
-        registry = parse_registry(args.registry)
-    else:
-        print(
-            f"warning: registry file not found: {args.registry!r}; "
-            "system labels come from page text only",
-            file=sys.stderr,
-        )
-        registry = {}
+    registry = _load_registry(args.registry)
 
     results = []
     for path in paths:
@@ -210,8 +222,10 @@ def main(argv: list[str]) -> int:
         "--type", dest="aircraft_type", required=True, metavar="ВС",
         help="Aircraft type the documents belong to (e.g. Ми-8МТВ).")
     build_parser.add_argument(
-        "--registry", default=_DEFAULT_REGISTRY, metavar="PATH",
-        help="ATA-100 code -> name registry file (default: %(default)s).")
+        "--registry", default=None, metavar="PATH",
+        help="ATA-100 code -> name registry file; without this flag no "
+             "registry is read (labels come from the JSON system_names "
+             "and page text).")
     build_parser.set_defaults(handler=_cmd_build)
 
     ask_parser = commands.add_parser(

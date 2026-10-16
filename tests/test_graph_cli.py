@@ -118,6 +118,32 @@ def test_cli_build_missing_registry_still_builds(fx_prepared_dir, tmp_path,
                  "--json"]) == 0
 
 
+def test_cli_build_without_registry_flag_is_empty(fx_prepared_dir, tmp_path,
+                                                  monkeypatch):
+    """Без флага --registry реестр не читается вообще, даже если файл по
+    умолчанию лежит в текущем каталоге (уточнение контроллера 1, ревью 2.6)."""
+    import sqlite3
+
+    from pdfgraph.cli import main
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "Коды систем Вертолета.txt").write_text(
+        "023.00.00 МЕТКА ИЗ РЕЕСТРА\n023.11.30 ПОДСИСТЕМА ИЗ РЕЕСТРА\n",
+        encoding="utf-8")
+    store = str(tmp_path / "g.db")
+    assert main(["build", fx_prepared_dir, store, "--type", "Ми-8МТВ"]) == 0
+
+    conn = sqlite3.connect(store)
+    try:
+        labels = dict(conn.execute(
+            "SELECT key, label FROM nodes WHERE kind IN ('system','subsystem')"))
+    finally:
+        conn.close()
+    # Метка из файла не просочилась ни в один узел...
+    assert not any("РЕЕСТР" in (label or "") for label in labels.values())
+    # ...система названа из DocResult.system_names фикстуры.
+    assert labels.get("023.00.00") == "СВЯЗНОЕ РАДИООБОРУДОВАНИЕ"
+
+
 def test_cli_ask_type_filter_and_missing_store_are_reported(fx_prepared_dir,
                                                             tmp_path, capsys):
     """--type restricts answers; a missing store is a usage error (rc 2)."""
