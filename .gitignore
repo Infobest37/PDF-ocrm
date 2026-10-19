@@ -22,3 +22,5 @@ build/
 PDF_OCR_APP_worktree_*.zip
 *.old-*
 output_graph/
+*.db-shm
+*.db-wal

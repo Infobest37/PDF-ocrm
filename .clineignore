@@ -1,0 +1,26 @@
+# Данные (не код)
+pdfs/
+graph.db
+graph.db-shm
+graph.db-wal
+output_graph/
+out/
+OCRfile/
+
+# Runtime и окружения
+venv/
+.venv/
+dist/pdfgraph/_internal/
+build/
+__pycache__/
+.pytest_cache/
+
+# Git-история и бэкапы
+.git/
+.git.backup-2026-10-19/
+
+# Медиа
+*.pdf
+*.pkg
+*.pyz
+*.exe
