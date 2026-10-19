@@ -14,12 +14,14 @@ means verified, hollow graphite square means not.
 
 import argparse
 import os
+import pathlib
 import sqlite3
 import sys
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from pdfgraph.answer import build_answer
+from pdfgraph.gui.pdf_opener import open_pdf_at_page, resolve_pdf_dir
 from pdfgraph.gui.viewmodel import AnswerRow, answer_rows, verdict_text
 from pdfgraph.paths import resolve_store_path
 from pdfgraph.store import Store
@@ -139,11 +141,16 @@ class MainWindow(QtWidgets.QMainWindow):
     """One-window answer screen: question, verified table, confirmation, verdict."""
 
     def __init__(self, store_path: str, registry_path: str,
-                 missing_hint: str = ""):
+                 missing_hint: str = "",
+                 pdf_dir: str | pathlib.Path | None = None):
         super().__init__()
         self.store_path = store_path
         #: Reserved for the upcoming ATA-100 registry navigation (task 3.3+).
         self.registry_path = registry_path
+        #: Step 2: folder of the source PDFs opened on double-click, resolved
+        #: once (CLI ``--pdf-dir`` > PDFGRAPH_PDF_DIR > default); ``None``
+        #: when nothing exists, and the text-sheet dialog is the fallback.
+        self.pdf_dir = resolve_pdf_dir(pdf_dir)
         #: Stage 2: when the resolver found nothing, the calm note appends
         #: the exact list of tried paths (see paths.resolve_store_path).
         self._missing_text = _MISSING_STORE_TEXT + (
@@ -345,7 +352,16 @@ class MainWindow(QtWidgets.QMainWindow):
         return rows
 
     def open_sheet(self, document: str, page: int) -> None:
-        """Show the stored text of one sheet; missing/broken stores stay calm."""
+        """Show one sheet: the source PDF first, the stored text as fallback.
+
+        For every sheet whose store read succeeds (blank boundary sheets
+        included — the physical PDF page still exists), double-click first
+        asks the PDF viewer to open the cited page (step 2); when the PDF
+        cannot be opened a calm warning names the problem and the step-1
+        body is shown unchanged: stored text or, for a blank sheet, the
+        boundary note. Missing/broken stores never reach the viewer: they
+        keep the calm text path from the step-1 GUI.
+        """
         if not self._open_store():
             body = self._missing_text
         else:
@@ -358,6 +374,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._drop_store()
                 body = _CORRUPT_STORE_TEXT
             else:
+                if open_pdf_at_page(self.pdf_dir, document, page):
+                    return
+                QtWidgets.QMessageBox.warning(
+                    self, "Открытие PDF",
+                    f"PDF не найден: {document}. Проверьте --pdf-dir")
                 if text and text.strip():
                     body = text
                 else:
@@ -469,6 +490,11 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--registry", default="Коды систем Вертолета.txt", metavar="PATH",
         help="ATA-100 code registry file (reserved for navigation).")
+    parser.add_argument(
+        "--pdf-dir", default=None, metavar="PATH",
+        help="Folder of the source PDFs opened on double-click. Default: "
+             "auto (PDFGRAPH_PDF_DIR, then the prepared «pdfs» folder — "
+             "pdfgraph.gui.pdf_opener.resolve_pdf_dir).")
     args = parser.parse_args(argv)
 
     missing_hint = ""
@@ -481,7 +507,8 @@ def main(argv=None) -> int:
         missing_hint = str(exc)
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    window = MainWindow(store_path, args.registry, missing_hint=missing_hint)
+    window = MainWindow(store_path, args.registry, missing_hint=missing_hint,
+                        pdf_dir=args.pdf_dir)
     window.show()
     return int(app.exec_())
 
