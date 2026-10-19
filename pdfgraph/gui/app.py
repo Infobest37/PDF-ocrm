@@ -39,6 +39,12 @@ REFUSAL_PLATE = "#454c52"
 
 #: Column titles pinned by the design brief — keep verbatim.
 COLUMNS = ("Ответ", "Документ", "Лист", "Код", "Проверено")
+AIRCRAFT_CHOICES = [
+    ("Все", None),
+    ("Ми-8МТВ", "Ми-8МТВ"),
+    ("КА-32", "КА-32"),
+    ("Ми-8Т", "Ми-8Т"),
+]
 
 _AWAITING_TEXT = "Пока вопрос не задан — показываем только ответы, подтверждённые на листах"
 _SNIPPET_HINT = "Фрагмент подтверждённого ответа появится здесь"
@@ -91,6 +97,10 @@ QLineEdit#question {{ background: {PAPER}; color: {INK};
     border: 1px solid {INK}; padding: 9px 11px; font-size: 17px;
     selection-background-color: {PINE}; selection-color: {PAPER}; }}
 QLineEdit#question:focus {{ border: 2px solid {PINE}; padding: 8px 10px; }}
+QComboBox#aircraft {{ background: {PAPER}; color: {INK};
+    border: 1px solid {INK}; padding: 6px 8px; font-size: 15px; }}
+QComboBox#aircraft QAbstractItemView {{ background: {PAPER}; color: {INK};
+    selection-background-color: {SELECTION}; selection-color: {INK}; }}
 QPushButton#ask {{ background: {PINE}; color: {PAPER}; border: none;
     padding: 10px 26px; font-size: 17px; font-weight: 600; }}
 QPushButton#ask:hover {{ background: {PINE_HOVER}; }}
@@ -215,6 +225,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Zone 1: question + «Спросить».
         layout.addSpacing(16)
+        aircraft_row = QtWidgets.QHBoxLayout()
+        aircraft_row.setSpacing(10)
+        aircraft_label = QtWidgets.QLabel("Тип ВС", objectName="section")
+        self.aircraft_combo = QtWidgets.QComboBox(objectName="aircraft")
+        for label, value in AIRCRAFT_CHOICES:
+            self.aircraft_combo.addItem(label, value)
+        self.aircraft_combo.setCurrentIndex(0)
+        aircraft_row.addWidget(aircraft_label)
+        aircraft_row.addWidget(self.aircraft_combo)
+        aircraft_row.addStretch(1)
+        layout.addLayout(aircraft_row)
+        layout.addSpacing(8)
+
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(10)
         self.question_edit = QtWidgets.QLineEdit(objectName="question")
@@ -280,6 +303,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def _ask_clicked(self) -> None:
         self.ask(self.question_edit.text())
 
+    def _current_aircraft_type(self) -> str | None:
+        """Aircraft type selected in the filter; «Все» maps to ``None``."""
+        return self.aircraft_combo.currentData()
+
     def ask(self, question: str) -> list[AnswerRow]:
         """Answer ``question``, fill the table/panel/verdict, return display rows.
 
@@ -291,7 +318,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return []
         assert self._store is not None
         try:
-            answer = build_answer(self._store, question)
+            answer = build_answer(
+                self._store,
+                question,
+                aircraft_type=self._current_aircraft_type(),
+            )
             checks = verify_citations(answer, self._store)
         except sqlite3.Error:
             # The file opened but a query hit broken data pages: same calm
