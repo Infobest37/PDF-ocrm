@@ -1,0 +1,106 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "codebase-memory-mcp": {
+        "type": "local",
+        "command": [
+          "C:/Users/user/.local/bin/codebase-memory-mcp.exe"
+        ]
+      }
+    }
+  },
+  "compaction": {
+    "auto": true
+  },
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "allow" },
+    { "action": "shell", "resource": "git push*", "effect": "ask" },
+    { "action": "shell", "resource": "git push --force*", "effect": "deny" },
+    { "action": "shell", "resource": "git reset --hard*", "effect": "ask" },
+    { "action": "shell", "resource": "rm -rf*", "effect": "ask" },
+    { "action": "shell", "resource": "rm -rf .superpowers/*", "effect": "allow" },
+    { "action": "shell", "resource": "*migrate reset*", "effect": "deny" },
+    { "action": "shell", "resource": "*--force-reset*", "effect": "deny" },
+    { "action": "shell", "resource": "*drop database*", "effect": "deny" }
+  ],
+  "agents": {
+    "title": {
+      "model": "opencode-go/glm-5.3-flash"
+    },
+    "explore": {
+      "model": "opencode-go/glm-5.3-flash"
+    },
+    "fast": {
+      "description": "Дешёвый исполнитель: механические задачи, когда в плане уже есть готовый код",
+      "mode": "subagent",
+      "model": "opencode-go/glm-5.3-flash",
+      "permissions": [
+        { "action": "edit", "resource": "*", "effect": "allow" },
+        { "action": "subagent", "resource": "*", "effect": "deny" }
+      ],
+      "request": {
+        "body": {
+          "reasoning_effort": "medium"
+        }
+      }
+    },
+    "general": {
+      "description": "Стандартный исполнитель: задачи на несколько файлов, интеграция, отладка",
+      "mode": "subagent",
+      "model": "opencode-go/qwen3.8-flash",
+      "permissions": [
+        { "action": "edit", "resource": "*", "effect": "allow" },
+        { "action": "subagent", "resource": "*", "effect": "deny" }
+      ],
+      "request": {
+        "body": {
+          "reasoning_effort": "high"
+        }
+      }
+    },
+    "strong": {
+      "description": "Самый сильный исполнитель: архитектурные задачи и раунды 4-5 цикла исправлений",
+      "mode": "subagent",
+      "model": "opencode-go/gpt-6-luna",
+      "permissions": [
+        { "action": "edit", "resource": "*", "effect": "allow" },
+        { "action": "subagent", "resource": "*", "effect": "deny" }
+      ],
+      "request": {
+        "body": {
+          "reasoning_effort": "xhigh"
+        }
+      }
+    },
+    "worker-review": {
+      "description": "Ревьюер задач, повторных ревью и финального ревью. Только чтение",
+      "mode": "subagent",
+      "model": "opencode-go/gpt-6-luna",
+      "steps": 45,
+      "permissions": [
+        { "action": "edit", "resource": "*", "effect": "deny" },
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+        { "action": "webfetch", "resource": "*", "effect": "allow" },
+        { "action": "websearch", "resource": "*", "effect": "allow" },
+        { "action": "shell", "resource": "*", "effect": "deny" },
+        { "action": "shell", "resource": "git status*", "effect": "allow" },
+        { "action": "shell", "resource": "git diff*", "effect": "allow" },
+        { "action": "shell", "resource": "git log*", "effect": "allow" },
+        { "action": "shell", "resource": "git show*", "effect": "allow" },
+        { "action": "shell", "resource": "git blame*", "effect": "allow" },
+        { "action": "shell", "resource": "git ls-files*", "effect": "allow" },
+        { "action": "shell", "resource": "git worktree list*", "effect": "allow" },
+        { "action": "shell", "resource": "rg *", "effect": "allow" },
+        { "action": "shell", "resource": "grep *", "effect": "allow" },
+        { "action": "shell", "resource": "ls *", "effect": "allow" },
+        { "action": "shell", "resource": "wc *", "effect": "allow" }
+      ],
+      "request": {
+        "body": {
+          "reasoning_effort": "high"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-16T12:00:00Z",
+  "title": "Design System: Граф знаний Ми-8МТВ (job-aid GUI)",
+  "extensions": {
+    "colorMeta": {
+      "ink": { "role": "neutral", "displayName": "Ink", "canonical": "#14181b" },
+      "paper": { "role": "neutral", "displayName": "Paper", "canonical": "#f4f4f1" },
+      "desk": { "role": "neutral", "displayName": "Desk Slate", "canonical": "#31363a" },
+      "pine": { "role": "primary", "displayName": "Pine Workmark", "canonical": "#20644c", "tonalRamp": ["#0e2c21", "#144132", "#1a5240", "#20644c", "#3c7d64", "#6f9f8d", "#a9c7bc", "#dde8e1"] },
+      "graphite": { "role": "neutral", "displayName": "Graphite", "canonical": "#575e63" },
+      "rule": { "role": "neutral", "displayName": "Rule", "canonical": "#c9c6bc" },
+      "selection": { "role": "neutral", "displayName": "Selection Tint", "canonical": "#dde8e1" },
+      "refusal-plate": { "role": "neutral", "displayName": "Refusal Plate", "canonical": "#454c52" }
+    },
+    "typographyMeta": {
+      "verdict": { "displayName": "Verdict", "purpose": "The one reversed plate line; confirmation count or calm refusal." },
+      "input": { "displayName": "Input", "purpose": "Question field — largest interactive text (brief-pinned крупный шрифт)." },
+      "body": { "displayName": "Body", "purpose": "Table cells, snippet panel, sheet dialog." },
+      "label": { "displayName": "Label", "purpose": "Window title, table headers, section captions." }
+    },
+    "shadows": [],
+    "motion": [],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Primary Button («Спросить»)",
+      "kind": "button",
+      "refersTo": "button-ask",
+      "description": "The single primary action; pine appears only here, on selection and on the verified stamp.",
+      "html": "<button class=\"ds-btn-ask\">Спросить</button>",
+      "css": ".ds-btn-ask { background: #20644c; color: #f4f4f1; border: none; border-radius: 0; padding: 10px 26px; font: 600 17px 'Segoe UI', sans-serif; } .ds-btn-ask:hover { background: #1a5240; } .ds-btn-ask:active { background: #144132; } .ds-btn-ask:disabled { background: #c9c6bc; color: #575e63; } .ds-btn-ask:focus-visible { outline: 2px solid #14181b; outline-offset: -2px; }"
+    },
+    {
+      "name": "Secondary Button («Закрыть»)",
+      "kind": "button",
+      "refersTo": "button-close",
+      "description": "Dialog dismissal; paper with an ink hairline.",
+      "html": "<button class=\"ds-btn-close\">Закрыть</button>",
+      "css": ".ds-btn-close { background: #f4f4f1; color: #14181b; border: 1px solid #14181b; border-radius: 0; padding: 9px 22px; font: 400 15px 'Segoe UI', sans-serif; } .ds-btn-close:hover { background: #dde8e1; }"
+    },
+    {
+      "name": "Question Field",
+      "kind": "input",
+      "refersTo": "input-question",
+      "description": "Plain-text question; Enter asks; focus deepens the border to pine.",
+      "html": "<input class=\"ds-input-question\" placeholder=\"Вопрос по техдокументации\" value=\"радиомаяк ПАРМ-406А\">",
+      "css": ".ds-input-question { background: #f4f4f1; color: #14181b; border: 1px solid #14181b; border-radius: 0; padding: 9px 11px; font: 400 17px 'Segoe UI', sans-serif; } .ds-input-question::selection { background: #20644c; color: #f4f4f1; } .ds-input-question:focus { border: 2px solid #20644c; padding: 8px 10px; outline: none; }"
+    },
+    {
+      "name": "Verdict Plate (signature)",
+      "kind": "custom",
+      "refersTo": "verdict-plate",
+      "description": "The screen's one reversed element; answered state is ink, refusal is the same geometry in graphite — never red.",
+      "html": "<div class=\"ds-verdict-plate\">Подтверждено 1 из 1</div><div class=\"ds-verdict-plate ds-verdict-refusal\">Ответ отклонён: нет подтверждений на листах</div>",
+      "css": ".ds-verdict-plate { background: #14181b; color: #f4f4f1; padding: 12px 14px; font: 600 17px 'Segoe UI', sans-serif; } .ds-verdict-refusal { background: #454c52; }"
+    },
+    {
+      "name": "Verified Stamp Cell (signature)",
+      "kind": "custom",
+      "refersTo": "table-answers",
+      "description": "Fixed-cell state mark painted with QPainter: filled pine = verified, hollow graphite = not. Never a glyph.",
+      "html": "<div class=\"ds-row\"><span class=\"ds-cell\">023.11.30 АВАРИЙНЫЙ ПЕРЕНОСНОЙ РАДИОМАЯК ПАРМ-406А</span><span class=\"ds-cell\">РТЭ кн.1.pdf</span><span class=\"ds-cell\">47</span><span class=\"ds-cell\">023.00.00</span><span class=\"ds-cell ds-mark-verified\"></span></div><div class=\"ds-row ds-selected\"><span class=\"ds-cell\">РАДИОМАЯК В СОСТАВЕ ВЕРТОЛЁТА</span><span class=\"ds-cell\">РТЭ кн.1.pdf</span><span class=\"ds-cell\">48</span><span class=\"ds-cell\">023.11.30</span><span class=\"ds-cell ds-mark-hollow\"></span></div>",
+      "css": ".ds-row { display: grid; grid-template-columns: 1fr 180px 70px 110px 110px; background: #f4f4f1; color: #14181b; border-bottom: 1px solid #c9c6bc; font: 400 15px 'Segoe UI', sans-serif; } .ds-row .ds-cell { padding: 6px 8px; } .ds-selected { background: #dde8e1; } .ds-mark-verified { width: 14px; height: 14px; background: #20644c; margin: 10px auto; } .ds-mark-hollow { width: 12px; height: 12px; border: 1px solid #575e63; margin: 10px auto; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Workshop Job-Aid Card",
+    "overview": "The answer screen is a printed instruction card pinned at the workstation: paper-white surface on a slate desk, ink-black type only, and exactly one reversed plate — the verdict — carrying the screen's authority. Built for an aviation engineer reading Cyrillic technical text under bright workshop light, contrast and size are obligations, not preferences. Nothing is decorative; every colored thing is doing a job (action, selection, confirmation, verdict). The system is flat and ruled: 1px hairlines as the only separators, zero radius everywhere, integer pixel sizes only.",
+    "keyCharacteristics": [
+      "Paper card on slate desk; ink-on-paper text at every level.",
+      "One reversal per screen: the verdict plate.",
+      "State as a stamp in a fixed cell (filled/hollow square), never as text or color alone.",
+      "Refusal is the same plate voice in graphite — calm, never red."
+    ],
+    "rules": [
+      { "name": "The One Voice Rule", "body": "Pine is used only where the product confirms or acts; it never decorates.", "section": "colors" },
+      { "name": "The Calm-No-Red Rule", "body": "Refusals, unverified rows and missing sheets render in graphite/ink tones; red is not part of this system.", "section": "colors" },
+      { "name": "The Fixed Ramp Rule", "body": "13/15/17 only; new surfaces pick from these steps, never invent sizes.", "section": "typography" }
+    ],
+    "dos": [
+      "Do verify before displaying: the «Проверено» stamp is only ever the color of a machine-checked citation.",
+      "Do keep the four pinned zones in the pinned order on every future variant of this window.",
+      "Do render refusals and absences in graphite/ink tones with the same plate geometry as confirmations.",
+      "Do use the fixed ramp (13/15/17) and integer paddings on new screens."
+    ],
+    "donts": [
+      "Don't add red, orange or green traffic-light semantics to refusals or unverified rows.",
+      "Don't use Unicode glyphs or emoji as the state mark; the stamp is painted (QPainter) and stays a filled/hollow square.",
+      "Don't round any corner, soften any edge with blur, or introduce shadow.",
+      "Don't decorate with pine; if a pine thing isn't confirmable, it doesn't ship."
+    ]
+  }
+}

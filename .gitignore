@@ -16,3 +16,9 @@ build/
 .codebase-memory/
 .superpowers/
 .idea/
+# Бэкапы и большие untracked (не коммитить, не stash)
+.git.backup-2026-10-19/
+.git.backup-*/
+PDF_OCR_APP_worktree_*.zip
+*.old-*
+output_graph/
