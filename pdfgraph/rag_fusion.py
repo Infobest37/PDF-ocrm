@@ -31,6 +31,7 @@ import os
 import re
 from typing import TYPE_CHECKING
 import urllib.request
+from urllib.error import HTTPError
 
 from pdfprepare.codes import normalize_code
 from pdfgraph.query import Fragment, search
@@ -138,8 +139,18 @@ def _call_llm(settings: LLMSettings, messages: list[dict]) -> str:
             {"Authorization": f"Bearer {settings.api_key}"},
             timeout=LLM_TIMEOUT_SECONDS,
         )
+    except HTTPError as exc:
+        try:
+            provider_body = exc.read().decode("utf-8", "replace").strip()
+        except Exception:
+            provider_body = ""
+        if settings.api_key:
+            provider_body = provider_body.replace(settings.api_key, "[redacted]")
+        detail = provider_body or str(exc)
+        raise RuntimeError(f"LLM API ошибка {exc.code}: {detail}") from exc
     except Exception as exc:
-        raise RuntimeError(f"ошибка LLM API: {exc}") from exc
+        detail = str(exc).replace(settings.api_key, "[redacted]")
+        raise RuntimeError(f"LLM API ошибка: {detail}") from exc
     choices = body.get("choices") or []
     message = choices[0].get("message") or {}
     content = message.get("content")

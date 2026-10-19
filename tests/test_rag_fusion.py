@@ -29,10 +29,11 @@ developer's ambient environment (an implementation may return
 import json
 import re
 import urllib.request
+from io import BytesIO
 from unittest.mock import Mock
 
 import pytest
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +349,32 @@ def test_generate_queries_without_settings_does_not_read_api_key_env(
 
     assert rag_fusion.generate_queries("двигатель") == ["двигатель"]
     urlopen.assert_not_called()
+
+
+def test_call_llm_403_raises_runtimeerror_with_body_and_redacts_key(
+        monkeypatch):
+    """The provider's 403 body is diagnostic, but the bearer key stays hidden."""
+    from pdfgraph.gui.settings import LLMSettings
+    from pdfgraph.rag_fusion import _call_llm
+
+    key = "test-secret-key"
+    body = json.dumps({
+        "error": {"message": "model not allowed for this API key"}
+    }).encode("utf-8")
+    http_error = HTTPError(
+        "https://aitunnel.example/v1/chat/completions", 403, "Forbidden",
+        hdrs=None, fp=BytesIO(body))
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        Mock(side_effect=http_error))
+    settings = LLMSettings(api_key=key, base_url="https://aitunnel.example/v1",
+                            model="gpt-6-luna")
+
+    with pytest.raises(RuntimeError) as error:
+        _call_llm(settings, [{"role": "user", "content": "test"}])
+
+    assert "403" in str(error.value)
+    assert "model not allowed for this API key" in str(error.value)
+    assert key not in str(error.value)
 
 
 def test_generate_queries_urlerror_falls_back_to_question(monkeypatch):

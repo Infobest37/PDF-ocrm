@@ -217,6 +217,29 @@ def test_synthesize_answer_provider_error_returns_refusal(monkeypatch):
     }
 
 
+def test_synthesize_answer_403_returns_refusal_with_provider_diagnostic(
+        monkeypatch):
+    from pdfgraph.rag_fusion import synthesize_answer
+
+    class TextStore:
+        def page_text(self, _document, _page):
+            return "page text"
+
+    def forbidden(*_args):
+        raise RuntimeError(
+            "LLM API ошибка 403: модель не разрешена для этого API-ключа")
+
+    monkeypatch.setattr("pdfgraph.rag_fusion._call_llm", forbidden)
+    result = synthesize_answer(TextStore(), "вопрос",
+                               [_fragment("a.pdf", 1, "quote")], _settings())
+
+    assert result["refusal"] is True
+    assert result["answer"] == ""
+    assert result["citations"] == []
+    assert "403" in result["reason"]
+    assert "модель не разрешена" in result["reason"]
+
+
 def test_build_answer_synthesis_verifies_quote_and_displays_answer(
         fx_store, monkeypatch):
     import pdfgraph.answer as answer_module
