@@ -24,6 +24,31 @@ FX_TEXT_48 = "023.11.30 РАДИОМАЯК В СОСТАВЕ ВЕРТОЛЁТА"
 FX_TEXT_12 = "028.10.00 ГИДРОАГРЕГАТ ОСНОВНОЙ"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_gui_llm_preferences(monkeypatch, request):
+    """GUI tests must never use credentials/preferences from the real HKCU.
+
+    Tests that create the answer window receive a blank, non-synthesizing
+    profile and a no-op saver unless a test explicitly installs its own mock.
+    This keeps the suite hermetic even after a user configures aitunnel in the
+    desktop application.
+    """
+    path_name = request.node.path.name
+    gui_test = (
+        path_name in {"test_gui_smoke.py", "test_gui_aircraft_filter.py",
+                      "test_pdf_opener.py"}
+        or request.node.name.startswith("test_gui_")
+    )
+    if not gui_test:
+        return
+
+    import pdfgraph.gui.app as gui_app
+    from pdfgraph.gui.settings import LLMSettings
+
+    monkeypatch.setattr(gui_app, "load_llm_settings", LLMSettings)
+    monkeypatch.setattr(gui_app, "save_llm_settings", lambda _settings: None)
+
+
 def populate(store: Store) -> None:
     """Fill ``store`` with the canonical three-sheet fixture graph."""
     type_id = store.add_node("type", FX_AIRCRAFT, label=FX_AIRCRAFT)

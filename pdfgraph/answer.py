@@ -19,10 +19,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Claim:
-    """An answer claim and indexes of supporting fragments."""
+    """A displayed claim, evidence indexes, and optional citation text.
+
+    ``text`` remains the verbatim evidence text used by citation verification.
+    For a synthesized answer, ``answer_text`` carries the user-facing prose;
+    this separation lets a paraphrase be displayed without weakening exact
+    source-snippet verification.
+    """
 
     text: str
     evidence: list[int]
+    answer_text: str | None = None
 
 
 @dataclass
@@ -65,6 +72,8 @@ def build_answer(
     answerer: Answerer | None = None,
     min_score: float = 0.35,
     use_rag_fusion: bool = False,
+    use_synthesis: bool = False,
+    llm_settings=None,
 ) -> Answer:
     """Retrieve evidence and construct an answer, refusing unsupported queries.
 
@@ -74,15 +83,24 @@ def build_answer(
     With ``use_rag_fusion`` the retrieval goes through
     :func:`pdfgraph.rag_fusion.rag_search` (LLM query expansion + RRF); the
     module is imported lazily so the default path stays free of it. Without
-    it, ordinary :func:`pdfgraph.query.search` is used. ``min_score`` filters
-    fragments on both paths with the same meaning.
+    it, ordinary :func:`pdfgraph.query.search` is used. With a configured
+    ``llm_settings`` and ``use_synthesis``, the answer is synthesized from the
+    retrieved fragments and each citation's exact snippet is verified. The
+    ``min_score`` threshold and existing positional arguments are unchanged.
     """
     if use_rag_fusion:
         from pdfgraph.rag_fusion import rag_search
-        fragments = rag_search(store, question, aircraft_type, limit=10)
+        fragments = rag_search(store, question, aircraft_type, limit=10,
+                               settings=llm_settings)
     else:
         fragments = search(store, question, aircraft_type)
     mode = "rag-fusion" if use_rag_fusion else "обычный поиск"
+    synthesis_enabled = bool(
+        use_synthesis and llm_settings is not None
+        and getattr(llm_settings, "api_key", "").strip()
+    )
+    if synthesis_enabled:
+        mode += "+aitunnel"
     best_score = max((fragment.score for fragment in fragments), default=0.0)
     logger.debug("question=%r mode=%s -> %d fragments, best_score=%.4f "
                  "(min_score=%.3f)", question, mode, len(fragments),
@@ -98,6 +116,68 @@ def build_answer(
             refusal=True,
             reason="нет подтверждений в документах",
         )
+
+    if synthesis_enabled:
+        from pdfgraph.rag_fusion import synthesize_answer
+        synthesis = synthesize_answer(store, question, fragments, llm_settings)
+        if synthesis.get("refusal"):
+            return Answer(
+                question=question,
+                claims=[],
+                fragments=fragments,
+                refusal=True,
+                reason=synthesis.get("reason", "LLM недоступен"),
+            )
+
+        answer_text = str(synthesis.get("answer", "")).strip()
+        citations = synthesis.get("citations", [])
+        by_location = {
+            (fragment.document, fragment.page): index
+            for index, fragment in enumerate(fragments)
+        }
+        claims: list[Claim] = []
+        if not citations:
+            claims.append(Claim(
+                text="",
+                evidence=[],
+                answer_text=f"[НЕ ПОДТВЕРЖДЕНО] {answer_text}".strip(),
+            ))
+        else:
+            for citation_index, citation in enumerate(citations):
+                document = str(citation.get("document", ""))
+                snippet = str(citation.get("snippet", ""))
+                try:
+                    page = int(citation.get("page"))
+                except (TypeError, ValueError):
+                    page = -1
+                fragment_index = by_location.get((document, page), -1)
+                claims.append(Claim(
+                    text=snippet,
+                    evidence=[fragment_index],
+                    # Show the synthesis once; following rows are separate
+                    # source citations for the same answer.
+                    answer_text=answer_text if citation_index == 0 else "",
+                ))
+
+        synthesized = Answer(
+            question=question,
+            claims=claims,
+            fragments=fragments,
+        )
+        # Verify the source snippets before displaying the LLM prose. The GUI
+        # rechecks the same evidence before rendering its verified stamp.
+        from pdfgraph.verify import verify_citations
+        checks = verify_citations(synthesized, store)
+        for claim_index, claim in enumerate(synthesized.claims):
+            claim_checks = [check for check in checks
+                            if check.claim_index == claim_index]
+            if not claim_checks or not all(check.ok for check in claim_checks):
+                marker = "[НЕ ПОДТВЕРЖДЕНО]"
+                claim.answer_text = (
+                    f"{marker} {answer_text}".strip()
+                    if claim.answer_text else marker
+                )
+        return synthesized
 
     selected_answerer = answerer if answerer is not None else ExtractiveAnswerer()
     answer = selected_answerer.answer(question, fragments)

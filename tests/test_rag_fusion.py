@@ -5,12 +5,9 @@ does not exist yet, ``build_answer`` has no ``use_rag_fusion`` parameter and
 the GUI has no checkbox — every test below fails until the code agent lands
 them. Contracts pinned here come from the step-3 brief:
 
-- ``pdfgraph.rag_fusion.generate_queries(question, n=3)`` — Ollama at
-  ``http://localhost:11434/api/generate`` (model from
-  ``PDFGRAPH_OLLAMA_MODEL``) or OpenAI Chat Completions when
-  ``OPENAI_API_KEY`` is set, stdlib ``urllib.request``, timeout <= 15 s.
-  Ollama replies are read from the JSON ``response`` field, OpenAI replies
-  from ``choices[0].message.content``. Any failure returns ``[question]``.
+- ``pdfgraph.rag_fusion.generate_queries(question, n=3, settings=None)`` —
+  aitunnel.ru via settings when a QSettings API key is supplied, otherwise
+  local Ollama (``PDFGRAPH_OLLAMA_MODEL``) or fallback. All HTTP is mocked.
 - ``rrf_fuse(rankings, k=60)`` — RRF over ``(document, page)``, ranks from 1,
   stable first-seen order for ties, original ``Fragment`` with the maximum
   original ``.score`` per key, ``.score`` never mutated/replaced.
@@ -315,16 +312,42 @@ def test_generate_queries_posts_to_ollama_with_model_from_env(monkeypatch):
     assert timeout is not None and timeout <= 15
 
 
-def test_generate_queries_uses_openai_when_api_key_set(monkeypatch):
-    """With OPENAI_API_KEY the request goes to OpenAI, not to Ollama."""
+def test_generate_queries_uses_aitunnel_settings(monkeypatch):
+    """An explicitly supplied QSettings profile selects aitunnel.ru."""
     import pdfgraph.rag_fusion as rag_fusion
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    from pdfgraph.gui.settings import LLMSettings
+    settings = LLMSettings(
+        api_key="settings-test-key",
+        base_url="https://aitunnel.example/v1",
+        model="deepseek-chat",
+        temperature=0.3,
+        max_tokens=320,
+    )
     captured = _patch_urlopen(
         monkeypatch, payload=_openai_reply("1. Раз\n2. Два"))
-    assert rag_fusion.generate_queries("вопрос") == ["Раз", "Два"]
-    url, _body = _sent_url_and_body(captured)
-    assert "api.openai.com" in url
-    assert "11434" not in url
+    assert rag_fusion.generate_queries("вопрос", settings=settings) == [
+        "Раз", "Два"]
+    url, body = _sent_url_and_body(captured)
+    assert url == "https://aitunnel.example/v1/chat/completions"
+    request = captured["request"]
+    assert request.get_header("Authorization") == "Bearer settings-test-key"
+    payload = json.loads(body.decode("utf-8"))
+    assert payload["model"] == "deepseek-chat"
+    assert payload["temperature"] == 0.3
+    assert payload["max_tokens"] == 320
+
+
+def test_generate_queries_without_settings_does_not_read_api_key_env(
+        monkeypatch):
+    """API credentials come from QSettings, never OPENAI_API_KEY env."""
+    import pdfgraph.rag_fusion as rag_fusion
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-be-used")
+    monkeypatch.delenv("PDFGRAPH_OLLAMA_MODEL", raising=False)
+    urlopen = Mock(side_effect=AssertionError("no configured model: no request"))
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+
+    assert rag_fusion.generate_queries("двигатель") == ["двигатель"]
+    urlopen.assert_not_called()
 
 
 def test_generate_queries_urlerror_falls_back_to_question(monkeypatch):
@@ -365,8 +388,8 @@ def test_rag_search_expands_dedupes_forwards_type_and_limit(fx_store,
     import pdfgraph.rag_fusion as rag_fusion
     question = "радиомаяк на вертолёте"
     variants = ["работа радиомаяка ПАРМ", question, "приёмник радиомаяка"]
-    monkeypatch.setattr(rag_fusion, "generate_queries",
-                        Mock(return_value=variants), raising=False)
+    generate = Mock(return_value=variants)
+    monkeypatch.setattr(rag_fusion, "generate_queries", generate, raising=False)
     fa, fb, fc = _frag("ДокА", 1, 0.9), _frag("ДокБ", 2, 0.8), _frag("ДокВ", 3, 0.7)
     responses = {
         question: [fb, fa],                      # fb rank 1
@@ -383,8 +406,11 @@ def test_rag_search_expands_dedupes_forwards_type_and_limit(fx_store,
     import pdfgraph.query as query_module
     monkeypatch.setattr(query_module, "search", fake_search)
 
+    settings = Mock(api_key="test-key")
     result = rag_fusion.rag_search(fx_store, question,
-                                   aircraft_type="Ми-8МТВ", limit=2)
+                                   aircraft_type="Ми-8МТВ", limit=2,
+                                   settings=settings)
+    generate.assert_called_once_with(question, settings=settings)
     queries = [q for (_s, q, _t, _l) in calls]
     assert len(calls) == 3                       # deduped: question once
     assert queries[0] == question                # original question first
@@ -446,8 +472,8 @@ def test_rag_search_urlerror_fallback_equals_ordinary_search(fx_store,
 # build_answer routing
 # ---------------------------------------------------------------------------
 
-def test_build_answer_signature_keeps_min_score_and_appends_use_rag_fusion():
-    """min_score keeps its position and default; use_rag_fusion is last."""
+def test_build_answer_signature_keeps_min_score_and_appends_synthesis_options():
+    """New flags follow the established min_score/use_rag_fusion positions."""
     import inspect
     from pdfgraph.answer import build_answer
     params = list(inspect.signature(build_answer).parameters.values())
@@ -455,7 +481,9 @@ def test_build_answer_signature_keeps_min_score_and_appends_use_rag_fusion():
     assert names[:4] == ["store", "question", "aircraft_type", "answerer"]
     assert params[4].name == "min_score" and params[4].default == 0.35
     assert params[5].name == "use_rag_fusion" and params[5].default is False
-    assert len(names) == 6
+    assert params[6].name == "use_synthesis" and params[6].default is False
+    assert params[7].name == "llm_settings" and params[7].default is None
+    assert len(names) == 8
 
 
 def test_build_answer_true_routes_to_rag_search(fx_store, monkeypatch):
@@ -518,12 +546,17 @@ def test_build_answer_rag_path_applies_min_score(fx_store, monkeypatch):
 # GUI checkbox
 # ---------------------------------------------------------------------------
 
-def test_gui_rag_checkbox_is_unchecked_by_default_with_tooltip(fx_store_path):
+def test_gui_rag_checkbox_is_unchecked_by_default_with_tooltip(
+        fx_store_path, monkeypatch):
     import os
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     from PyQt5.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
+    from pdfgraph.gui.settings import LLMSettings
+    import pdfgraph.gui.app as gui_app
     from pdfgraph.gui.app import MainWindow, _WINDOW_QSS
+    monkeypatch.setattr(gui_app, "load_llm_settings", LLMSettings)
+    monkeypatch.setattr(gui_app, "save_llm_settings", lambda _settings: None)
     # Worker-review regression: the checkbox type sits on the DESIGN.md ramp
     # (13/15/17px), never the off-ramp 14px.
     assert _qss_font_size(_WINDOW_QSS, "QCheckBox#rag") in (13, 15, 17)
@@ -544,6 +577,9 @@ def test_gui_ask_passes_use_rag_fusion_from_checkbox(fx_store_path,
     from PyQt5.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
     import pdfgraph.gui.app as gui_app
+    from pdfgraph.gui.settings import LLMSettings
+    monkeypatch.setattr(gui_app, "load_llm_settings", LLMSettings)
+    monkeypatch.setattr(gui_app, "save_llm_settings", lambda _settings: None)
     build_answer = Mock(return_value=_gui_fixture_answer())
     monkeypatch.setattr(gui_app, "build_answer", build_answer)
 

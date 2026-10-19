@@ -59,7 +59,8 @@ def answer_rows(answer: Answer, checks: list[CitationCheck]) -> list[AnswerRow]:
         )
 
         rows.append(AnswerRow(
-            text=claim.text,
+            text=(claim.answer_text if claim.answer_text is not None
+                  else claim.text),
             document=source.document if source else "",
             page=source.page if source else -1,
             code=source.system_code if source else "",

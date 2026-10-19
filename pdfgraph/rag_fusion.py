@@ -1,17 +1,15 @@
-"""Optional RAG-Fusion retrieval: LLM query expansion + Reciprocal Rank Fusion.
+"""Optional RAG-Fusion retrieval and citation-grounded answer synthesis.
 
 Free-text questions are paraphrased by a local/remote LLM, every variant is
 searched through the ordinary :func:`pdfgraph.query.search` branch logic,
 and the per-query rankings are fused with RRF (Cormack et al., ``k=60``) so
 a sheet that several phrasings agree on rises to the top. Design notes:
 
-* **Provider fallback, never a crash.** ``generate_queries`` talks to OpenAI
-  Chat Completions when ``OPENAI_API_KEY`` is set, otherwise to a local
-  Ollama (``PDFGRAPH_OLLAMA_MODEL``) over ``http://localhost:11434/api/generate``.
-  Only stdlib ``urllib.request`` is used, the timeout stays <= 15 s (the call
-  runs on the GUI thread), and every provider/HTTP/JSON/empty-reply failure —
-  or a missing Ollama model — returns ``[question]``: without an LLM the whole
-  pipeline behaves exactly like ordinary search.
+* **Provider fallback, never a crash.** Query expansion uses the QSettings
+  profile (aitunnel.ru's OpenAI-compatible endpoint) when a key is present,
+  otherwise local Ollama (``PDFGRAPH_OLLAMA_MODEL``). Only stdlib
+  ``urllib.request`` is used. Expansion falls back to ``[question]`` on any
+  provider/HTTP/JSON/empty-reply failure.
 * **Scores stay honest.** ``rrf_fuse`` orders fragments by the fused RRF
   value but returns the original ``Fragment`` instances: the highest *search*
   score seen for a ``(document, page)`` is kept, ``.score`` is never replaced
@@ -25,22 +23,26 @@ The module is imported lazily from :func:`pdfgraph.answer.build_answer` only
 when ``use_rag_fusion=True``, keeping the default retrieval path free of it.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
 import re
+from typing import TYPE_CHECKING
 import urllib.request
 
 from pdfprepare.codes import normalize_code
 from pdfgraph.query import Fragment, search
 from pdfgraph.store import Store
 
+if TYPE_CHECKING:
+    from pdfgraph.gui.settings import LLMSettings
+
 #: Hard cap the brief pins: the request blocks the GUI thread.
 REQUEST_TIMEOUT_SECONDS = 10
+LLM_TIMEOUT_SECONDS = 30
 OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
-OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
-#: Default chat model for the OpenAI path; override with PDFGRAPH_OPENAI_MODEL.
-DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 #: RRF damping constant from the original paper.
 RRF_K = 60
 
@@ -93,13 +95,13 @@ def _parse_variants(text: str, question: str, n: int) -> list[str]:
     return variants
 
 
-def _post_json(url: str, payload: dict, headers: dict) -> dict:
+def _post_json(url: str, payload: dict, headers: dict,
+               timeout: int = REQUEST_TIMEOUT_SECONDS) -> dict:
     """POST ``payload`` as JSON and decode the JSON answer."""
     data = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         url, data=data, headers={"Content-Type": "application/json", **headers})
-    with urllib.request.urlopen(request,
-                                timeout=REQUEST_TIMEOUT_SECONDS) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
         raw = response.read()
     return json.loads(raw.decode("utf-8"))
 
@@ -114,32 +116,58 @@ def _ollama_reply(prompt: str, model: str) -> str:
     return text if isinstance(text, str) else ""
 
 
-def _openai_reply(prompt: str, api_key: str) -> str:
-    body = _post_json(OPENAI_CHAT_URL, {
-        "model": os.environ.get("PDFGRAPH_OPENAI_MODEL", DEFAULT_OPENAI_MODEL),
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,
-    }, {"Authorization": f"Bearer {api_key}"})
+def _call_llm(settings: LLMSettings, messages: list[dict]) -> str:
+    """Call the configured OpenAI-compatible provider (aitunnel by default).
+
+    Credentials are supplied only by the GUI's QSettings profile; this
+    function never reads an API-key environment variable. Provider failures
+    raise ``RuntimeError`` so the calling operation can choose its fallback.
+    """
+    base_url = settings.base_url.strip().rstrip("/")
+    if not settings.api_key.strip():
+        raise RuntimeError("API-ключ LLM не задан")
+    try:
+        body = _post_json(
+            base_url + "/chat/completions",
+            {
+                "model": settings.model,
+                "messages": messages,
+                "temperature": settings.temperature,
+                "max_tokens": settings.max_tokens,
+            },
+            {"Authorization": f"Bearer {settings.api_key}"},
+            timeout=LLM_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"ошибка LLM API: {exc}") from exc
     choices = body.get("choices") or []
     message = choices[0].get("message") or {}
     content = message.get("content")
-    return content if isinstance(content, str) else ""
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("LLM API вернул пустой ответ")
+    return content
 
 
-def generate_queries(question: str, n: int = 3) -> list[str]:
+def generate_queries(question: str, n: int = 3,
+                     settings: LLMSettings | None = None) -> list[str]:
     """Return up to ``n`` paraphrases of ``question``, or ``[question]``.
 
-    OpenAI Chat Completions is used when ``OPENAI_API_KEY`` is set; otherwise
-    Ollama on ``localhost:11434`` with the model from
-    ``PDFGRAPH_OLLAMA_MODEL`` (no model configured — no network call). Any
-    provider/HTTP/JSON/empty-response failure, and an empty parsed list,
-    fall back to ``[question]``; exceptions never escape.
+    A configured QSettings profile calls aitunnel.ru; absent a key, Ollama on
+    ``localhost:11434`` uses ``PDFGRAPH_OLLAMA_MODEL`` (no model configured —
+    no network call). Any provider/HTTP/JSON/empty-response failure and an
+    empty parsed list fall back to ``[question]``; exceptions never escape.
     """
     prompt = _PROMPT_TEMPLATE.format(question=question, n=max(1, n))
     try:
-        api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-        if api_key:
-            reply = _openai_reply(prompt, api_key)
+        if settings is not None and settings.api_key.strip():
+            reply = _call_llm(settings, [{
+                "role": "system",
+                "content": "Переформулируй технический вопрос, сохраняя смысл. "
+                           "Верни только варианты: по одному на строку.",
+            }, {
+                "role": "user",
+                "content": prompt,
+            }])
         else:
             model = os.environ.get("PDFGRAPH_OLLAMA_MODEL", "").strip()
             if not model:
@@ -183,7 +211,8 @@ def rrf_fuse(rankings: list[list[Fragment]], k: int = RRF_K) -> list[Fragment]:
 
 
 def rag_search(store: Store, question: str, aircraft_type: str | None = None,
-               limit: int = 10) -> list[Fragment]:
+               limit: int = 10,
+               settings: LLMSettings | None = None) -> list[Fragment]:
     """Search ``question`` and its LLM paraphrases, fused with RRF.
 
     Code queries (``normalize_code`` non-empty) get exactly one ordinary
@@ -198,10 +227,135 @@ def rag_search(store: Store, question: str, aircraft_type: str | None = None,
         logger.debug("rag-fusion: code query %r — plain search", question)
         return search(store, question, aircraft_type, limit)
     queries = [question]
-    for variant in generate_queries(question):
+    for variant in generate_queries(question, settings=settings):
         stripped = (variant or "").strip()
         if stripped and stripped != question and stripped not in queries:
             queries.append(stripped)
     rankings = [search(store, query, aircraft_type, limit)
                 for query in queries]
     return rrf_fuse(rankings)[:limit]
+
+
+_SYNTHESIS_SYSTEM_PROMPT = (
+    "Ты помощник инженера по технической документации вертолёта Ми-8МТВ. "
+    "Отвечай только на основе переданных фрагментов. Не додумывай факты. "
+    "Верни только JSON вида {\"answer\": str, \"citations\": "
+    "[{\"document\": str, \"page\": int, \"snippet\": str}]}. "
+    "В snippet копируй дословную выдержку из соответствующего фрагмента. "
+    "Если подтверждения нет, answer должен быть «нет подтверждений», "
+    "а citations — пустым списком."
+)
+
+
+def _parse_synthesis_response(content: str) -> dict:
+    """Parse JSON or a small marked-list fallback from the provider."""
+    text = content.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text,
+                      flags=re.IGNORECASE).strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+
+    if isinstance(parsed, dict):
+        answer = str(parsed.get("answer", "")).strip()
+        raw_citations = parsed.get("citations", [])
+        citations = []
+        if isinstance(raw_citations, list):
+            for item in raw_citations:
+                if not isinstance(item, dict):
+                    continue
+                document = str(item.get("document", "")).strip()
+                snippet = str(item.get("snippet", "")).strip()
+                try:
+                    page = int(item.get("page"))
+                except (TypeError, ValueError):
+                    continue
+                if document and snippet:
+                    citations.append({
+                        "document": document,
+                        "page": page,
+                        "snippet": snippet,
+                    })
+    else:
+        answer_lines: list[str] = []
+        citations = []
+        in_citations = False
+        citation_re = re.compile(
+            r"^\s*[-*•]?\s*document\s*:\s*(.*?)\s*;\s*"
+            r"page\s*:\s*(\d+)\s*;\s*snippet\s*:\s*(.+?)\s*$",
+            re.IGNORECASE,
+        )
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.casefold() in {"citations:", "цитаты:", "источники:"}:
+                in_citations = True
+                continue
+            if not in_citations:
+                if stripped.casefold().startswith("answer:"):
+                    stripped = stripped.split(":", 1)[1].strip()
+                elif stripped.casefold().startswith("ответ:"):
+                    stripped = stripped.split(":", 1)[1].strip()
+                answer_lines.append(stripped)
+                continue
+            match = citation_re.match(stripped)
+            if match:
+                citations.append({
+                    "document": match.group(1).strip(),
+                    "page": int(match.group(2)),
+                    "snippet": match.group(3).strip(),
+                })
+        answer = "\n".join(line for line in answer_lines if line).strip()
+
+    no_evidence = answer.casefold().strip(" .!\n") == "нет подтверждений"
+    if no_evidence:
+        return {"answer": "", "citations": [], "refusal": True,
+                "reason": "нет подтверждений в документах"}
+    if not answer:
+        return {"answer": "", "citations": [], "refusal": True,
+                "reason": "LLM не вернул текст ответа"}
+    return {"answer": answer, "citations": citations, "refusal": False,
+            "reason": ""}
+
+
+def synthesize_answer(store: Store, question: str,
+                      fragments: list[Fragment], settings: LLMSettings) -> dict:
+    """Synthesize an answer while sending full page text for only top 3 hits.
+
+    All remaining retrieved fragments contribute only their search snippet.
+    Returned citations are still independently checked by
+    :func:`pdfgraph.verify.verify_citations` before display.
+    """
+    if not settings.api_key.strip():
+        return {"answer": "", "citations": [], "refusal": True,
+                "reason": "LLM недоступен: API-ключ не задан"}
+    if not fragments:
+        return {"answer": "", "citations": [], "refusal": True,
+                "reason": "нет подтверждений в документах"}
+
+    contexts = []
+    try:
+        for index, fragment in enumerate(fragments):
+            if index < 3:
+                source = store.page_text(fragment.document, fragment.page)[:1500]
+            else:
+                source = fragment.snippet[:200]
+            contexts.append({
+                "document": fragment.document,
+                "page": fragment.page,
+                "text": source,
+            })
+        messages = [
+            {"role": "system", "content": _SYNTHESIS_SYSTEM_PROMPT},
+            {"role": "user", "content": (
+                f"Вопрос: {question}\nФрагменты:\n"
+                + json.dumps(contexts, ensure_ascii=False, indent=2)
+            )},
+        ]
+        response = _call_llm(settings, messages)
+        return _parse_synthesis_response(response)
+    except Exception as exc:
+        logger.debug("answer synthesis failed: %s", exc)
+        return {"answer": "", "citations": [], "refusal": True,
+                "reason": f"LLM недоступен: {exc}"}

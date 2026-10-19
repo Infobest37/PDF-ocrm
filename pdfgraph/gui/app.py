@@ -22,6 +22,9 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from pdfgraph.answer import build_answer
 from pdfgraph.gui.pdf_opener import open_pdf_at_page, resolve_pdf_dir
+from pdfgraph.gui.settings import (LLMSettings, load as load_llm_settings,
+                                   save as save_llm_settings)
+from pdfgraph.gui.settings_dialog import SettingsDialog
 from pdfgraph.gui.viewmodel import AnswerRow, answer_rows, verdict_text
 from pdfgraph.paths import resolve_store_path
 from pdfgraph.store import Store
@@ -109,6 +112,12 @@ QCheckBox#rag::indicator {{ width: 14px; height: 14px;
     border: 1px solid {INK}; background: {PAPER}; }}
 QCheckBox#rag::indicator:hover {{ border-color: {GRAPHITE}; }}
 QCheckBox#rag::indicator:checked {{ background: {GRAPHITE}; }}
+QCheckBox#synthesis {{ color: {INK}; font-size: 13px;
+    background: transparent; spacing: 6px; }}
+QCheckBox#synthesis::indicator {{ width: 14px; height: 14px;
+    border: 1px solid {INK}; background: {PAPER}; }}
+QCheckBox#synthesis::indicator:hover {{ border-color: {GRAPHITE}; }}
+QCheckBox#synthesis::indicator:checked {{ background: {GRAPHITE}; }}
 QPushButton#ask {{ background: {PINE}; color: {PAPER}; border: none;
     padding: 10px 26px; font-size: 17px; font-weight: 600; }}
 QPushButton#ask:hover {{ background: {PINE_HOVER}; }}
@@ -140,6 +149,9 @@ QPlainTextEdit#sheetText {{ background: {PAPER}; color: {INK};
 QPushButton#close {{ background: {PAPER}; color: {INK};
     border: 1px solid {INK}; padding: 9px 22px; font-size: 15px; }}
 QPushButton#close:hover {{ background: {SELECTION}; }}
+QPushButton#settings {{ background: {PAPER}; color: {INK};
+    border: 1px solid {INK}; padding: 8px 12px; font-size: 13px; }}
+QPushButton#settings:hover {{ background: {SELECTION}; }}
 """
 
 
@@ -157,6 +169,8 @@ class MainWindow(QtWidgets.QMainWindow):
         #: once (CLI ``--pdf-dir`` > PDFGRAPH_PDF_DIR > default); ``None``
         #: when nothing exists, and the text-sheet dialog is the fallback.
         self.pdf_dir = resolve_pdf_dir(pdf_dir)
+        self.llm_settings: LLMSettings = load_llm_settings()
+        self._settings_dialog: SettingsDialog | None = None
         #: Stage 2: when the resolver found nothing, the calm note appends
         #: the exact list of tried paths (see paths.resolve_store_path).
         self._missing_text = _MISSING_STORE_TEXT + (
@@ -253,8 +267,25 @@ class MainWindow(QtWidgets.QMainWindow):
                                              objectName="rag")
         self.rag_check.setToolTip(
             "Переформулирует вопрос через LLM. Без LLM работает как обычный поиск.")
-        self.rag_check.setChecked(False)
+        self.rag_check.setChecked(self.llm_settings.use_rag_fusion)
         aircraft_row.addWidget(self.rag_check)
+
+        self.synthesis_checkbox = QtWidgets.QCheckBox(
+            "LLM-ответ (синтез)", objectName="synthesis")
+        self.synthesis_checkbox.setChecked(self.llm_settings.use_synthesis)
+        self.synthesis_checkbox.setEnabled(bool(self.llm_settings.api_key.strip()))
+        self.synthesis_checkbox.setToolTip(
+            "Синтезировать ответ по найденным выдержкам и проверить цитаты.")
+        aircraft_row.addWidget(self.synthesis_checkbox)
+
+        self.settings_button = QtWidgets.QPushButton(
+            "Настройки LLM", objectName="settings")
+        self.settings_button.clicked.connect(self._open_llm_settings)
+        aircraft_row.addWidget(self.settings_button)
+
+        self.rag_check.stateChanged.connect(self._save_search_preferences)
+        self.synthesis_checkbox.stateChanged.connect(
+            self._save_search_preferences)
         aircraft_row.addStretch(1)
         layout.addLayout(aircraft_row)
         layout.addSpacing(8)
@@ -328,6 +359,31 @@ class MainWindow(QtWidgets.QMainWindow):
         """Aircraft type selected in the filter; «Все» maps to ``None``."""
         return self.aircraft_combo.currentData()
 
+    def _save_search_preferences(self, *_args) -> None:
+        """Persist the two opt-in search switches with the LLM profile."""
+        if not hasattr(self, "rag_check") or not hasattr(
+                self, "synthesis_checkbox"):
+            return
+        self.llm_settings.use_rag_fusion = self.rag_check.isChecked()
+        self.llm_settings.use_synthesis = self.synthesis_checkbox.isChecked()
+        save_llm_settings(self.llm_settings)
+
+    def _open_llm_settings(self) -> None:
+        """Open the profile dialog and reload settings after it closes."""
+        dialog = SettingsDialog(self.llm_settings, self)
+        self._settings_dialog = dialog
+        dialog.finished.connect(self._llm_settings_dialog_finished)
+        dialog.open()
+
+    def _llm_settings_dialog_finished(self, result: int) -> None:
+        if result == QtWidgets.QDialog.Accepted:
+            self.llm_settings = load_llm_settings()
+            self.synthesis_checkbox.setEnabled(
+                bool(self.llm_settings.api_key.strip()))
+            self.rag_check.setChecked(self.llm_settings.use_rag_fusion)
+            self.synthesis_checkbox.setChecked(self.llm_settings.use_synthesis)
+        self._settings_dialog = None
+
     def ask(self, question: str) -> list[AnswerRow]:
         """Answer ``question``, fill the table/panel/verdict, return display rows.
 
@@ -343,7 +399,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return []
         assert self._store is not None
         use_rag_fusion = self.rag_check.isChecked()
-        if use_rag_fusion:
+        use_synthesis = (
+            self.synthesis_checkbox.isChecked()
+            and bool(self.llm_settings.api_key.strip())
+        )
+        if use_rag_fusion or use_synthesis:
             QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
             try:
@@ -352,6 +412,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     question,
                     aircraft_type=self._current_aircraft_type(),
                     use_rag_fusion=use_rag_fusion,
+                    use_synthesis=use_synthesis,
+                    llm_settings=self.llm_settings,
                 )
                 checks = verify_citations(answer, self._store)
             except sqlite3.Error:
@@ -361,7 +423,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._show_store_note(_CORRUPT_STORE_TEXT)
                 return []
         finally:
-            if use_rag_fusion:
+            if use_rag_fusion or use_synthesis:
                 QtWidgets.QApplication.restoreOverrideCursor()
         rows = answer_rows(answer, checks)
 
@@ -374,7 +436,12 @@ class MainWindow(QtWidgets.QMainWindow):
             # Отказ: панель подтверждения пуста — тихо, не подсказка и не ошибка.
             self._set_snippet("")
             self._set_verdict_plate("refusal")
-        self.verdict_label.setText(verdict_text(rows))
+        refusal_text = (
+            answer.reason
+            if answer.refusal and answer.reason.startswith("LLM недоступен:")
+            else verdict_text(rows)
+        )
+        self.verdict_label.setText(refusal_text)
         return rows
 
     def open_sheet(self, document: str, page: int) -> None:
