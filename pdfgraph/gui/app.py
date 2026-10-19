@@ -14,12 +14,14 @@ means verified, hollow graphite square means not.
 
 import argparse
 import os
+import pathlib
 import sqlite3
 import sys
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from pdfgraph.answer import build_answer
+from pdfgraph.gui.pdf_opener import open_pdf_at_page, resolve_pdf_dir
 from pdfgraph.gui.viewmodel import AnswerRow, answer_rows, verdict_text
 from pdfgraph.paths import resolve_store_path
 from pdfgraph.store import Store
@@ -39,6 +41,12 @@ REFUSAL_PLATE = "#454c52"
 
 #: Column titles pinned by the design brief — keep verbatim.
 COLUMNS = ("Ответ", "Документ", "Лист", "Код", "Проверено")
+AIRCRAFT_CHOICES = [
+    ("Все", None),
+    ("Ми-8МТВ", "Ми-8МТВ"),
+    ("КА-32", "КА-32"),
+    ("Ми-8Т", "Ми-8Т"),
+]
 
 _AWAITING_TEXT = "Пока вопрос не задан — показываем только ответы, подтверждённые на листах"
 _SNIPPET_HINT = "Фрагмент подтверждённого ответа появится здесь"
@@ -91,6 +99,16 @@ QLineEdit#question {{ background: {PAPER}; color: {INK};
     border: 1px solid {INK}; padding: 9px 11px; font-size: 17px;
     selection-background-color: {PINE}; selection-color: {PAPER}; }}
 QLineEdit#question:focus {{ border: 2px solid {PINE}; padding: 8px 10px; }}
+QComboBox#aircraft {{ background: {PAPER}; color: {INK};
+    border: 1px solid {INK}; padding: 6px 8px; font-size: 15px; }}
+QComboBox#aircraft QAbstractItemView {{ background: {PAPER}; color: {INK};
+    selection-background-color: {SELECTION}; selection-color: {INK}; }}
+QCheckBox#rag {{ color: {INK}; font-size: 13px; background: transparent;
+    spacing: 6px; }}
+QCheckBox#rag::indicator {{ width: 14px; height: 14px;
+    border: 1px solid {INK}; background: {PAPER}; }}
+QCheckBox#rag::indicator:hover {{ border-color: {GRAPHITE}; }}
+QCheckBox#rag::indicator:checked {{ background: {GRAPHITE}; }}
 QPushButton#ask {{ background: {PINE}; color: {PAPER}; border: none;
     padding: 10px 26px; font-size: 17px; font-weight: 600; }}
 QPushButton#ask:hover {{ background: {PINE_HOVER}; }}
@@ -129,11 +147,16 @@ class MainWindow(QtWidgets.QMainWindow):
     """One-window answer screen: question, verified table, confirmation, verdict."""
 
     def __init__(self, store_path: str, registry_path: str,
-                 missing_hint: str = ""):
+                 missing_hint: str = "",
+                 pdf_dir: str | pathlib.Path | None = None):
         super().__init__()
         self.store_path = store_path
         #: Reserved for the upcoming ATA-100 registry navigation (task 3.3+).
         self.registry_path = registry_path
+        #: Step 2: folder of the source PDFs opened on double-click, resolved
+        #: once (CLI ``--pdf-dir`` > PDFGRAPH_PDF_DIR > default); ``None``
+        #: when nothing exists, and the text-sheet dialog is the fallback.
+        self.pdf_dir = resolve_pdf_dir(pdf_dir)
         #: Stage 2: when the resolver found nothing, the calm note appends
         #: the exact list of tried paths (see paths.resolve_store_path).
         self._missing_text = _MISSING_STORE_TEXT + (
@@ -215,6 +238,27 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Zone 1: question + «Спросить».
         layout.addSpacing(16)
+        aircraft_row = QtWidgets.QHBoxLayout()
+        aircraft_row.setSpacing(10)
+        aircraft_label = QtWidgets.QLabel("Тип ВС", objectName="section")
+        self.aircraft_combo = QtWidgets.QComboBox(objectName="aircraft")
+        for label, value in AIRCRAFT_CHOICES:
+            self.aircraft_combo.addItem(label, value)
+        self.aircraft_combo.setCurrentIndex(0)
+        aircraft_row.addWidget(aircraft_label)
+        aircraft_row.addWidget(self.aircraft_combo)
+        # Step 3: opt-in RAG-Fusion next to the filter — neutral checkbox,
+        # unchecked by default so ordinary search stays the norm.
+        self.rag_check = QtWidgets.QCheckBox("Умный поиск (RAG-Fusion)",
+                                             objectName="rag")
+        self.rag_check.setToolTip(
+            "Переформулирует вопрос через LLM. Без LLM работает как обычный поиск.")
+        self.rag_check.setChecked(False)
+        aircraft_row.addWidget(self.rag_check)
+        aircraft_row.addStretch(1)
+        layout.addLayout(aircraft_row)
+        layout.addSpacing(8)
+
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(10)
         self.question_edit = QtWidgets.QLineEdit(objectName="question")
@@ -280,25 +324,45 @@ class MainWindow(QtWidgets.QMainWindow):
     def _ask_clicked(self) -> None:
         self.ask(self.question_edit.text())
 
+    def _current_aircraft_type(self) -> str | None:
+        """Aircraft type selected in the filter; «Все» maps to ``None``."""
+        return self.aircraft_combo.currentData()
+
     def ask(self, question: str) -> list[AnswerRow]:
         """Answer ``question``, fill the table/panel/verdict, return display rows.
 
         Citations are machine-checked before anything is shown; the row list
         is returned for tests and callers, UI updates happen as a side effect.
+        With «Умный поиск» checked the retrieval expands the question through
+        an LLM, which can take seconds: the wait cursor marks the blocking
+        stretch around :func:`build_answer` (no worker threads — the GUI
+        design stays synchronous).
         """
         if not self._open_store():
             self._show_store_note(self._missing_text)
             return []
         assert self._store is not None
+        use_rag_fusion = self.rag_check.isChecked()
+        if use_rag_fusion:
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
-            answer = build_answer(self._store, question)
-            checks = verify_citations(answer, self._store)
-        except sqlite3.Error:
-            # The file opened but a query hit broken data pages: same calm
-            # treatment as an absent store, never an unhandled exception.
-            self._drop_store()
-            self._show_store_note(_CORRUPT_STORE_TEXT)
-            return []
+            try:
+                answer = build_answer(
+                    self._store,
+                    question,
+                    aircraft_type=self._current_aircraft_type(),
+                    use_rag_fusion=use_rag_fusion,
+                )
+                checks = verify_citations(answer, self._store)
+            except sqlite3.Error:
+                # The file opened but a query hit broken data pages: same calm
+                # treatment as an absent store, never an unhandled exception.
+                self._drop_store()
+                self._show_store_note(_CORRUPT_STORE_TEXT)
+                return []
+        finally:
+            if use_rag_fusion:
+                QtWidgets.QApplication.restoreOverrideCursor()
         rows = answer_rows(answer, checks)
 
         self._rows = rows
@@ -314,7 +378,16 @@ class MainWindow(QtWidgets.QMainWindow):
         return rows
 
     def open_sheet(self, document: str, page: int) -> None:
-        """Show the stored text of one sheet; missing/broken stores stay calm."""
+        """Show one sheet: the source PDF first, the stored text as fallback.
+
+        For every sheet whose store read succeeds (blank boundary sheets
+        included — the physical PDF page still exists), double-click first
+        asks the PDF viewer to open the cited page (step 2); when the PDF
+        cannot be opened a calm warning names the problem and the step-1
+        body is shown unchanged: stored text or, for a blank sheet, the
+        boundary note. Missing/broken stores never reach the viewer: they
+        keep the calm text path from the step-1 GUI.
+        """
         if not self._open_store():
             body = self._missing_text
         else:
@@ -327,6 +400,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._drop_store()
                 body = _CORRUPT_STORE_TEXT
             else:
+                if open_pdf_at_page(self.pdf_dir, document, page):
+                    return
+                QtWidgets.QMessageBox.warning(
+                    self, "Открытие PDF",
+                    f"PDF не найден: {document}. Проверьте --pdf-dir")
                 if text and text.strip():
                     body = text
                 else:
@@ -438,6 +516,11 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--registry", default="Коды систем Вертолета.txt", metavar="PATH",
         help="ATA-100 code registry file (reserved for navigation).")
+    parser.add_argument(
+        "--pdf-dir", default=None, metavar="PATH",
+        help="Folder of the source PDFs opened on double-click. Default: "
+             "auto (PDFGRAPH_PDF_DIR, then the prepared «pdfs» folder — "
+             "pdfgraph.gui.pdf_opener.resolve_pdf_dir).")
     args = parser.parse_args(argv)
 
     missing_hint = ""
@@ -450,7 +533,8 @@ def main(argv=None) -> int:
         missing_hint = str(exc)
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    window = MainWindow(store_path, args.registry, missing_hint=missing_hint)
+    window = MainWindow(store_path, args.registry, missing_hint=missing_hint,
+                        pdf_dir=args.pdf_dir)
     window.show()
     return int(app.exec_())
 

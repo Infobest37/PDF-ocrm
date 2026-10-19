@@ -64,17 +64,29 @@ def build_answer(
     aircraft_type: str | None = None,
     answerer: Answerer | None = None,
     min_score: float = 0.35,
+    use_rag_fusion: bool = False,
 ) -> Answer:
     """Retrieve evidence and construct an answer, refusing unsupported queries.
 
     Call :func:`pdfgraph.verify.verify_citations` before showing any returned
     answer, regardless of which ``answerer`` implementation produced it.
+
+    With ``use_rag_fusion`` the retrieval goes through
+    :func:`pdfgraph.rag_fusion.rag_search` (LLM query expansion + RRF); the
+    module is imported lazily so the default path stays free of it. Without
+    it, ordinary :func:`pdfgraph.query.search` is used. ``min_score`` filters
+    fragments on both paths with the same meaning.
     """
-    fragments = search(store, question, aircraft_type)
+    if use_rag_fusion:
+        from pdfgraph.rag_fusion import rag_search
+        fragments = rag_search(store, question, aircraft_type, limit=10)
+    else:
+        fragments = search(store, question, aircraft_type)
+    mode = "rag-fusion" if use_rag_fusion else "обычный поиск"
     best_score = max((fragment.score for fragment in fragments), default=0.0)
-    logger.debug("question=%r -> %d fragments, best_score=%.4f "
-                 "(min_score=%.3f)", question, len(fragments), best_score,
-                 min_score)
+    logger.debug("question=%r mode=%s -> %d fragments, best_score=%.4f "
+                 "(min_score=%.3f)", question, mode, len(fragments),
+                 best_score, min_score)
     if not fragments or best_score < min_score:
         logger.debug("question=%r -> refusal (%s)", question,
                      "нет фрагментов" if not fragments else
