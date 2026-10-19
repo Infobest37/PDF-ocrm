@@ -33,21 +33,18 @@ import argparse
 import dataclasses
 import glob
 import json
+import logging
 import os
-import re
 import sqlite3
 import sys
 
 from pdfgraph.answer import Answer, build_answer
-from pdfgraph.build import _document_key, build
+from pdfgraph.build import build, mark_defects
+from pdfgraph.paths import resolve_store_path
 from pdfgraph.store import Store
 from pdfgraph.verify import CitationCheck, all_verified, verify_citations
-from pdfprepare.models import DocResult
 from pdfprepare.output import read_result
 from pdfprepare.registry import parse_registry
-
-#: One re-scan report line written by ``pdfprepare.quality.write_report``.
-_REPORT_LINE_RE = re.compile(r"^page (\d+): \S")
 
 
 def _open_store(path: str) -> Store | None:
@@ -77,40 +74,6 @@ def _load_registry(path: str | None) -> dict[str, str]:
         file=sys.stderr,
     )
     return {}
-
-
-def _mark_defects(store: Store,
-                  entries: list[tuple[str, DocResult]],
-                  root: str | None = None) -> int:
-    """Mark re-scan sheets from the pipeline reports that lie next to JSONs.
-
-    ``entries`` pairs ``(json_path, DocResult)``. For every ``<stem>.json``
-    the pipeline left ``<stem>.report.txt`` beside it (lines
-    ``page N: low_confidence (...)`` from
-    :func:`pdfprepare.quality.write_report`); every such page is recorded
-    with the idempotent :meth:`Store.mark_defect` under the same document
-    key the graph uses (:func:`pdfgraph.build._document_key`). Blank
-    divider sheets never appear in the report, so they are never marked.
-    A report line that does not parse is ignored. Returns the number of
-    marked sheets.
-    """
-    for path, result in entries:
-        report = os.path.splitext(path)[0] + ".report.txt"
-        if not os.path.isfile(report):
-            continue
-        try:
-            with open(report, encoding="utf-8") as handle:
-                lines = handle.readlines()
-        except (OSError, UnicodeDecodeError) as exc:  # corrupt UTF-8 must not kill build
-            print(f"warning: cannot read report {report!r}: {exc}",
-                  file=sys.stderr)
-            continue
-        document = _document_key(result.source_path, root)
-        for line in lines:
-            match = _REPORT_LINE_RE.match(line.strip())
-            if match:
-                store.mark_defect(document, int(match.group(1)))
-    return len(store.defect_sheets())
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
@@ -151,8 +114,8 @@ def _cmd_build(args: argparse.Namespace) -> int:
     try:
         stats = build(results, args.aircraft_type, registry, store,
                       root=args.prepared_dir)
-        defects = _mark_defects(store, list(zip(paths, results)),
-                                root=args.prepared_dir)
+        defects = mark_defects(store, list(zip(paths, results)),
+                               root=args.prepared_dir)
     finally:
         store.close()
 
@@ -237,12 +200,21 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool) -> None:
 
 def _cmd_ask(args: argparse.Namespace) -> int:
     """Answer a question and always report citation verification."""
-    if not os.path.isfile(args.store_path):
+    if args.debug:
+        logging.basicConfig(
+            level=logging.DEBUG, stream=sys.stderr,
+            format="%(levelname)s %(name)s: %(message)s")
+    try:
+        store_path = resolve_store_path(args.store_path)
+    except FileNotFoundError as exc:
+        # Same contract as before (exit 2, «run 'pdfgraph build' first»);
+        # Stage 2 adds the exact list of paths the resolver checked.
         print(f"error: store not found: {args.store_path!r} "
               "(run 'pdfgraph build' first)", file=sys.stderr)
+        print(str(exc), file=sys.stderr)
         return 2
 
-    store = _open_store(args.store_path)
+    store = _open_store(store_path)
     if store is None:
         return 2
     try:
@@ -301,6 +273,9 @@ def main(argv: list[str]) -> int:
         "--json", dest="as_json", action="store_true",
         help="Print the answer as JSON (verified citations are the "
              "'verified' field).")
+    ask_parser.add_argument(
+        "--debug", action="store_true",
+        help="Log the question→branch→SQL→count chain to stderr.")
     ask_parser.set_defaults(handler=_cmd_ask)
 
     args = parser.parse_args(argv)

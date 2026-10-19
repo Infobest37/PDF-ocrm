@@ -1,6 +1,11 @@
 """Persistent SQLite storage for the PDF knowledge graph."""
 
+import logging
 import sqlite3
+
+#: Stage-2 diagnostics: the FTS SQL is logged at DEBUG (visible with
+#: ``pdfgraph ask --debug``).
+logger = logging.getLogger(__name__)
 
 #: Current schema version. Additive changes (new ``CREATE TABLE IF NOT
 #: EXISTS`` tables) are applied on every open; :class:`Store` bumps the
@@ -205,6 +210,20 @@ class Store:
             "SELECT document, page FROM defects ORDER BY document, page"
         ).fetchall()
 
+    def distinct_documents(self, limit: int = 5) -> list[str]:
+        """Most recent distinct ``pages.document`` keys, descending.
+
+        Read-only helper for the builder window's post-build sanity check
+        (plan task 3.1, fix П4): document keys must be bare file names
+        (``"имя.pdf"``) — the same value :func:`pdfgraph.build._document_key`
+        produces from the rewritten PDF inside the output directory.
+        """
+        rows = self._connection.execute(
+            "SELECT DISTINCT document FROM pages ORDER BY document DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [row[0] for row in rows]
+
     def find_node_id(self, kind: str, key: str) -> int | None:
         """Return the ID of the (kind, key) node, or None when it is absent.
 
@@ -306,6 +325,7 @@ class Store:
         if limit is not None:
             sql += " LIMIT ?"
             args.append(limit)
+        logger.debug("search_pages sql=%r args=%r", sql, args)
         return self._connection.execute(sql, args).fetchall()
 
     def stats(self) -> dict[str, int]:

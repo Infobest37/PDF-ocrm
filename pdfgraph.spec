@@ -1,24 +1,30 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec: one-folder Windows build of the knowledge graph (task 3.3).
+"""PyInstaller spec: one-folder Windows build of the knowledge graph (task 3.3,
+third exe added in task 4.1).
 
 Build from the repository root with:
 
     <venv>/Scripts/python.exe -m PyInstaller pdfgraph.spec
 
-which produces one portable folder ``dist/pdfgraph/`` carrying two
+which produces one portable folder ``dist/pdfgraph/`` carrying three
 executables over one shared ``_internal`` payload (interpreter, SQLite,
-PyQt5, PyMuPDF, Pillow/numpy, Tesseract + rus/eng tessdata; OpenCV is not
-inside — the pdfgraph entry chain never imports ``cv2``/``pytesseract``):
+PyQt5, PyMuPDF, Pillow/numpy, Tesseract + rus/eng tessdata; the builder
+chain additionally pulls OpenCV/``cv2`` and ``pytesseract`` — since 4.0 the
+builder entry is analysed, so the pdfprepare OCR stack ships inside):
 
-* ``pdfgraph.exe``    — windowed UI (``pdfgraph/gui/app.py``:main, console=False,
-  double-click launch);
-* ``pdfgraph-cli.exe`` — console build/ask commands (``pdfgraph/__main__.py``,
-  console=True, subcommands from task 2.6).
+* ``pdfgraph.exe``        — windowed answer UI (``pdfgraph/gui/app.py``:main,
+  console=False, double-click launch);
+* ``pdfgraph-cli.exe``    — console build/ask commands (``pdfgraph/__main__.py``,
+  console=True, subcommands from task 2.6);
+* ``pdfgraph-builder.exe``— windowed PDF -> OCR -> graph builder
+  (``pdfgraph/gui/builder_window.py``:main, console=False, task 4.1).
 
 The PyInstaller bootloader executes *every* entry script present in an
-executable's archive, so although one ``Analysis`` feeds both ``EXE`` targets,
-each EXE is handed only its own program script plus the shared runtime hooks
-(see ``_scripts_without``).
+executable's archive, so although one ``Analysis`` feeds all three ``EXE``
+targets, each EXE is handed only its own program script plus the shared
+runtime hooks (see ``_scripts_without``). One ``COLLECT`` merges the three
+targets into a single folder with one shared ``_internal`` — PyInstaller
+does not duplicate the payload per target.
 """
 
 import os
@@ -32,12 +38,15 @@ _GUI_ENTRY = os.path.join(_ROOT, "pdfgraph", "gui", "app.py")
 #: Console entry point (pdfgraph.cli:main over sys.argv).
 _CLI_ENTRY = os.path.join(_ROOT, "pdfgraph", "__main__.py")
 
+#: Builder entry point (pdfgraph.gui.builder_window:main behind ``__main__``).
+_BUILDER_ENTRY = os.path.join(_ROOT, "pdfgraph", "gui", "builder_window.py")
+
 a = Analysis(
-    [_GUI_ENTRY, _CLI_ENTRY],
+    [_GUI_ENTRY, _CLI_ENTRY, _BUILDER_ENTRY],
     pathex=[_ROOT],
     binaries=[],
     datas=[(os.path.join(_ROOT, "pdfprepare", "tesseract"), "tesseract")],
-    hiddenimports=[],
+    hiddenimports=["pdfgraph.gui.builder_window"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -70,7 +79,7 @@ _UTF8_OPTION = [("X utf8", None, "OPTION")]
 
 exe_gui = EXE(
     pyz,
-    _scripts_without(_CLI_ENTRY),
+    _scripts_without(_CLI_ENTRY, _BUILDER_ENTRY),
     _UTF8_OPTION,
     exclude_binaries=True,
     name="pdfgraph",
@@ -88,7 +97,7 @@ exe_gui = EXE(
 
 exe_cli = EXE(
     pyz,
-    _scripts_without(_GUI_ENTRY),
+    _scripts_without(_GUI_ENTRY, _BUILDER_ENTRY),
     _UTF8_OPTION,
     exclude_binaries=True,
     name="pdfgraph-cli",
@@ -104,9 +113,30 @@ exe_cli = EXE(
     entitlements_file=None,
 )
 
+#: Task 4.1: windowed builder — same bootloader options as the answer UI
+#: (no console, no icon: the gui target has none either).
+exe_builder = EXE(
+    pyz,
+    _scripts_without(_GUI_ENTRY, _CLI_ENTRY),
+    _UTF8_OPTION,
+    exclude_binaries=True,
+    name="pdfgraph-builder",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
 coll = COLLECT(
     exe_gui,
     exe_cli,
+    exe_builder,
     a.binaries,
     a.datas,
     strip=False,

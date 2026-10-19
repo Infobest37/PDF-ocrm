@@ -21,6 +21,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from pdfgraph.answer import build_answer
 from pdfgraph.gui.viewmodel import AnswerRow, answer_rows, verdict_text
+from pdfgraph.paths import resolve_store_path
 from pdfgraph.store import Store
 from pdfgraph.verify import verify_citations
 
@@ -127,11 +128,16 @@ QPushButton#close:hover {{ background: {SELECTION}; }}
 class MainWindow(QtWidgets.QMainWindow):
     """One-window answer screen: question, verified table, confirmation, verdict."""
 
-    def __init__(self, store_path: str, registry_path: str):
+    def __init__(self, store_path: str, registry_path: str,
+                 missing_hint: str = ""):
         super().__init__()
         self.store_path = store_path
         #: Reserved for the upcoming ATA-100 registry navigation (task 3.3+).
         self.registry_path = registry_path
+        #: Stage 2: when the resolver found nothing, the calm note appends
+        #: the exact list of tried paths (see paths.resolve_store_path).
+        self._missing_text = _MISSING_STORE_TEXT + (
+            f"\n{missing_hint}" if missing_hint else "")
         self._store: Store | None = None
         self._rows: list[AnswerRow] = []
 
@@ -281,7 +287,7 @@ class MainWindow(QtWidgets.QMainWindow):
         is returned for tests and callers, UI updates happen as a side effect.
         """
         if not self._open_store():
-            self._show_store_note(_MISSING_STORE_TEXT)
+            self._show_store_note(self._missing_text)
             return []
         assert self._store is not None
         try:
@@ -310,7 +316,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def open_sheet(self, document: str, page: int) -> None:
         """Show the stored text of one sheet; missing/broken stores stay calm."""
         if not self._open_store():
-            body = _MISSING_STORE_TEXT
+            body = self._missing_text
         else:
             assert self._store is not None
             try:
@@ -425,16 +431,26 @@ def main(argv=None) -> int:
                     "ответ с проверенными цитатами.",
     )
     parser.add_argument(
-        "--store", default="graph.db", metavar="PATH",
-        help="SQLite graph file produced by 'pdfgraph build' "
-             "(default: graph.db in the current directory).")
+        "--store", default=None, metavar="PATH",
+        help="SQLite graph file produced by 'pdfgraph build'. Default: auto "
+             "(graph.db beside the exe, up to two levels above it, or in "
+             "the current directory — pdfgraph.paths.resolve_store_path).")
     parser.add_argument(
         "--registry", default="Коды систем Вертолета.txt", metavar="PATH",
         help="ATA-100 code registry file (reserved for navigation).")
     args = parser.parse_args(argv)
 
+    missing_hint = ""
+    try:
+        store_path = resolve_store_path(args.store)
+    except FileNotFoundError as exc:
+        # Nothing found anywhere: the window still opens and explains itself
+        # calmly; the hint names every path the resolver actually checked.
+        store_path = args.store or "graph.db"
+        missing_hint = str(exc)
+
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    window = MainWindow(args.store, args.registry)
+    window = MainWindow(store_path, args.registry, missing_hint=missing_hint)
     window.show()
     return int(app.exec_())
 

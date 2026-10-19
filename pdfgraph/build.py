@@ -17,6 +17,7 @@ evidence strings (raw cell, raw reference clause, caption) travel on edges.
 
 import os
 import re
+import sys
 
 from pdfprepare.codes import normalize_code, system_of
 from pdfprepare.models import DocResult
@@ -242,3 +243,44 @@ def build(
                                    document=doc_key, page=page.page_index)
 
     return store.stats()
+
+
+#: One re-scan report line written by ``pdfprepare.quality.write_report``.
+_REPORT_LINE_RE = re.compile(r"^page (\d+): \S")
+
+
+def mark_defects(store: Store,
+                 entries: list[tuple[str, DocResult]],
+                 root: str | None = None) -> int:
+    """Mark re-scan sheets from the pipeline reports that lie next to JSONs.
+
+    ``entries`` pairs ``(json_path, DocResult)``. For every ``<stem>.json``
+    the pipeline left ``<stem>.report.txt`` beside it (lines
+    ``page N: low_confidence (...)`` from
+    :func:`pdfprepare.quality.write_report`); every such page is recorded
+    with the idempotent :meth:`Store.mark_defect` under the same document
+    key the graph uses (:func:`pdfgraph.build._document_key`). Blank
+    divider sheets never appear in the report, so they are never marked.
+    A report line that does not parse is ignored. Returns the number of
+    marked sheets.
+
+    Public since the builder-window worker (task 3.1, fix П5) — the CLI and
+    the GUI share this exact loop so defect marking cannot drift apart.
+    """
+    for path, result in entries:
+        report = os.path.splitext(path)[0] + ".report.txt"
+        if not os.path.isfile(report):
+            continue
+        try:
+            with open(report, encoding="utf-8") as handle:
+                lines = handle.readlines()
+        except (OSError, UnicodeDecodeError) as exc:  # corrupt UTF-8 must not kill build
+            print(f"warning: cannot read report {report!r}: {exc}",
+                  file=sys.stderr)
+            continue
+        document = _document_key(result.source_path, root)
+        for line in lines:
+            match = _REPORT_LINE_RE.match(line.strip())
+            if match:
+                store.mark_defect(document, int(match.group(1)))
+    return len(store.defect_sheets())

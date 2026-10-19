@@ -9,10 +9,16 @@ Three deterministic branches, tried in order:
    matches an existing ``part`` node returns the sheets whose tables carry it
    (``kind="part"``, ``score=1.0``).
 3. **Free text** — FTS5 ``MATCH`` over the stored search text with ``bm25()``
-   ranking, ``score = 1 / (1 + |bm25|)`` (``kind="text"``). The query is first
-   tried as all-tokens AND; when nothing matches, a tolerant OR retry runs
-   with the score multiplied by ``OR_PENALTY``. A topic absent from the index
-   returns no hits.
+   ranking (``kind="text"``). The query is first tried as all-tokens AND;
+   when nothing matches, a tolerant OR retry runs with the score multiplied
+   by ``OR_PENALTY``. A topic absent from the index returns no hits. The
+   score is normalised to the best hit of the branch:
+   ``score = penalty * |rank| / max(|rank|)`` — the branch leader carries
+   the full weight (1.0 for AND, 0.8 for the OR retry) and weaker hits scale
+   down proportionally. Stage 2: the previous absolute scale
+   (``penalty / (1 + |bm25|)``) gave ~0.15 for real РЭ pages — every real
+   question sat under ``answer.min_score=0.35``, so the graph refused all
+   answers («не ищет»); the relative scale makes the threshold meaningful.
 
 Snippet honesty (anti-goal "не искажать документ"): ``Fragment.snippet`` is
 always a verbatim slice of the ORIGINAL stored page text —
@@ -22,6 +28,7 @@ normalization (:func:`_search_index`) translates normalized-query offsets
 back onto original-text offsets before the window is taken.
 """
 
+import logging
 from dataclasses import dataclass
 
 from pdfprepare.codes import normalize_code
@@ -34,6 +41,10 @@ SNIPPET_CHARS = 200
 SNIPPET_LEAD = 60
 #: Score multiplier for the tolerant OR retry of the text branch (fix round 1).
 OR_PENALTY = 0.8
+
+#: Stage-2 diagnostics: question → branch → SQL → count is logged at DEBUG
+#: (visible with ``pdfgraph ask --debug``).
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -142,8 +153,10 @@ def search(
     Branches: normalized code → sheets of that code; existing part-number key
     → sheets carrying that part; otherwise FTS5/BM25 over the whole query
     (all tokens, AND) and — when nothing matches — a tolerant OR retry with
-    the score multiplied by :data:`OR_PENALTY`. ``aircraft_type`` restricts
-    hits to pages of that type. A topic absent from the index returns ``[]``.
+    the score multiplied by :data:`OR_PENALTY`. Text-branch scores are
+    normalised to the best hit of the branch (see :func:`_by_fts`).
+    ``aircraft_type`` restricts hits to pages of that type. A topic absent
+    from the index returns ``[]``.
     """
     stripped = query.strip()
     if not stripped:
@@ -151,15 +164,18 @@ def search(
 
     code = normalize_code(stripped)
     if code:
+        logger.debug("branch=code %r (question=%r)", code, stripped)
         return _by_code(store, code, aircraft_type)
 
     part_key = normalize_part_number(stripped)
     if part_key and store.has_node("part", part_key):
+        logger.debug("branch=part %r (question=%r)", part_key, stripped)
         return _by_part(store, part_key, aircraft_type)
 
     needle = normalize_for_search(stripped)
     if not needle:
         return []
+    logger.debug("branch=fts (question=%r)", stripped)
     return _by_fts(store, needle, aircraft_type, limit)
 
 
@@ -195,8 +211,21 @@ def _by_fts(store: Store, needle: str, aircraft_type: str | None,
         # must still find documents phrased differently ("Рис. 12").
         rows = store.search_pages(_fts_expr(tokens, " OR "), aircraft_type, limit)
         penalty = OR_PENALTY
+    logger.debug("fts: needle=%r tokens=%d penalty=%.1f hits=%d",
+                 needle, len(tokens), penalty, len(rows))
+    if not rows:
+        return []
+    # Stage 2: normalise the score to the best hit of the branch. bm25() is
+    # negative and smaller means better, so |rank| is the raw relevance;
+    # scaling by the branch maximum keeps the leader at the full weight
+    # (1.0 for AND / OR_PENALTY for the retry) and turns
+    # answer.build_answer's min_score into a real relative threshold instead
+    # of a filter that removed every long real-world page hit.
+    best_rank = max(abs(rank) for _, _, _, _, rank in rows)
+    if best_rank <= 0.0:
+        best_rank = 1.0
     return [
         _fragment(store, document, page, system_code, subsystem_code,
-                  penalty / (1.0 + abs(rank)), "text", needle)
+                  penalty * (abs(rank) / best_rank), "text", needle)
         for document, page, system_code, subsystem_code, rank in rows
     ]

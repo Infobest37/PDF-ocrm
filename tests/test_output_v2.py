@@ -30,7 +30,9 @@ def test_json_v2_round_trip_includes_structure(tmp_path, monkeypatch):
 
 
 def test_blank_page_with_code_not_reported(tmp_path, monkeypatch):
-    # пустой лист с кодом: код сохранён, в отчёт не попал, таблиц нет
+    # пустой лист с кодом: код сохранён, в флаги отчёта не попал, таблиц нет.
+    # P2: report больше не пустой (шапка), но blank-лист — не дефект:
+    # ни одной строки "page N:" в отчёте быть не должно.
     import fitz, pdfprepare.pipeline as pl
     from pdfprepare.models import Word
     src = tmp_path / "b.pdf"; d = fitz.open(); d.new_page(); d.save(str(src)); d.close()
@@ -38,7 +40,9 @@ def test_blank_page_with_code_not_reported(tmp_path, monkeypatch):
     dst = tmp_path / "o"; dst.mkdir()
     res = pl.process_file(str(src), str(dst), {})
     assert res.pages[0].subsystem_code == "023.11.30"
-    assert (dst / "b.report.txt").read_text(encoding="utf-8") == ""
+    text = (dst / "b.report.txt").read_text(encoding="utf-8")
+    assert "source: b.pdf" in text and "flags: 0" in text
+    assert "page 0:" not in text
 
 
 def test_sheet_without_any_code_is_still_processed(tmp_path, monkeypatch):

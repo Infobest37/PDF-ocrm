@@ -1,17 +1,18 @@
 """Per-file orchestration: route native vs raster pages, OCR, structure, output."""
 
 import os
+from collections.abc import Callable
 
 import fitz
 
 from pdfprepare.codes import extract_codes, system_of
 from pdfprepare.figures import extract_figures
-from pdfprepare.models import DocResult, PageInfo, Table, Word
+from pdfprepare.models import DocResult, PageInfo, QualityFlag, Table, Word
 from pdfprepare.ocr import ocr_image
 from pdfprepare.output import write_json, write_searchable_pdf
 from pdfprepare.page import has_native_text, is_blank, render
 from pdfprepare.preprocess import invert_deskew, prepare_with_angle
-from pdfprepare.quality import flag_pages, write_report
+from pdfprepare.quality import flag_pages
 from pdfprepare.refs import extract_references
 from pdfprepare.tables import extract_tables
 
@@ -63,8 +64,47 @@ def _page_codes(full_text: str) -> tuple[str, str]:
     return system_code, ""
 
 
+def _write_report_txt(
+    result: DocResult, flags: list[QualityFlag], out_report: str
+) -> None:
+    """Write ``<stem>.report.txt``: a short header plus the quality flags.
+
+    The header (``source``/``pages``/``ocr_pages``/``native_pages``/
+    ``blank_pages``/``schema_version``/``flags``) guarantees the file is
+    never empty (backlog P2 — seven zero-byte reports in the 2026-10-18
+    runs). The flag lines keep the exact ``page N: <reason> (conf=…,
+    coverage=…)`` format of :func:`pdfprepare.quality.write_report`, which
+    :func:`pdfgraph.build.mark_defects` parses (``^page \\d+: \\S``).
+    Header lines deliberately begin with words other than ``page`` so they
+    can never be misparsed as defect entries.
+    """
+    native_pages = sum(1 for page in result.pages if page.is_native_text)
+    blank_pages = sum(1 for page in result.pages if page.is_blank)
+    lines = [
+        f"source: {os.path.basename(result.source_path)}",
+        f"pages: {result.page_count}",
+        f"ocr_pages: {result.page_count - native_pages}",
+        f"native_pages: {native_pages}",
+        f"blank_pages: {blank_pages}",
+        f"schema_version: {result.schema_version}",
+        f"flags: {len(flags)}",
+    ]
+    for flag in flags:
+        lines.append(
+            f"page {flag.page_index}: {flag.reason} "
+            f"(conf={flag.avg_conf:.2f}, coverage={flag.text_coverage:.4f})"
+        )
+    with open(out_report, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def process_file(
-    src: str, dst_dir: str, registry: dict[str, str], *, force_ocr: bool = False
+    src: str,
+    dst_dir: str,
+    registry: dict[str, str],
+    *,
+    force_ocr: bool = False,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> DocResult:
     """Prepare one PDF: OCR raster pages, keep native text, write outputs.
 
@@ -79,9 +119,16 @@ def process_file(
     ``force_ocr`` bypasses native-text detection and OCRs every page, so an
     operator can replace a poor existing text layer (e.g. a scan with an old
     OCR layer) for that run.
+
+    ``on_progress``, when given, fires once per processed page with
+    ``(pages_done, total_pages)`` — ``pages_done`` is 1-based, so the final
+    tick is ``(total_pages, total_pages)``. It is a pure display hook:
+    ``None`` (the default) keeps the behaviour identical for every existing
+    caller (tests, CLI).
     """
     doc = fitz.open(src)
     try:
+        total_pages = doc.page_count
         pages: list[PageInfo] = []
         for page in doc:
             page_index = page.number
@@ -184,6 +231,12 @@ def process_file(
                     references=references,
                 )
             )
+            if on_progress is not None:
+                # Emit AFTER the page is fully processed (render/preprocess/
+                # OCR/structure included), so a tick always marks a completed
+                # page; done is 1-based and the last tick is
+                # (total_pages, total_pages).
+                on_progress(page_index + 1, total_pages)
     finally:
         doc.close()
 
@@ -207,6 +260,6 @@ def process_file(
 
     write_searchable_pdf(src, pages, out_pdf)
     write_json(result, out_json)
-    write_report(flag_pages(result), out_report)
+    _write_report_txt(result, flag_pages(result), out_report)
 
     return result

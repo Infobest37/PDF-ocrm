@@ -1,14 +1,16 @@
 from pathlib import Path
-import os, io, sys, tempfile
+import os, io, sys, tempfile, traceback
 from pdf2image import convert_from_path
 import pymupdf as fitz
 from PyPDF2 import PdfReader, PdfWriter
 from PIL import Image
 import pytesseract
-import ocrmypdf  # используем для "нормальных" файлов
+import ocrmypdf
+
 # optional: pip install pikepdf
 try:
     import pikepdf
+
     HAVE_PIKEPDF = True
 except Exception:
     HAVE_PIKEPDF = False
@@ -22,11 +24,17 @@ pytesseract.pytesseract.tesseract_cmd = tesseract_path
 POPPLER_BIN = None
 # POPPLER_BIN = r"C:\tools\poppler-24.02.0\Library\bin"
 
-INPUT_DIR = Path(r"C:\Users\user\Desktop\Бот нумералогия\Вход")
-OUTPUT_DIR = Path(r"C:\Users\user\Desktop\Бот нумералогия\Выход")
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+# Путь к исходному файлу (убедитесь, что файл существует)
+INPUT_PDF = Path(r"C:\Users\user\Desktop\pythonCODE\OCR pdf\PDFn8nlibrali\PDF_OCR_APP\OCRfile\Инструкция.pdf")
+
+# Путь к выходному файлу
+OUTPUT_PDF = Path(r"C:\Users\user\Desktop\pythonCODE\OCR pdf\PDFn8nlibrali\PDF_OCR_APP\OCRoutput\Инструкция_OCR.pdf")
+
+# Создаем папку для выходного файла, если её нет
+OUTPUT_PDF.parent.mkdir(parents=True, exist_ok=True)
 
 Image.MAX_IMAGE_PIXELS = None  # для очень больших изображений
+
 
 def osd_rotation(image: Image.Image) -> int:
     try:
@@ -37,6 +45,7 @@ def osd_rotation(image: Image.Image) -> int:
     except Exception as e:
         print(f"⚠️ OSD ошибка: {e}", file=sys.stderr)
     return 0
+
 
 def page_has_digital_text(fitz_page: fitz.Page) -> bool:
     text = fitz_page.get_text("text")
@@ -51,6 +60,7 @@ def page_has_digital_text(fitz_page: fitz.Page) -> bool:
         pass
     return False
 
+
 def page_is_only_images(fitz_page: fitz.Page) -> bool:
     """
     Проверяет, состоит ли страница только из изображений (без текста).
@@ -61,7 +71,8 @@ def page_is_only_images(fitz_page: fitz.Page) -> bool:
     return len(images) > 0
 
 
-def ocr_single_scanned_page(pdf_path: Path, page_index: int, fitz_page: fitz.Page, lang: str = "rus+eng") -> "PyPDF2.PageObject":
+def ocr_single_scanned_page(pdf_path: Path, page_index: int, fitz_page: fitz.Page,
+                            lang: str = "rus+eng") -> "PyPDF2.PageObject":
     """
     OCR одной страницы (с учётом размера страницы → DPI).
     """
@@ -84,7 +95,7 @@ def ocr_single_scanned_page(pdf_path: Path, page_index: int, fitz_page: fitz.Pag
     rot = osd_rotation(img)
     if rot:
         img = img.rotate(-rot, expand=True, resample=Image.BICUBIC)
-        print(f"   🔄 Повернули страницу {page_index+1} на {rot}° (OSD)")
+        print(f"   🔄 Повернули страницу {page_index + 1} на {rot}° (OSD)")
 
     # OCR в PDF
     pdf_bytes = pytesseract.image_to_pdf_or_hocr(img, extension="pdf", lang=lang)
@@ -116,95 +127,116 @@ def smart_ocr_pdf(input_pdf: Path, output_pdf: Path, lang: str = "rus+eng"):
     print(f"\n🔹 Постраничная обработка: {input_pdf.name}")
     writer = PdfWriter()
 
-    with fitz.open(str(input_pdf)) as doc:
-        src_reader = PdfReader(str(input_pdf))
-        total = len(src_reader.pages)
+    try:
+        with fitz.open(str(input_pdf)) as doc:
+            src_reader = PdfReader(str(input_pdf))
+            total = len(src_reader.pages)
 
-        for i in range(total):
-            try:
-                page = doc[i]
+            for i in range(total):
+                try:
+                    page = doc[i]
 
-                if not page_needs_ocr(page):
+                    if not page_needs_ocr(page):
+                        writer.add_page(src_reader.pages[i])
+                        print(f"   📄 Стр. {i + 1}: цифровой текст → копия")
+                    else:
+                        ocr_page = ocr_single_scanned_page(input_pdf, i, page, lang=lang)
+                        writer.add_page(ocr_page)
+                        print(f"   🔠 Стр. {i + 1}: OCR выполнен")
+
+                except Exception as e:
+                    print(f"⚠️ Стр. {i + 1}: ошибка {e}. Копирую оригинал.")
+                    traceback.print_exc()
                     writer.add_page(src_reader.pages[i])
-                    print(f"   📄 Стр. {i+1}: цифровой текст → копия")
-                else:
-                    ocr_page = ocr_single_scanned_page(input_pdf, i, page, lang=lang)
-                    writer.add_page(ocr_page)
-                    print(f"   🔠 Стр. {i+1}: OCR выполнен")
 
-            except Exception as e:
-                print(f"⚠️ Стр. {i+1}: ошибка {e}. Копирую оригинал.")
-                writer.add_page(src_reader.pages[i])
+        with open(output_pdf, "wb") as f:
+            writer.write(f)
+        print(f"✅ Готово: {output_pdf}")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка в smart_ocr_pdf для {input_pdf.name}: {e}")
+        traceback.print_exc()
+        return False
 
-    with open(output_pdf, "wb") as f:
-        writer.write(f)
-    print(f"✅ Готово: {output_pdf}")
+
 def sanitize_pdf_with_pikepdf(src: Path, dst: Path):
     if not HAVE_PIKEPDF:
         raise RuntimeError("pikepdf не установлен")
     with pikepdf.open(str(src)) as pdf:
         pdf.save(str(dst))
 
+
 def main():
-    PROBLEM_FILES = {
-        "Новая нумерология",
-        # ... остальные с расширением .pdf
-    }
+    print(f"📂 Исходный файл: {INPUT_PDF}")
+    print(f"📂 Выходной файл: {OUTPUT_PDF}")
 
-    for pdf_file in INPUT_DIR.glob("*.pdf"):
-        out = OUTPUT_DIR / f"ocr_{pdf_file.name}"
-        print(f"\n📂 Обработка: {pdf_file.name}")
+    # Проверяем, существует ли исходный файл
+    if not INPUT_PDF.exists():
+        print(f"❌ Исходный файл не найден: {INPUT_PDF}")
+        return
 
-        if pdf_file.name in PROBLEM_FILES:
-            # обязательно использовать постраничную стратегию для проблемных
-            smart_ocr_pdf(pdf_file, out, lang="rus+eng")
-            continue
+    # Проверяем, существует ли уже выходной файл
+    if OUTPUT_PDF.exists():
+        print(f"⚠️ Выходной файл уже существует. Удалите его или выберите другое имя.")
+        return
 
-        # Для остальных — сначала пробуем ocrmypdf (быстрее, если pdf в порядке)
-        try:
-            # опционально можно предварительно "санитизировать" проблемный файл:
+    # Пробуем ocrmypdf (самый быстрый способ, если работает)
+    try:
+        print(f"\n🚀 Пробую ocrmypdf (самый быстрый способ)...")
+        ocrmypdf.ocr(
+            input_file=str(INPUT_PDF),
+            output_file=str(OUTPUT_PDF),
+            language='rus+eng',
+            rotate_pages=True,
+            output_type='pdf',
+            optimize=3,
+            jpeg_quality=50,
+            progress_bar=True
+        )
+        print(f"✅ Файл успешно обработан через ocrmypdf!")
+
+    except Exception as e:
+        print(f"⚠️ ocrmypdf не сработал: {e}")
+
+        # Пробуем "лечить" через pikepdf (если есть) и повторить
+        if HAVE_PIKEPDF:
             try:
-                ocrmypdf.ocr(
-                    input_file=str(pdf_file),
-                    output_file=str(out),
-                    language='rus+eng',
-                    rotate_pages=True,
-                    output_type='pdf',
-                    optimize=3,
-                    jpeg_quality=50,
-                    progress_bar=True
+                tmp_sanitized = INPUT_PDF.with_suffix(".sanitized.pdf")
+                print(f"🔧 Пробую санитаризацию через pikepdf...")
+                sanitize_pdf_with_pikepdf(INPUT_PDF, tmp_sanitized)
 
-                )
-                print(f"✅ Успешно обработан ocrmypdf: {pdf_file.name}")
-            except Exception as e:
-                print(f"❌ ocrmypdf упал: {e}")
-                # Попробуем "лечить" через pikepdf (если есть) и повторить
-                if HAVE_PIKEPDF:
-                    tmp_sanitized = pdf_file.with_suffix(".sanitized.pdf")
-                    print("🔧 Пробую санитаризацию через pikepdf...")
-                    sanitize_pdf_with_pikepdf(pdf_file, tmp_sanitized)
-                    try:
-                        ocrmypdf.ocr(
-                            input_file=str(tmp_sanitized),
-                            output_file=str(out),
-                            language='rus+eng',
-                            rotate_pages=True,
-                            output_type='pdf',
-                            optimize=1,
-                            progress_bar=True
-                        )
-                        print("✅ После санитаризации ocrmypdf сработал.")
-                        tmp_sanitized.unlink(missing_ok=True)
-                    except Exception as e2:
-                        print(f"❌ После сант. ocrmypdf всё ещё падает: {e2}")
-                        print("🔄 Использую постраничный fallback (smart_ocr_pdf).")
-                        smart_ocr_pdf(pdf_file, out, lang="rus+eng")
-                else:
-                    print("🔄 Использую постраничный fallback (smart_ocr_pdf).")
-                    smart_ocr_pdf(pdf_file, out, lang="rus+eng")
-        except Exception as final_e:
-            print(f"🔥 Непредвиденная ошибка: {final_e}. Пробую постраничный способ.")
-            smart_ocr_pdf(pdf_file, out, lang="rus+eng")
+                try:
+                    ocrmypdf.ocr(
+                        input_file=str(tmp_sanitized),
+                        output_file=str(OUTPUT_PDF),
+                        language='rus+eng',
+                        rotate_pages=True,
+                        output_type='pdf',
+                        optimize=1,
+                        progress_bar=True
+                    )
+                    print(f"✅ После санитаризации ocrmypdf сработал.")
+                    tmp_sanitized.unlink(missing_ok=True)
+                except Exception as e2:
+                    print(f"⚠️ После санитаризации ocrmypdf всё ещё падает: {e2}")
+                    print(f"🔄 Использую постраничный способ (smart_ocr_pdf)...")
+                    success = smart_ocr_pdf(INPUT_PDF, OUTPUT_PDF, lang="rus+eng")
+                    if not success:
+                        print(f"❌ Не удалось обработать файл")
+            except Exception as e3:
+                print(f"⚠️ Ошибка при санитаризации: {e3}")
+                print(f"🔄 Использую постраничный способ (smart_ocr_pdf)...")
+                success = smart_ocr_pdf(INPUT_PDF, OUTPUT_PDF, lang="rus+eng")
+                if not success:
+                    print(f"❌ Не удалось обработать файл")
+        else:
+            print(f"🔄 Использую постраничный способ (smart_ocr_pdf)...")
+            success = smart_ocr_pdf(INPUT_PDF, OUTPUT_PDF, lang="rus+eng")
+            if not success:
+                print(f"❌ Не удалось обработать файл")
+
+    print(f"\n🎉 Обработка завершена!")
+
 
 if __name__ == "__main__":
     main()

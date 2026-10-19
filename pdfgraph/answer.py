@@ -5,11 +5,16 @@ citations through :func:`pdfgraph.verify.verify_citations` before the answer
 is shown to a user.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Protocol
 
 from pdfgraph.query import Fragment, search
 from pdfgraph.store import Store
+
+#: Stage-2 diagnostics: the question→branch→SQL→count chain is logged in
+#: query.search/_by_fts and store.search_pages; here we log the verdict.
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -66,7 +71,14 @@ def build_answer(
     answer, regardless of which ``answerer`` implementation produced it.
     """
     fragments = search(store, question, aircraft_type)
-    if not fragments or max(fragment.score for fragment in fragments) < min_score:
+    best_score = max((fragment.score for fragment in fragments), default=0.0)
+    logger.debug("question=%r -> %d fragments, best_score=%.4f "
+                 "(min_score=%.3f)", question, len(fragments), best_score,
+                 min_score)
+    if not fragments or best_score < min_score:
+        logger.debug("question=%r -> refusal (%s)", question,
+                     "нет фрагментов" if not fragments else
+                     f"best_score {best_score:.4f} < {min_score:.3f}")
         return Answer(
             question=question,
             claims=[],
@@ -76,4 +88,7 @@ def build_answer(
         )
 
     selected_answerer = answerer if answerer is not None else ExtractiveAnswerer()
-    return selected_answerer.answer(question, fragments)
+    answer = selected_answerer.answer(question, fragments)
+    logger.debug("question=%r -> answer with %d claims",
+                 question, len(answer.claims))
+    return answer
