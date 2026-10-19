@@ -103,6 +103,12 @@ QComboBox#aircraft {{ background: {PAPER}; color: {INK};
     border: 1px solid {INK}; padding: 6px 8px; font-size: 15px; }}
 QComboBox#aircraft QAbstractItemView {{ background: {PAPER}; color: {INK};
     selection-background-color: {SELECTION}; selection-color: {INK}; }}
+QCheckBox#rag {{ color: {INK}; font-size: 13px; background: transparent;
+    spacing: 6px; }}
+QCheckBox#rag::indicator {{ width: 14px; height: 14px;
+    border: 1px solid {INK}; background: {PAPER}; }}
+QCheckBox#rag::indicator:hover {{ border-color: {GRAPHITE}; }}
+QCheckBox#rag::indicator:checked {{ background: {GRAPHITE}; }}
 QPushButton#ask {{ background: {PINE}; color: {PAPER}; border: none;
     padding: 10px 26px; font-size: 17px; font-weight: 600; }}
 QPushButton#ask:hover {{ background: {PINE_HOVER}; }}
@@ -241,6 +247,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.aircraft_combo.setCurrentIndex(0)
         aircraft_row.addWidget(aircraft_label)
         aircraft_row.addWidget(self.aircraft_combo)
+        # Step 3: opt-in RAG-Fusion next to the filter — neutral checkbox,
+        # unchecked by default so ordinary search stays the norm.
+        self.rag_check = QtWidgets.QCheckBox("Умный поиск (RAG-Fusion)",
+                                             objectName="rag")
+        self.rag_check.setToolTip(
+            "Переформулирует вопрос через LLM. Без LLM работает как обычный поиск.")
+        self.rag_check.setChecked(False)
+        aircraft_row.addWidget(self.rag_check)
         aircraft_row.addStretch(1)
         layout.addLayout(aircraft_row)
         layout.addSpacing(8)
@@ -319,24 +333,36 @@ class MainWindow(QtWidgets.QMainWindow):
 
         Citations are machine-checked before anything is shown; the row list
         is returned for tests and callers, UI updates happen as a side effect.
+        With «Умный поиск» checked the retrieval expands the question through
+        an LLM, which can take seconds: the wait cursor marks the blocking
+        stretch around :func:`build_answer` (no worker threads — the GUI
+        design stays synchronous).
         """
         if not self._open_store():
             self._show_store_note(self._missing_text)
             return []
         assert self._store is not None
+        use_rag_fusion = self.rag_check.isChecked()
+        if use_rag_fusion:
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
-            answer = build_answer(
-                self._store,
-                question,
-                aircraft_type=self._current_aircraft_type(),
-            )
-            checks = verify_citations(answer, self._store)
-        except sqlite3.Error:
-            # The file opened but a query hit broken data pages: same calm
-            # treatment as an absent store, never an unhandled exception.
-            self._drop_store()
-            self._show_store_note(_CORRUPT_STORE_TEXT)
-            return []
+            try:
+                answer = build_answer(
+                    self._store,
+                    question,
+                    aircraft_type=self._current_aircraft_type(),
+                    use_rag_fusion=use_rag_fusion,
+                )
+                checks = verify_citations(answer, self._store)
+            except sqlite3.Error:
+                # The file opened but a query hit broken data pages: same calm
+                # treatment as an absent store, never an unhandled exception.
+                self._drop_store()
+                self._show_store_note(_CORRUPT_STORE_TEXT)
+                return []
+        finally:
+            if use_rag_fusion:
+                QtWidgets.QApplication.restoreOverrideCursor()
         rows = answer_rows(answer, checks)
 
         self._rows = rows
