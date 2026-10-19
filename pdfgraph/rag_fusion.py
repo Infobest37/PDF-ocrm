@@ -29,8 +29,11 @@ import json
 import logging
 import os
 import re
+import time
 from typing import TYPE_CHECKING
 import urllib.request
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError
 
 from pdfprepare.codes import normalize_code
@@ -43,6 +46,7 @@ if TYPE_CHECKING:
 #: Hard cap the brief pins: the request blocks the GUI thread.
 REQUEST_TIMEOUT_SECONDS = 10
 LLM_TIMEOUT_SECONDS = 30
+DEFAULT_429_RETRY_SECONDS = 5
 OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
 #: RRF damping constant from the original paper.
 RRF_K = 60
@@ -127,36 +131,63 @@ def _call_llm(settings: LLMSettings, messages: list[dict]) -> str:
     base_url = settings.base_url.strip().rstrip("/")
     if not settings.api_key.strip():
         raise RuntimeError("API-ключ LLM не задан")
-    try:
-        body = _post_json(
-            base_url + "/chat/completions",
-            {
-                "model": settings.model,
-                "messages": messages,
-                "temperature": settings.temperature,
-                "max_tokens": settings.max_tokens,
-            },
-            {"Authorization": f"Bearer {settings.api_key}"},
-            timeout=LLM_TIMEOUT_SECONDS,
-        )
-    except HTTPError as exc:
+    payload = {
+        "model": settings.model,
+        "messages": messages,
+        "temperature": settings.temperature,
+        "max_tokens": settings.max_tokens,
+    }
+    headers = {"Authorization": f"Bearer {settings.api_key}"}
+    for attempt in range(2):
         try:
-            provider_body = exc.read().decode("utf-8", "replace").strip()
-        except Exception:
-            provider_body = ""
-        if settings.api_key:
-            provider_body = provider_body.replace(settings.api_key, "[redacted]")
-        detail = provider_body or str(exc)
-        raise RuntimeError(f"LLM API ошибка {exc.code}: {detail}") from exc
-    except Exception as exc:
-        detail = str(exc).replace(settings.api_key, "[redacted]")
-        raise RuntimeError(f"LLM API ошибка: {detail}") from exc
+            body = _post_json(
+                base_url + "/chat/completions", payload, headers,
+                timeout=LLM_TIMEOUT_SECONDS,
+            )
+            break
+        except HTTPError as exc:
+            if exc.code == 429:
+                if attempt == 0:
+                    time.sleep(_retry_after_seconds(exc))
+                    continue
+                raise RuntimeError(
+                    "429: Rate limit. Подождите и повторите.") from exc
+            try:
+                provider_body = exc.read().decode("utf-8", "replace").strip()
+            except Exception:
+                provider_body = ""
+            if settings.api_key:
+                provider_body = provider_body.replace(settings.api_key,
+                                                      "[redacted]")
+            detail = provider_body or str(exc)
+            raise RuntimeError(f"LLM API ошибка {exc.code}: {detail}") from exc
+        except Exception as exc:
+            detail = str(exc).replace(settings.api_key, "[redacted]")
+            raise RuntimeError(f"LLM API ошибка: {detail}") from exc
     choices = body.get("choices") or []
     message = choices[0].get("message") or {}
     content = message.get("content")
     if not isinstance(content, str) or not content.strip():
         raise RuntimeError("LLM API вернул пустой ответ")
     return content
+
+
+def _retry_after_seconds(error: HTTPError) -> float:
+    """Parse Retry-After seconds/date, defaulting to five seconds."""
+    headers = getattr(error, "headers", None) or getattr(error, "hdrs", None)
+    value = headers.get("Retry-After") if headers is not None else None
+    if not value:
+        return float(DEFAULT_429_RETRY_SECONDS)
+    try:
+        return max(0.0, float(value.strip()))
+    except (ValueError, AttributeError):
+        try:
+            retry_at = parsedate_to_datetime(str(value))
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return float(DEFAULT_429_RETRY_SECONDS)
 
 
 def generate_queries(question: str, n: int = 3,
@@ -368,5 +399,9 @@ def synthesize_answer(store: Store, question: str,
         return _parse_synthesis_response(response)
     except Exception as exc:
         logger.debug("answer synthesis failed: %s", exc)
+        if str(exc).startswith("429: Rate limit"):
+            reason = "429: превышен лимит запросов. Подождите 10-30 сек."
+        else:
+            reason = f"LLM недоступен: {exc}"
         return {"answer": "", "citations": [], "refusal": True,
-                "reason": f"LLM недоступен: {exc}"}
+                "reason": reason}

@@ -240,6 +240,28 @@ def test_synthesize_answer_403_returns_refusal_with_provider_diagnostic(
     assert "модель не разрешена" in result["reason"]
 
 
+def test_synthesize_answer_repeated_429_returns_rate_limit_refusal(monkeypatch):
+    from pdfgraph.rag_fusion import synthesize_answer
+
+    class TextStore:
+        def page_text(self, _document, _page):
+            return "page text"
+
+    monkeypatch.setattr(
+        "pdfgraph.rag_fusion._call_llm",
+        lambda *_args: (_ for _ in ()).throw(
+            RuntimeError("429: Rate limit. Подождите и повторите.")),
+    )
+    result = synthesize_answer(TextStore(), "вопрос",
+                               [_fragment("a.pdf", 1, "quote")], _settings())
+
+    assert result["refusal"] is True
+    assert result["answer"] == ""
+    assert result["citations"] == []
+    assert result["reason"] == (
+        "429: превышен лимит запросов. Подождите 10-30 сек.")
+
+
 def test_build_answer_synthesis_verifies_quote_and_displays_answer(
         fx_store, monkeypatch):
     import pdfgraph.answer as answer_module

@@ -377,6 +377,82 @@ def test_call_llm_403_raises_runtimeerror_with_body_and_redacts_key(
     assert key not in str(error.value)
 
 
+def _rate_limit_error(retry_after=None):
+    from email.message import Message
+    headers = Message()
+    if retry_after is not None:
+        headers["Retry-After"] = str(retry_after)
+    return HTTPError(
+        "https://aitunnel.example/v1/chat/completions", 429,
+        "Too Many Requests", headers, BytesIO(b'{"error":"rate limit"}'))
+
+
+def test_call_llm_retries_429_after_retry_after_header(monkeypatch):
+    from pdfgraph.gui.settings import LLMSettings
+    from pdfgraph.rag_fusion import _call_llm
+
+    calls = []
+    sleeps = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(request)
+        if len(calls) == 1:
+            raise _rate_limit_error("2")
+        return _FakeResponse(_openai_reply("Работает"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+    settings = LLMSettings(api_key="test-key", base_url="https://aitunnel.example/v1",
+                            model="gpt-6-luna")
+
+    assert _call_llm(settings, [{"role": "user", "content": "hi"}]) == "Работает"
+    assert len(calls) == 2
+    assert sleeps == [2.0]
+
+
+def test_call_llm_429_without_retry_after_waits_five_seconds(monkeypatch):
+    from pdfgraph.gui.settings import LLMSettings
+    from pdfgraph.rag_fusion import _call_llm
+
+    calls = []
+    sleeps = []
+
+    def fake_urlopen(request, timeout):
+        calls.append(request)
+        if len(calls) == 1:
+            raise _rate_limit_error()
+        return _FakeResponse(_openai_reply("Да"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+    settings = LLMSettings(api_key="test-key", base_url="https://aitunnel.example/v1",
+                            model="gpt-6-luna")
+
+    assert _call_llm(settings, [{"role": "user", "content": "hi"}]) == "Да"
+    assert len(calls) == 2
+    assert sleeps == [5]
+
+
+def test_call_llm_repeated_429_raises_rate_limit_runtimeerror(monkeypatch):
+    from pdfgraph.gui.settings import LLMSettings
+    from pdfgraph.rag_fusion import _call_llm
+
+    calls = []
+
+    def always_limited(request, timeout):
+        calls.append(request)
+        raise _rate_limit_error("0")
+
+    monkeypatch.setattr(urllib.request, "urlopen", always_limited)
+    monkeypatch.setattr("time.sleep", lambda _seconds: None)
+    settings = LLMSettings(api_key="test-key", base_url="https://aitunnel.example/v1",
+                            model="gpt-6-luna")
+
+    with pytest.raises(RuntimeError, match="429: Rate limit"):
+        _call_llm(settings, [{"role": "user", "content": "hi"}])
+    assert len(calls) == 2
+
+
 def test_generate_queries_urlerror_falls_back_to_question(monkeypatch):
     """A URL error is swallowed: the original question comes back alone."""
     import pdfgraph.rag_fusion as rag_fusion
