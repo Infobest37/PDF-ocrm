@@ -132,5 +132,19 @@ def test_text_query_falls_back_to_or_and_is_penalized(fx_store):
     assert search(fx_store, "совершенно отсутствующая тема") == []
 
 
+def test_text_query_falls_back_to_token_prefix(fx_store):
+    from pdfprepare.normalize import normalize_for_search
+
+    text = "Неологизмфланецов установлен"
+    fx_store.upsert_page("РТЭ кн.1.pdf", 91, "Ми-8МТВ",
+                         "023.00.00", "023.11.30", text,
+                         normalize_for_search(text))
+
+    hits = search(fx_store, "неологизмфланец")
+
+    assert hits and hits[0].page == 91 and hits[0].kind == "text"
+    assert 0.0 < hits[0].score <= 0.6
+
+
 def test_whitespace_query_returns_nothing(fx_store):
     assert search(fx_store, "   ") == []

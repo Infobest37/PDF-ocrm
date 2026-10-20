@@ -9,13 +9,12 @@ Three deterministic branches, tried in order:
    matches an existing ``part`` node returns the sheets whose tables carry it
    (``kind="part"``, ``score=1.0``).
 3. **Free text** — FTS5 ``MATCH`` over the stored search text with ``bm25()``
-   ranking (``kind="text"``). The query is first tried as all-tokens AND;
-   when nothing matches, a tolerant OR retry runs with the score multiplied
-   by ``OR_PENALTY``. A topic absent from the index returns no hits. The
-   score is normalised to the best hit of the branch:
-   ``score = penalty * |rank| / max(|rank|)`` — the branch leader carries
-   the full weight (1.0 for AND, 0.8 for the OR retry) and weaker hits scale
-   down proportionally. Stage 2: the previous absolute scale
+   ranking (``kind="text"``). The query is tried as all-tokens AND, then OR,
+   then all-tokens prefix queries using FTS5 ``*``. A topic absent from the
+   index returns no hits. The score is normalised to the best hit of the
+   branch: ``score = penalty * |rank| / max(|rank|)`` — the branch leader
+   carries the full weight (1.0 for AND, 0.8 for OR, 0.6 for prefix) and weaker
+   hits scale down proportionally. Stage 2: the previous absolute scale
    (``penalty / (1 + |bm25|)``) gave ~0.15 for real РЭ pages — every real
    question sat under ``answer.min_score=0.35``, so the graph refused all
    answers («не ищет»); the relative scale makes the threshold meaningful.
@@ -41,6 +40,8 @@ SNIPPET_CHARS = 200
 SNIPPET_LEAD = 60
 #: Score multiplier for the tolerant OR retry of the text branch (fix round 1).
 OR_PENALTY = 0.8
+#: Score multiplier for the broader FTS5 token-prefix retry.
+PREFIX_PENALTY = 0.6
 
 #: Stage-2 diagnostics: question → branch → SQL → count is logged at DEBUG
 #: (visible with ``pdfgraph ask --debug``).
@@ -142,6 +143,13 @@ def _fts_expr(tokens: list[str], joiner: str) -> str:
     return joiner.join('"{}"'.format(token.replace('"', '""')) for token in tokens)
 
 
+def _fts_prefix_expr(tokens: list[str], joiner: str) -> str:
+    """Join tokens as FTS5 prefix queries."""
+    return joiner.join(
+        '"{}"*'.format(token.replace('"', '""')) for token in tokens
+    )
+
+
 def search(
     store: Store,
     query: str,
@@ -152,8 +160,8 @@ def search(
 
     Branches: normalized code → sheets of that code; existing part-number key
     → sheets carrying that part; otherwise FTS5/BM25 over the whole query
-    (all tokens, AND) and — when nothing matches — a tolerant OR retry with
-    the score multiplied by :data:`OR_PENALTY`. Text-branch scores are
+    (all tokens, AND), a tolerant OR retry, and—if both miss—an all-token
+    prefix retry with :data:`PREFIX_PENALTY`. Text-branch scores are
     normalised to the best hit of the branch (see :func:`_by_fts`).
     ``aircraft_type`` restricts hits to pages of that type. A topic absent
     from the index returns ``[]``.
@@ -211,6 +219,11 @@ def _by_fts(store: Store, needle: str, aircraft_type: str | None,
         # must still find documents phrased differently ("Рис. 12").
         rows = store.search_pages(_fts_expr(tokens, " OR "), aircraft_type, limit)
         penalty = OR_PENALTY
+    if not rows:
+        rows = store.search_pages(
+            _fts_prefix_expr(tokens, " AND "), aircraft_type, limit
+        )
+        penalty = PREFIX_PENALTY
     logger.debug("fts: needle=%r tokens=%d penalty=%.1f hits=%d",
                  needle, len(tokens), penalty, len(rows))
     if not rows:
