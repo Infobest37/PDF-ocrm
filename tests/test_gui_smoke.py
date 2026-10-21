@@ -258,3 +258,71 @@ def test_chat_accepts_not_that_correction_and_keeps_pending_on_invalid_reply(
 
     assert calls == ["система", "система аварийный радиомаяк"]
     window.close()
+
+
+def test_refusal_with_fragments_shows_citation_and_click_opens_pdf(
+        tmp_path, monkeypatch):
+    import os
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PyQt5.QtCore import QPoint, Qt
+    from PyQt5.QtTest import QTest
+    from PyQt5.QtWidgets import QApplication
+
+    from pdfgraph.answer import Answer
+    from pdfgraph.gui.app import MainWindow
+    from pdfgraph.query import Fragment
+    from pdfgraph.store import Store
+    from pdfprepare.normalize import normalize_for_search
+
+    app = QApplication.instance() or QApplication([])
+    document, page = "manual.pdf", 47
+    snippet = "ИМ-47 предназначен для обнаружения радиомаяка."
+    store = Store(str(tmp_path / "refusal-with-evidence.db"))
+    store.add_node("sheet", f"{document}:{page}",
+                    document=document, page=page)
+    store.upsert_page(
+        document, page, "Ми-8МТВ", "023.00.00", "023.11.30",
+        snippet, normalize_for_search(snippet),
+    )
+    store.close()
+    fragment = Fragment(
+        document=document, page=page, system_code="023.00.00",
+        subsystem_code="023.11.30", snippet=snippet, char_start=0,
+        char_end=len(snippet), score=0.8, kind="text",
+    )
+    monkeypatch.setattr(
+        "pdfgraph.gui.app.build_answer",
+        lambda _store, question, **_kwargs: Answer(
+            question, [], [fragment], refusal=True,
+            reason="Нет прямого ответа в найденных фрагментах.",
+        ),
+    )
+    opened = []
+    monkeypatch.setattr(
+        "pdfgraph.gui.app.open_pdf_at_page",
+        lambda _pdf_dir, source, sheet: (opened.append((source, sheet)), True)[1],
+    )
+
+    window = MainWindow(str(tmp_path / "refusal-with-evidence.db"), "registry.txt")
+    window.show()
+    assert window.ask("Для чего нужен ИМ-47") == []
+    app.processEvents()
+    transcript = window.chat_widget.history_view.toPlainText()
+    assert "Ассистент — отказ" in transcript
+    assert "Нет прямого ответа" in transcript
+    assert f"{document}, лист {page}" in transcript
+    assert snippet in transcript
+
+    cursor = window.chat_widget.history_view.document().find(
+        f"{document}, лист {page}")
+    assert not cursor.isNull()
+    cursor.setPosition(cursor.selectionStart())
+    point = (window.chat_widget.history_view.cursorRect(cursor).center()
+             + QPoint(5, 0))
+    assert window.chat_widget.history_view.anchorAt(point)
+    QTest.mouseClick(
+        window.chat_widget.history_view.viewport(), Qt.LeftButton, pos=point,
+    )
+
+    assert opened == [(document, page)]
+    window.close()

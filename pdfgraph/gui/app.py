@@ -328,6 +328,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if use_rag_fusion or use_synthesis:
             QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        verified_refusal_fragment_indexes: set[int] = set()
         try:
             try:
                 answer = build_answer(
@@ -339,6 +340,22 @@ class MainWindow(QtWidgets.QMainWindow):
                     llm_settings=self.llm_settings,
                 )
                 checks = verify_citations(answer, self._store)
+                if answer.refusal and answer.fragments:
+                    fragment_evidence = Answer(
+                        question=answer.question,
+                        claims=[
+                            Claim(text=fragment.snippet, evidence=[index])
+                            for index, fragment in enumerate(answer.fragments)
+                        ],
+                        fragments=answer.fragments,
+                    )
+                    verified_refusal_fragment_indexes = {
+                        check.claim_index
+                        for check in verify_citations(
+                            fragment_evidence, self._store,
+                        )
+                        if check.ok
+                    }
             except sqlite3.Error:
                 # The file opened but a query hit broken data pages: same calm
                 # treatment as an absent store, never an unhandled exception.
@@ -357,7 +374,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if answer.refusal or not rows:
             message_text = answer.reason or verdict_text(rows)
             message_kind = "refusal"
-            citations = []
+            citations = [
+                {
+                    "document": fragment.document,
+                    "page": fragment.page,
+                    "snippet": fragment.snippet,
+                }
+                for index, fragment in enumerate(answer.fragments)
+                if answer.refusal
+                and index in verified_refusal_fragment_indexes
+            ]
         else:
             answer_text = "\n\n".join(row.text for row in rows if row.text)
             message_text = "\n\n".join(
