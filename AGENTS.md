@@ -6,8 +6,8 @@
 - В корне есть рабочее окружение Python 3.12: `venv\Scripts\python.exe`. Используйте его, не системный Python.
 
 ## Команды
-- Все тесты: `venv\Scripts\python.exe -m pytest -q`; один модуль: `venv\Scripts\python.exe -m pytest tests\test_query.py -v`.
-- GUI-тесты запускаются с Qt offscreen; приёмочные `tests/test_graph_acceptance.py` прогоняют настоящий OCR и требуют Tesseract с данными `rus` и `eng`.
+- Все тесты: `venv\Scripts\python.exe -m pytest -q`; один модуль: `venv\Scripts\python.exe -m pytest tests\test_graph_cli.py -v`.
+- GUI-тесты запускаются с Qt offscreen; приёмочные `tests/test_graph_acceptance.py` прогоняют настоящий OCR и требуют установленный Tesseract с данными `rus` и `eng`. Если он не находится в `pdfprepare\tesseract\`, укажите каталог установки через `PDFPREPARE_TESSERACT`.
 - Подготовить PDF: `venv\Scripts\python.exe -m pdfprepare <src_dir> <dst_dir> [--registry <path>] [--force-ocr]`. CLI обрабатывает PDF только в корне `src_dir`; по умолчанию создаёт searchable PDF, JSON и `.report.txt`.
 - Построить граф: `venv\Scripts\python.exe -m pdfgraph build <prepared_dir> graph.db --type Ми-8МТВ [--registry <path>]`; задать вопрос: `venv\Scripts\python.exe -m pdfgraph ask "<вопрос>" --store graph.db`. `build` ищет JSON рекурсивно; для ответов CLI код 0 означает подтверждённые цитаты, код 1 — отказ или неподтверждённые цитаты.
 - Путь реестра `Коды систем Вертолета.txt` по умолчанию относительный к текущей рабочей папке; при запуске не из корня передавайте `--registry` явно.
