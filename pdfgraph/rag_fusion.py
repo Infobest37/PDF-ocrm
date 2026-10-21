@@ -299,6 +299,18 @@ _ANSWERABILITY_SYSTEM_PROMPT = (
     "Если не уверен — false. Верни только JSON с полями has_answer и reason."
 )
 
+_CLASSIFICATION_SYSTEM_PROMPT = (
+    "Ты определяешь, можно ли ответить на вопрос по найденным фрагментам. "
+    "Верни decision=answer, если вопрос понятен и фрагменты подтверждают один "
+    "смысл; decision=clarify, если запрос неясен или есть несколько "
+    "правдоподобных тем с опорой на фрагменты; decision=refuse, если "
+    "подходящих фрагментов нет или ты не уверен. Для clarify предложи "
+    "2-3 коротких варианта и укажи fragment_ids — нулевые индексы только "
+    "в переданном списке. Не придумывай документы, листы и цитаты. "
+    "Верни только JSON с полями decision, reason, options. Вариант содержит "
+    "id, label, fragment_ids и query_terms."
+)
+
 
 def _parse_synthesis_response(content: str) -> dict:
     """Parse JSON or a small marked-list fallback from the provider."""
@@ -425,8 +437,110 @@ def _check_answerability(settings: LLMSettings, question: str,
         return False
 
 
+def classify_answerability(settings: LLMSettings, question: str,
+                           fragments: list[Fragment]) -> dict:
+    """Classify as answer, clarify, or refuse using the top ten fragments.
+
+    Candidate options refer to fragment indices, not model-generated
+    citations. Invalid references are discarded; no valid option means a
+    fail-closed refusal.
+    """
+    def refuse(reason: str) -> dict:
+        return {"decision": "refuse", "reason": reason, "options": []}
+
+    if not getattr(settings, "api_key", "").strip():
+        return refuse("LLM недоступен: API-ключ не задан")
+    if not fragments:
+        return refuse("нет подтверждений в документах")
+
+    contexts = [
+        {
+            "document": fragment.document,
+            "page": fragment.page,
+            "text": fragment.snippet[:1000],
+        }
+        for fragment in fragments[:10]
+    ]
+    messages = [
+        {"role": "system", "content": _CLASSIFICATION_SYSTEM_PROMPT},
+        {"role": "user", "content": (
+            f"Вопрос: {question}\nФрагменты:\n"
+            + json.dumps(contexts, ensure_ascii=False, indent=2)
+        )},
+    ]
+
+    response_text = ""
+    try:
+        response_text = _call_llm(settings, messages).strip()
+        if response_text.startswith("```"):
+            response_text = re.sub(
+                r"^```(?:json)?\s*|\s*```$", "", response_text,
+                flags=re.IGNORECASE,
+            ).strip()
+        parsed = json.loads(response_text)
+        if not isinstance(parsed, dict):
+            return refuse("Некорректный ответ классификатора")
+
+        decision = parsed.get("decision")
+        reason = parsed.get("reason")
+        if decision not in {"answer", "clarify", "refuse"}:
+            return refuse("Некорректное решение классификатора")
+        if not isinstance(reason, str):
+            return refuse("Некорректный ответ классификатора")
+        if decision != "clarify":
+            return {"decision": decision, "reason": reason, "options": []}
+
+        options = []
+        seen_ids = set()
+        raw_options = parsed.get("options")
+        if not isinstance(raw_options, list):
+            return refuse("Нет подтверждённых вариантов уточнения")
+        for option in raw_options:
+            if not isinstance(option, dict):
+                continue
+            option_id = option.get("id")
+            label = option.get("label")
+            raw_ids = option.get("fragment_ids")
+            if (not isinstance(option_id, str) or not option_id.strip()
+                    or option_id in seen_ids or not isinstance(label, str)
+                    or not label.strip() or not isinstance(raw_ids, list)):
+                continue
+            fragment_ids = list(dict.fromkeys(
+                fragment_id for fragment_id in raw_ids
+                if type(fragment_id) is int
+                and 0 <= fragment_id < len(contexts)
+            ))
+            if not fragment_ids:
+                continue
+            raw_terms = option.get("query_terms", [])
+            query_terms = (
+                list(dict.fromkeys(term.strip() for term in raw_terms
+                                   if isinstance(term, str) and term.strip()))
+                if isinstance(raw_terms, list) else []
+            )
+            options.append({
+                "id": option_id,
+                "label": label.strip(),
+                "fragment_ids": fragment_ids,
+                "query_terms": query_terms,
+            })
+            seen_ids.add(option_id)
+            if len(options) == 3:
+                break
+
+        if not options:
+            return refuse("Нет подтверждённых вариантов уточнения")
+        return {"decision": "clarify", "reason": reason,
+                "options": options}
+    except Exception as exc:
+        logger.debug("answerability classification failed question=%r "
+                     "error=%s response=%r", question, exc, response_text)
+        return refuse("нет подтверждений в документах")
+
+
 def synthesize_answer(store: Store, question: str,
-                      fragments: list[Fragment], settings: LLMSettings) -> dict:
+                      fragments: list[Fragment], settings: LLMSettings, *,
+                      answerability_checked: bool = False) -> dict:
     """Synthesize an answer while sending full page text for only top 3 hits.
 
     All remaining retrieved fragments contribute only their search snippet.
@@ -439,7 +553,8 @@ def synthesize_answer(store: Store, question: str,
     if not fragments:
         return {"answer": "", "citations": [], "refusal": True,
                 "reason": "нет подтверждений в документах"}
-    if not _check_answerability(settings, question, fragments):
+    if (not answerability_checked
+            and not _check_answerability(settings, question, fragments)):
         return {"answer": "", "citations": [], "refusal": True,
                 "reason": "нет подтверждений в документах"}
 

@@ -56,6 +56,16 @@ def _settings(**kwargs):
     return LLMSettings(**fields)
 
 
+def _patch_classifier(monkeypatch):
+    monkeypatch.setattr(
+        "pdfgraph.rag_fusion.classify_answerability",
+        lambda *_args, **_kwargs: {
+            "decision": "answer", "reason": "Есть прямое подтверждение",
+            "options": [],
+        },
+    )
+
+
 def _fixture_answer():
     from pdfgraph.answer import Answer, Claim
     fragment = _fragment(FX_DOCUMENT, 47, FX_TEXT_47)
@@ -247,6 +257,36 @@ def test_synthesize_answer_runs_judge_for_low_score_fragments(monkeypatch):
     store.page_text.assert_called_once_with("manual.pdf", 1)
 
 
+def test_synthesize_answer_can_skip_a_previously_run_judge(monkeypatch):
+    from pdfgraph.rag_fusion import synthesize_answer
+
+    fragment = _fragment(FX_DOCUMENT, 47, FX_TEXT_47)
+    monkeypatch.setattr(
+        "pdfgraph.rag_fusion._check_answerability",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("the classifier already ran")),
+    )
+    monkeypatch.setattr(
+        "pdfgraph.rag_fusion._call_llm",
+        lambda *_args: json.dumps({
+            "answer": "Подтверждённый ответ",
+            "citations": [{
+                "document": FX_DOCUMENT,
+                "page": 47,
+                "snippet": FX_TEXT_47,
+            }],
+        }, ensure_ascii=False),
+    )
+
+    result = synthesize_answer(
+        Mock(page_text=lambda *_args: FX_TEXT_47), "радиомаяк",
+        [fragment], _settings(), answerability_checked=True,
+    )
+
+    assert result["refusal"] is False
+    assert result["answer"] == "Подтверждённый ответ"
+
+
 def test_synthesize_answer_refuses_when_judge_says_no(monkeypatch, caplog):
     from pdfgraph.rag_fusion import synthesize_answer
 
@@ -386,12 +426,13 @@ def test_build_answer_synthesis_verifies_quote_and_displays_answer(
     from pdfgraph.verify import verify_citations
     from pdfgraph.gui.viewmodel import answer_rows
 
+    _patch_classifier(monkeypatch)
     fragments = real_search(fx_store, "радиомаяк ПАРМ-406А")[:1]
     assert fragments and fragments[0].page == 47
     monkeypatch.setattr(answer_module, "search", lambda *_args, **_kwargs: fragments)
     monkeypatch.setattr(
         "pdfgraph.rag_fusion.synthesize_answer",
-        lambda *_args: {
+        lambda *_args, **_kwargs: {
             "answer": "Минимальное давление масла — X кгс/см².",
             "citations": [{
                 "document": FX_DOCUMENT,
@@ -428,13 +469,14 @@ def test_synthesized_answer_is_shown_once_with_separate_citation_rows(
     from pdfgraph.gui.viewmodel import answer_rows
     from conftest import FX_TEXT_48
 
+    _patch_classifier(monkeypatch)
     first = _fragment(FX_DOCUMENT, 47, FX_TEXT_47)
     second = _fragment(FX_DOCUMENT, 48, FX_TEXT_48)
     monkeypatch.setattr(answer_module, "search",
                         lambda *_args, **_kwargs: [first, second])
     monkeypatch.setattr(
         "pdfgraph.rag_fusion.synthesize_answer",
-        lambda *_args: {
+        lambda *_args, **_kwargs: {
             "answer": "Синтезированный вывод.",
             "citations": [
                 {"document": FX_DOCUMENT, "page": 47, "snippet": FX_TEXT_47},
@@ -461,11 +503,12 @@ def test_build_answer_marks_a_bad_citation_unverified(fx_store, monkeypatch):
     from pdfgraph.verify import verify_citations
     from pdfgraph.gui.viewmodel import answer_rows
 
+    _patch_classifier(monkeypatch)
     fragments = real_search(fx_store, "радиомаяк ПАРМ-406А")[:1]
     monkeypatch.setattr(answer_module, "search", lambda *_args, **_kwargs: fragments)
     monkeypatch.setattr(
         "pdfgraph.rag_fusion.synthesize_answer",
-        lambda *_args: {
+        lambda *_args, **_kwargs: {
             "answer": "Минимальное давление — X кгс/см².",
             "citations": [{
                 "document": FX_DOCUMENT, "page": 47,
@@ -490,11 +533,12 @@ def test_build_answer_synthesis_error_is_a_calm_refusal(fx_store, monkeypatch):
     from pdfgraph.answer import build_answer
     from pdfgraph.query import search as real_search
 
+    _patch_classifier(monkeypatch)
     monkeypatch.setattr(answer_module, "search",
                         lambda *_args, **_kwargs: real_search(fx_store, "радиомаяк"))
     monkeypatch.setattr(
         "pdfgraph.rag_fusion.synthesize_answer",
-        lambda *_args: {
+        lambda *_args, **_kwargs: {
             "answer": "", "citations": [], "refusal": True,
             "reason": "LLM недоступен: offline",
         },

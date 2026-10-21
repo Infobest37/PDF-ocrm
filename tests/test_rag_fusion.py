@@ -481,6 +481,135 @@ def test_generate_queries_bad_or_empty_response_falls_back_to_question(
 
 
 # ---------------------------------------------------------------------------
+# answerability classification / clarification
+# ---------------------------------------------------------------------------
+
+def test_classify_clear_question_returns_answer_decision(monkeypatch):
+    """A clear, answerable question is classified as an answer."""
+    from pdfgraph.rag_fusion import classify_answerability
+
+    fragments = [_frag("РТЭ.pdf", 12, 0.8)]
+    llm = Mock(return_value=json.dumps({
+        "decision": "answer", "reason": "Есть прямое подтверждение",
+        "options": [],
+    }, ensure_ascii=False))
+    monkeypatch.setattr("pdfgraph.rag_fusion._call_llm", llm)
+
+    result = classify_answerability(
+        Mock(api_key="test-key"), "понятный технический вопрос", fragments,
+    )
+
+    assert result["decision"] == "answer"
+    assert result["options"] == []
+    llm.assert_called_once()
+
+
+def test_classify_ambiguous_question_returns_two_or_three_top10_options(
+        monkeypatch):
+    """Ambiguity returns evidence-linked choices and does not synthesize yet."""
+    from pdfgraph.rag_fusion import classify_answerability
+
+    fragments = [_frag(f"Док-{i}.pdf", i, 0.8) for i in range(12)]
+    options = [
+        {"id": "A", "label": "Замена втулки", "fragment_ids": [0, 3],
+         "query_terms": ["втулка", "замена"]},
+        {"id": "B", "label": "Чертёжный номер", "fragment_ids": [8],
+         "query_terms": ["чертёжный номер"]},
+    ]
+    llm = Mock(return_value=json.dumps({
+        "decision": "clarify",
+        "reason": "В документах есть два возможных смысла",
+        "options": options,
+    }, ensure_ascii=False))
+    monkeypatch.setattr("pdfgraph.rag_fusion._call_llm", llm)
+
+    result = classify_answerability(
+        Mock(api_key="test-key"), "замена втулки", fragments,
+    )
+
+    assert result["decision"] == "clarify"
+    assert 2 <= len(result["options"]) <= 3
+    judge_messages = llm.call_args.args[1]
+    judge_contexts = json.loads(
+        judge_messages[1]["content"].split("Фрагменты:\n", 1)[1])
+    assert len(judge_contexts) == 10
+    assert all(
+        0 <= fragment_id < len(judge_contexts)
+        for option in result["options"]
+        for fragment_id in option["fragment_ids"]
+    )
+    llm.assert_called_once()
+
+
+def test_classify_question_without_evidence_refuses(monkeypatch):
+    from pdfgraph.rag_fusion import classify_answerability
+
+    llm = Mock(return_value=json.dumps({
+        "decision": "refuse", "reason": "Нет подходящих фрагментов",
+        "options": [],
+    }, ensure_ascii=False))
+    monkeypatch.setattr("pdfgraph.rag_fusion._call_llm", llm)
+
+    result = classify_answerability(
+        Mock(api_key="test-key"), "Боинг-747", [_frag("РТЭ.pdf", 1, 0.8)],
+    )
+
+    assert result["decision"] == "refuse"
+    assert result["options"] == []
+    llm.assert_called_once()
+
+
+def test_classify_ignores_invalid_fragment_ids_and_fails_closed_if_all_invalid(
+        monkeypatch):
+    from pdfgraph.rag_fusion import classify_answerability
+
+    fragments = [_frag(f"Док-{i}.pdf", i, 0.8) for i in range(10)]
+    responses = iter([
+        json.dumps({
+            "decision": "clarify", "reason": "Выберите вариант",
+            "options": [
+                {"id": "A", "label": "Вне списка", "fragment_ids": [999]},
+                {"id": "B", "label": "Есть в найденном", "fragment_ids": [9]},
+            ],
+        }, ensure_ascii=False),
+        json.dumps({
+            "decision": "clarify", "reason": "Нет валидных источников",
+            "options": [
+                {"id": "A", "label": "Вне списка", "fragment_ids": [999]},
+            ],
+        }, ensure_ascii=False),
+    ])
+    llm = Mock(side_effect=lambda *_args: next(responses))
+    monkeypatch.setattr("pdfgraph.rag_fusion._call_llm", llm)
+
+    partial = classify_answerability(
+        Mock(api_key="test-key"), "неоднозначный вопрос", fragments,
+    )
+    all_invalid = classify_answerability(
+        Mock(api_key="test-key"), "неоднозначный вопрос", fragments,
+    )
+
+    assert partial["decision"] == "clarify"
+    assert [option["id"] for option in partial["options"]] == ["B"]
+    assert partial["options"][0]["fragment_ids"] == [9]
+    assert all_invalid["decision"] == "refuse"
+    assert all_invalid["options"] == []
+    assert llm.call_count == 2
+
+
+def test_conversation_stops_after_two_unanswered_clarifications():
+    from pdfgraph.conversation import Conversation
+
+    conversation = Conversation(max_clarification_rounds=2)
+
+    assert conversation.add_clarification("Вариант A или B?") is not None
+    assert conversation.add_clarification("Уточните: A или B?") is not None
+    assert conversation.add_clarification("Ещё один выбор?") is None
+    assert conversation.clarification_rounds == 2
+    assert conversation.can_clarify is False
+
+
+# ---------------------------------------------------------------------------
 # rag_search
 # ---------------------------------------------------------------------------
 

@@ -179,3 +179,82 @@ def test_open_sheet_survives_query_level_corruption(tmp_path, monkeypatch):
     editor = dialogs[0].findChild(QPlainTextEdit)
     assert "Хранилище повреждено" in editor.toPlainText()
     window.close()
+
+
+def test_chat_displays_verified_clarification_and_repeats_search(
+        fx_store_path, monkeypatch):
+    import os
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PyQt5.QtWidgets import QApplication
+    from pdfgraph.answer import Answer, Claim
+    from pdfgraph.gui.app import MainWindow
+    from pdfgraph.query import search
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(fx_store_path, "Коды систем Вертолета.txt")
+    fragment = search(window._store, "радиомаяк")[0]
+    decision = {
+        "decision": "clarify",
+        "reason": "Уточните тип радиомаяка",
+        "options": [{
+            "id": "A", "label": "Аварийный переносной радиомаяк",
+            "fragment_ids": [0], "query_terms": ["аварийный", "переносной"],
+        }],
+    }
+    calls = []
+
+    def fake_build_answer(_store, question, **_kwargs):
+        calls.append(question)
+        if len(calls) == 1:
+            return Answer(question, [], [fragment], clarification=decision)
+        return Answer(question, [Claim(fragment.snippet, [0])], [fragment])
+
+    monkeypatch.setattr("pdfgraph.gui.app.build_answer", fake_build_answer)
+    window.ask("радиомаяк")
+    transcript = window.chat_widget.history_view.toPlainText()
+    assert "A — Аварийный переносной радиомаяк" in transcript
+    assert f"{fragment.document}, лист {fragment.page}" in transcript
+    assert fragment.snippet in transcript
+
+    window.chat_widget.question_input.setText("A")
+    window.chat_widget.send_button.click()
+
+    assert calls == ["радиомаяк", "радиомаяк аварийный переносной"]
+    assert "Подтверждено" in window.chat_widget.history_view.toPlainText()
+    window.close()
+
+
+def test_chat_accepts_not_that_correction_and_keeps_pending_on_invalid_reply(
+        fx_store_path, monkeypatch):
+    import os
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PyQt5.QtWidgets import QApplication
+    from pdfgraph.answer import Answer
+    from pdfgraph.gui.app import MainWindow
+    from pdfgraph.query import search
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(fx_store_path, "Коды систем Вертолета.txt")
+    fragment = search(window._store, "радиомаяк")[0]
+    calls = []
+
+    def fake_build_answer(_store, question, **_kwargs):
+        calls.append(question)
+        return Answer(question, [], [fragment], clarification={
+            "decision": "clarify", "reason": "Выберите",
+            "options": [{"id": "77", "label": "Вариант B",
+                         "fragment_ids": [0], "query_terms": []}],
+        })
+
+    monkeypatch.setattr("pdfgraph.gui.app.build_answer", fake_build_answer)
+    window.ask("система")
+    assert "A — Вариант B" in window.chat_widget.history_view.toPlainText()
+    window.chat_widget.question_input.setText("неизвестный ввод")
+    window.chat_widget.send_button.click()
+    assert calls == ["система"]
+    assert "Выберите A" in window.chat_widget.history_view.toPlainText()
+    window.chat_widget.question_input.setText("Не то: аварийный радиомаяк")
+    window.chat_widget.send_button.click()
+
+    assert calls == ["система", "система аварийный радиомаяк"]
+    window.close()

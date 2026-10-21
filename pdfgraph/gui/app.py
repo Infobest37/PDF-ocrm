@@ -20,13 +20,14 @@ import sys
 
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from pdfgraph.answer import build_answer
+from pdfgraph.answer import Answer, Claim, build_answer
 from pdfgraph.gui.chat_widget import ChatWidget
 from pdfgraph.gui.pdf_opener import open_pdf_at_page, resolve_pdf_dir
 from pdfgraph.gui.settings import (LLMSettings, load as load_llm_settings,
                                    save as save_llm_settings)
 from pdfgraph.gui.settings_dialog import SettingsDialog
 from pdfgraph.gui.viewmodel import AnswerRow, answer_rows, verdict_text
+from pdfgraph.conversation import Conversation
 from pdfgraph.paths import resolve_store_path
 from pdfgraph.store import Store
 from pdfgraph.verify import verify_citations
@@ -129,6 +130,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"\n{missing_hint}" if missing_hint else "")
         self._store: Store | None = None
         self._rows: list[AnswerRow] = []
+        self.conversation = Conversation()
 
         self.setWindowTitle("Граф знаний Ми-8МТВ")
         self.setMinimumSize(880, 600)
@@ -294,6 +296,30 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_store_note(self._missing_text)
             return []
         assert self._store is not None
+
+        if self.conversation.pending_options:
+            self.conversation.add_user(question)
+            reply = self.conversation.resolve_clarification_reply(question)
+            if reply is None:
+                choices = "/".join(
+                    str(option.get("id", ""))
+                    for option in self.conversation.pending_options
+                    if option.get("id")
+                )
+                prompt = (
+                    f"Выберите {choices} или укажите "
+                    "«Не то: <уточнение>»."
+                )
+                self.conversation.add_assistant(prompt, kind="clarify")
+                self.chat_widget.append_message(
+                    "assistant", prompt, kind="clarify",
+                )
+                return []
+            query = reply["query"]
+        else:
+            self.conversation.begin_question(question)
+            query = question
+
         use_rag_fusion = self.rag_check.isChecked()
         use_synthesis = (
             self.synthesis_checkbox.isChecked()
@@ -305,7 +331,7 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 answer = build_answer(
                     self._store,
-                    question,
+                    query,
                     aircraft_type=self._current_aircraft_type(),
                     use_rag_fusion=use_rag_fusion,
                     use_synthesis=use_synthesis,
@@ -321,6 +347,10 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             if use_rag_fusion or use_synthesis:
                 QtWidgets.QApplication.restoreOverrideCursor()
+
+        if answer.clarification:
+            return self._show_clarification(answer)
+
         rows = answer_rows(answer, checks)
         self._rows = rows
         if answer.refusal or not rows:
@@ -346,7 +376,81 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chat_widget.append_message(
             "assistant", message_text, citations=citations, kind=message_kind,
         )
+        self.conversation.add_assistant(
+            message_text, citations=citations, kind=message_kind,
+        )
         return rows
+
+    def _show_clarification(self, answer: Answer) -> list[AnswerRow]:
+        """Render only options whose source fragments pass citation checks."""
+        assert self._store is not None
+        decision = answer.clarification or {}
+        options = decision.get("options", [])
+        verified_options: list[dict] = []
+        citations: list[dict[str, str | int]] = []
+        lines = [str(decision.get("reason", "Уточните, какой вариант имеется в виду."))]
+
+        for option in options:
+            valid_ids = []
+            source_refs = []
+            for fragment_id in option.get("fragment_ids", []):
+                if (type(fragment_id) is not int
+                        or not 0 <= fragment_id < len(answer.fragments)):
+                    continue
+                fragment = answer.fragments[fragment_id]
+                source_answer = Answer(
+                    question=answer.question,
+                    claims=[Claim(text=fragment.snippet, evidence=[0])],
+                    fragments=[fragment],
+                )
+                source_checks = verify_citations(source_answer, self._store)
+                if not source_checks or not all(check.ok for check in source_checks):
+                    continue
+                valid_ids.append(fragment_id)
+                source_refs.append(
+                    f"{fragment.document}, лист {fragment.page}"
+                )
+                citation = {
+                    "document": fragment.document,
+                    "page": fragment.page,
+                    "snippet": fragment.snippet,
+                }
+                if citation not in citations:
+                    citations.append(citation)
+
+            if not valid_ids:
+                continue
+            verified_option = dict(option)
+            verified_option["id"] = chr(ord("A") + len(verified_options))
+            verified_option["fragment_ids"] = valid_ids
+            verified_options.append(verified_option)
+            refs = "; ".join(dict.fromkeys(source_refs))
+            lines.append(
+                f"{verified_option['id']} — {option['label']} ({refs})"
+            )
+
+        if not verified_options:
+            message = "Нет подтверждённых вариантов уточнения в документах."
+            self._rows = []
+            self.conversation.add_assistant(message, kind="refusal")
+            self.chat_widget.append_message("assistant", message, kind="refusal")
+            return []
+
+        message = "\n".join(lines)
+        clarification_message = self.conversation.add_clarification(
+            message, citations=citations, options=verified_options,
+            fragments=answer.fragments,
+        )
+        self._rows = []
+        if clarification_message is None:
+            message = "Не удалось уточнить вопрос после двух попыток."
+            self.conversation.add_assistant(message, kind="refusal")
+            self.chat_widget.append_message("assistant", message, kind="refusal")
+            return []
+        self.chat_widget.append_message(
+            "assistant", message, citations=citations, kind="clarify",
+        )
+        return []
 
     def open_sheet(self, document: str, page: int) -> None:
         """Show one sheet: the source PDF first, the stored text as fallback.

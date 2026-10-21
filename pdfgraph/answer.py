@@ -41,6 +41,7 @@ class Answer:
     fragments: list[Fragment]
     refusal: bool = False
     reason: str = ""
+    clarification: dict | None = None
 
 
 class Answerer(Protocol):
@@ -105,10 +106,52 @@ def build_answer(
     logger.debug("question=%r mode=%s -> %d fragments, best_score=%.4f "
                  "(min_score=%.3f)", question, mode, len(fragments),
                  best_score, min_score)
-    if not fragments or best_score < min_score:
+    if not fragments:
         logger.debug("question=%r -> refusal (%s)", question,
-                     "нет фрагментов" if not fragments else
-                     f"best_score {best_score:.4f} < {min_score:.3f}")
+                     "нет фрагментов")
+        return Answer(
+            question=question,
+            claims=[],
+            fragments=fragments,
+            refusal=True,
+            reason="нет подтверждений в документах",
+        )
+
+    if synthesis_enabled:
+        from pdfgraph.rag_fusion import classify_answerability
+        classification = classify_answerability(
+            llm_settings, question, fragments,
+        )
+        decision = classification.get("decision")
+        if decision == "clarify":
+            return Answer(
+                question=question,
+                claims=[],
+                fragments=fragments,
+                reason=classification.get("reason", ""),
+                clarification=classification,
+            )
+        if decision == "refuse":
+            return Answer(
+                question=question,
+                claims=[],
+                fragments=fragments,
+                refusal=True,
+                reason=classification.get(
+                    "reason", "нет подтверждений в документах"),
+            )
+        if decision != "answer":
+            return Answer(
+                question=question,
+                claims=[],
+                fragments=fragments,
+                refusal=True,
+                reason="нет подтверждений в документах",
+            )
+
+    if best_score < min_score:
+        logger.debug("question=%r -> refusal (best_score %.4f < %.3f)",
+                     question, best_score, min_score)
         return Answer(
             question=question,
             claims=[],
@@ -119,7 +162,10 @@ def build_answer(
 
     if synthesis_enabled:
         from pdfgraph.rag_fusion import synthesize_answer
-        synthesis = synthesize_answer(store, question, fragments, llm_settings)
+        synthesis = synthesize_answer(
+            store, question, fragments, llm_settings,
+            answerability_checked=True,
+        )
         if synthesis.get("refusal"):
             return Answer(
                 question=question,
