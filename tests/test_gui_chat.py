@@ -66,3 +66,41 @@ def test_enter_submits_and_assistant_citations_are_shown():
     assert "лист 12" in chat.history_view.toPlainText()
 
     chat.close()
+
+
+def test_clicking_citation_emits_its_document_and_page():
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"
+    from PyQt5.QtCore import QPoint, Qt
+    from PyQt5.QtTest import QTest
+    from PyQt5.QtWidgets import QApplication
+
+    from pdfgraph.gui.chat_widget import ChatWidget
+
+    app = QApplication.instance() or QApplication([])
+    chat = ChatWidget()
+    chat.resize(600, 400)
+    chat.show()
+    chat.append_message(
+        "assistant", "Найдена выдержка",
+        citations=[{
+            "document": "РТЭ.pdf",
+            "page": 12,
+            "snippet": "023.21.00b",
+        }],
+    )
+    emitted = []
+    chat.citation_clicked.connect(
+        lambda document, page: emitted.append((document, page)))
+    app.processEvents()
+
+    cursor = chat.history_view.document().find("РТЭ.pdf, лист 12")
+    assert not cursor.isNull()
+    assert cursor.charFormat().property(Qt.UserRole) == ("РТЭ.pdf", 12)
+    cursor.setPosition(cursor.selectionStart())
+    rect = chat.history_view.cursorRect(cursor)
+    point = rect.center() + QPoint(5, 0)
+    assert chat.history_view.anchorAt(point)
+    QTest.mouseClick(chat.history_view.viewport(), Qt.LeftButton, pos=point)
+
+    assert emitted == [("РТЭ.pdf", 12)]
+    chat.close()

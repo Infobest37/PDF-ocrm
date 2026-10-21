@@ -91,7 +91,7 @@ QPushButton#ask {{ background: {PINE}; color: {PAPER}; border: none;
 QPushButton#ask:hover {{ background: {PINE_HOVER}; }}
 QPushButton#ask:pressed {{ background: {PINE_PRESSED}; }}
 QPushButton#ask:disabled {{ background: {RULE}; color: {GRAPHITE}; }}
-QTextEdit#chatHistory {{ background: {PAPER}; color: {INK};
+QTextBrowser#chatHistory {{ background: {PAPER}; color: {INK};
     border: 1px solid {INK}; padding: 8px; font-size: 15px; }}
 QLabel#section {{ color: {INK}; font-size: 13px; font-weight: 600;
     background: transparent; }}
@@ -248,6 +248,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.chat_widget.send_button.setObjectName("ask")
         self.chat_widget.send_button.setDefault(True)
         self.chat_widget.message_submitted.connect(self.ask)
+        self.chat_widget.citation_clicked.connect(self.open_sheet)
         layout.addSpacing(16)
         layout.addWidget(self.chat_widget, 1)
 
