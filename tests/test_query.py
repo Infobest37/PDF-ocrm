@@ -61,6 +61,53 @@ def test_free_text_is_ranked_and_unknown_gives_nothing(fx_store):
     assert search(fx_store, "совершенно отсутствующая тема") == []
 
 
+def test_techcard_queries_return_document_pair_and_number_search_results(
+        tmp_path):
+    from pdfgraph.store import Store
+    from pdfprepare.normalize import normalize_for_search
+
+    store = Store(str(tmp_path / "techcard-pair.db"))
+    pages = [
+        ("Регламент Ми-8.pdf", 1,
+         "Перечень техкарты 023.21.00b (вариант 023.21.00 b); № 814."),
+        ("РТЭ Ми-8.pdf", 2,
+         "Техкарта 023.21.00b (вариант 023.21.00 b); № 814."),
+        ("Указатель страниц.pdf", 3, "Указатель страницы № 814."),
+        ("РЭ двигателя.pdf", 4, "Двигатель ТВ3-117."),
+    ]
+    try:
+        for document, page, text in pages:
+            store.upsert_page(
+                document, page, "Ми-8МТВ", "023.00.00", "023.21.00",
+                text, normalize_for_search(text),
+            )
+
+        system_code_hits = search(store, "023.21.00")
+        assert system_code_hits
+        assert all(hit.kind == "code" for hit in system_code_hits)
+
+        for query in ("023.21.00b", "023.21.00 b"):
+            hits = search(store, query)
+            assert len(hits) == 2
+            assert "Регламент" in hits[0].document
+            assert "РТЭ" in hits[1].document
+            assert all(hit.kind == "techcard" for hit in hits)
+
+        number_hits = search(store, "№ 814")
+        assert [(hit.document, hit.page) for hit in number_hits[:2]] == [
+            ("Регламент Ми-8.pdf", 1),
+            ("РТЭ Ми-8.pdf", 2),
+        ]
+        assert any(hit.document == "Указатель страниц.pdf"
+                   for hit in number_hits[2:])
+
+        ordinary_hits = search(store, "двигатель ТВ3-117")
+        assert ordinary_hits and all(
+            hit.kind == "text" for hit in ordinary_hits)
+    finally:
+        store.close()
+
+
 def test_snippet_is_verbatim_slice_of_original_page_text(fx_store):
     # Инвариант задачи 2.5: цитата обязана быть точным фрагментом оригинала.
     for query in ("023.11.30", "028.10.00", "8МТ.6101.100",

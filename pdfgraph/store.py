@@ -321,6 +321,7 @@ class Store:
         match_expr: str,
         aircraft_type: str | None = None,
         limit: int | None = None,
+        document_terms: tuple[str, ...] | None = None,
     ) -> list[tuple[str, int, str, str, float]]:
         """FTS5 search over the stored (already normalized) page bodies.
 
@@ -343,6 +344,11 @@ class Store:
         if aircraft_type is not None:
             sql += " AND pg.aircraft_type = ?"
             args.append(aircraft_type)
+        if document_terms:
+            sql += " AND (" + " OR ".join(
+                "pg.document LIKE ?" for _ in document_terms
+            ) + ")"
+            args.extend(f"%{term}%" for term in document_terms)
         sql += " ORDER BY rank"
         if limit is not None:
             sql += " LIMIT ?"
@@ -354,6 +360,7 @@ class Store:
         self,
         pattern: str,
         aircraft_type: str | None = None,
+        document_terms: tuple[str, ...] | None = None,
     ) -> list[tuple[str, int, str, str]]:
         """Search the trigram-indexed normalized text with a LIKE pattern."""
         sql = (
@@ -367,6 +374,11 @@ class Store:
         if aircraft_type is not None:
             sql += " AND pg.aircraft_type = ?"
             args.append(aircraft_type)
+        if document_terms:
+            sql += " AND (" + " OR ".join(
+                "pg.document LIKE ?" for _ in document_terms
+            ) + ")"
+            args.extend(f"%{term}%" for term in document_terms)
         sql += " ORDER BY pg.document, pg.page"
         return self._connection.execute(sql, args).fetchall()
 

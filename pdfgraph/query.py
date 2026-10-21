@@ -29,7 +29,8 @@ back onto original-text offsets before the window is taken.
 """
 
 import logging
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 
 from pdfprepare.codes import normalize_code
 from pdfprepare.normalize import normalize_for_search, normalize_part_number
@@ -45,6 +46,18 @@ OR_PENALTY = 0.8
 PREFIX_PENALTY = 0.6
 #: Score multiplier for the trigram-index fallback.
 TRIGRAM_PENALTY = 0.5
+_TECHCARD_QUERY_RE = re.compile(
+    r"^(?:\d{2,3}\.\d{2}\.\d{2}\s*[a-zа-я]?|№?\s*\d{2,4})$",
+    re.IGNORECASE,
+)
+_TECHCARD_CODE_WITH_SUFFIX_RE = re.compile(
+    r"^\d{2,3}\.\d{2}\.\d{2}\s*[a-zа-я]$", re.IGNORECASE,
+)
+_TECHCARD_NUMBER_RE = re.compile(r"^№?\s*\d{2,4}$")
+_REGULATION_DOCUMENT_TERMS = ("Регламент", "РЕГЛАМЕНТ", "регламент")
+_TECHNICAL_MANUAL_DOCUMENT_TERMS = (
+    "РТЭ", "ртэ", "Руководство", "РУКОВОДСТВО", "руководство",
+)
 
 #: Stage-2 diagnostics: question → branch → SQL → count is logged at DEBUG
 #: (visible with ``pdfgraph ask --debug``).
@@ -188,6 +201,51 @@ def search(
     if not stripped:
         return []
 
+    if _TECHCARD_QUERY_RE.fullmatch(stripped):
+        number_query = _TECHCARD_NUMBER_RE.fullmatch(stripped) is not None
+        suffixed_code = (
+            _TECHCARD_CODE_WITH_SUFFIX_RE.fullmatch(stripped) is not None
+        )
+        # Preserve the established exact-code route when an unsuffixed ATA
+        # code already resolves to system-code sheets.
+        if not number_query and not suffixed_code:
+            ordinary = _search_ordinary(store, stripped, aircraft_type, limit)
+            if ordinary:
+                return ordinary
+
+        needle = normalize_for_search(stripped)
+        regulation = _by_fts(
+            store, needle, aircraft_type, limit=1,
+            document_terms=_REGULATION_DOCUMENT_TERMS,
+        )
+        technical_manual = _by_fts(
+            store, needle, aircraft_type, limit=1,
+            document_terms=_TECHNICAL_MANUAL_DOCUMENT_TERMS,
+        )
+        techcards = [
+            replace(fragment, kind="techcard")
+            for fragment in regulation[:1] + technical_manual[:1]
+        ]
+
+        # A bare sheet number is ambiguous: keep ordinary matches too.
+        if number_query:
+            seen = {(fragment.document, fragment.page)
+                    for fragment in techcards}
+            for fragment in _search_ordinary(
+                    store, stripped, aircraft_type, limit):
+                key = (fragment.document, fragment.page)
+                if key not in seen:
+                    seen.add(key)
+                    techcards.append(fragment)
+        elif not techcards:
+            return _search_ordinary(store, stripped, aircraft_type, limit)
+        return techcards
+
+    return _search_ordinary(store, stripped, aircraft_type, limit)
+
+
+def _search_ordinary(store: Store, stripped: str,
+                     aircraft_type: str | None, limit: int) -> list[Fragment]:
     code = normalize_code(stripped)
     if code:
         logger.debug("branch=code %r (question=%r)", code, stripped)
@@ -228,27 +286,38 @@ def _by_part(store: Store, part_key: str,
 
 
 def _by_fts(store: Store, needle: str, aircraft_type: str | None,
-            limit: int) -> list[Fragment]:
+            limit: int,
+            document_terms: tuple[str, ...] | None = None
+            ) -> list[Fragment]:
     if limit <= 0:
         return []
     tokens = needle.split()
-    rows = store.search_pages(_fts_expr(tokens, " AND "), aircraft_type, limit)
+    rows = store.search_pages(
+        _fts_expr(tokens, " AND "), aircraft_type, limit,
+        document_terms=document_terms,
+    )
     penalty = 1.0
     if not rows:
         # Tolerant retry (fix round 3): a conversational query ("рисунок 12")
         # must still find documents phrased differently ("Рис. 12").
-        rows = store.search_pages(_fts_expr(tokens, " OR "), aircraft_type, limit)
+        rows = store.search_pages(
+            _fts_expr(tokens, " OR "), aircraft_type, limit,
+            document_terms=document_terms,
+        )
         penalty = OR_PENALTY
     if not rows:
         rows = store.search_pages(
-            _fts_prefix_expr(tokens, " AND "), aircraft_type, limit
+            _fts_prefix_expr(tokens, " AND "), aircraft_type, limit,
+            document_terms=document_terms,
         )
         penalty = PREFIX_PENALTY
     if not rows:
         trigram_hits: dict[tuple[str, int], tuple[str, int, str, str]] = {}
         for token in tokens:
             for pattern in _trigram_patterns(token):
-                for row in store.search_trigrams(pattern, aircraft_type):
+                for row in store.search_trigrams(
+                        pattern, aircraft_type,
+                        document_terms=document_terms):
                     trigram_hits.setdefault((row[0], row[1]), row)
                     if len(trigram_hits) >= limit:
                         break
