@@ -8,9 +8,21 @@ def test_window_answers_and_shows_verified(fx_store_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     from pdfgraph.gui.app import MainWindow
     w = MainWindow(fx_store_path, "Коды систем Вертолета.txt")
-    rows = w.ask("радиомаяк ПАРМ-406А")
-    assert rows and rows[0].verified is True
-    assert "Подтверждено" in w.verdict_label.text()
+    w.chat_widget.question_input.setText("радиомаяк ПАРМ-406А")
+    w.chat_widget.send_button.click()
+    first_message = w.chat_widget.message_history[0]
+    w.chat_widget.question_input.setText("радиомаяк")
+    w.chat_widget.send_button.click()
+
+    assert len(w.chat_widget.message_history) == 4
+    assert first_message == ("user", "радиомаяк ПАРМ-406А")
+    assert w.chat_widget.message_history[0] == first_message
+    assert [message[0] for message in w.chat_widget.message_history] == [
+        "user", "assistant", "user", "assistant",
+    ]
+    transcript = w.chat_widget.history_view.toPlainText()
+    assert "Подтверждено" in transcript
+    assert "РТЭ кн.1.pdf" in transcript
     w.close()
 
 
@@ -24,7 +36,7 @@ def test_missing_store_is_calm_and_never_created(tmp_path):
     w = MainWindow(missing, "Коды систем Вертолета.txt")
     rows = w.ask("что угодно")
     assert rows == []
-    assert "Хранилище не найдено" in w.verdict_label.text()
+    assert "Хранилище не найдено" in w.chat_widget.history_view.toPlainText()
     assert not os.path.exists(missing)
     w.close()
 
@@ -71,6 +83,8 @@ def test_main_shows_window_and_exits_zero(fx_store_path, monkeypatch):
     assert window.windowTitle() == "Граф знаний Ми-8МТВ"
     rows = window.ask("радиомаяк ПАРМ-406А")
     assert rows and rows[0].verified is True
+    assert window.chat_widget.message_history[-1][0] == "assistant"
+    assert "Подтверждено" in window.chat_widget.history_view.toPlainText()
     window.close()
 
 
@@ -85,7 +99,7 @@ def test_main_with_corrupt_store_stays_calm(tmp_path, monkeypatch):
     window = windows[0]
     rows = window.ask("что угодно")
     assert rows == []
-    assert "Хранилище не найдено" in window.verdict_label.text()
+    assert "Хранилище не найдено" in window.chat_widget.history_view.toPlainText()
     window.close()
 
 
@@ -139,12 +153,12 @@ def test_ask_survives_query_level_corruption(tmp_path):
     window = MainWindow(path, "Коды систем Вертолета.txt")
     rows = window.ask("радиомаяк ПАРМ-406А")
     assert rows == []
-    assert "Хранилище повреждено" in window.verdict_label.text()
-    assert window.table.rowCount() == 0
+    assert "Хранилище повреждено" in window.chat_widget.history_view.toPlainText()
     # The broken connection is dropped; the same question (which reads the
     # damaged page) stays calm on a repeat ask, too.
     assert window.ask("радиомаяк ПАРМ-406А") == []
-    assert "Хранилище повреждено" in window.verdict_label.text()
+    assert window.chat_widget.history_view.toPlainText().count(
+        "Хранилище повреждено") == 2
     window.close()
 
 

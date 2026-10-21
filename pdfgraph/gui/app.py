@@ -21,6 +21,7 @@ import sys
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from pdfgraph.answer import build_answer
+from pdfgraph.gui.chat_widget import ChatWidget
 from pdfgraph.gui.pdf_opener import open_pdf_at_page, resolve_pdf_dir
 from pdfgraph.gui.settings import (LLMSettings, load as load_llm_settings,
                                    save as save_llm_settings)
@@ -40,10 +41,7 @@ PINE_PRESSED = "#144132"
 GRAPHITE = "#575e63"
 RULE = "#c9c6bc"
 SELECTION = "#dde8e1"
-REFUSAL_PLATE = "#454c52"
 
-#: Column titles pinned by the design brief — keep verbatim.
-COLUMNS = ("Ответ", "Документ", "Лист", "Код", "Проверено")
 AIRCRAFT_CHOICES = [
     ("Все", None),
     ("Ми-8МТВ", "Ми-8МТВ"),
@@ -51,8 +49,6 @@ AIRCRAFT_CHOICES = [
     ("Ми-8Т", "Ми-8Т"),
 ]
 
-_AWAITING_TEXT = "Пока вопрос не задан — показываем только ответы, подтверждённые на листах"
-_SNIPPET_HINT = "Фрагмент подтверждённого ответа появится здесь"
 #: Missing graph file is not a refusal: name the problem and its recovery,
 #: calmly (no plate, no red) — SQLite would otherwise create an empty base.
 _MISSING_STORE_TEXT = ("Хранилище не найдено: файл графа отсутствует — "
@@ -62,35 +58,6 @@ _MISSING_STORE_TEXT = ("Хранилище не найдено: файл гра�
 #: round 1 of the task 3.3 review).
 _CORRUPT_STORE_TEXT = ("Хранилище повреждено: файл графа не читается — "
                        "пересоздайте граф (pdfgraph build)")
-
-
-class _VerifiedDelegate(QtWidgets.QStyledItemDelegate):
-    """Paint the «Проверено» cell as a stamp mark: filled or hollow square."""
-
-    _SIZE = 14
-
-    def paint(self, painter: QtGui.QPainter, option, index) -> None:  # type: ignore[no-untyped-def]
-        state = index.data(QtCore.Qt.UserRole)
-        if state is None:
-            super().paint(painter, option, index)
-            return
-        painter.save()
-        rect = option.rect
-        side = self._SIZE
-        box = QtCore.QRect(
-            rect.center().x() - side // 2,
-            rect.center().y() - side // 2,
-            side,
-            side,
-        )
-        if state is True:
-            painter.fillRect(box, QtGui.QColor(PINE))
-        else:
-            pen = QtGui.QPen(QtGui.QColor(GRAPHITE))
-            pen.setWidth(1)
-            painter.setPen(pen)
-            painter.drawRect(box.adjusted(0, 0, -1, -1))
-        painter.restore()
 
 
 _WINDOW_QSS = f"""
@@ -123,25 +90,10 @@ QPushButton#ask {{ background: {PINE}; color: {PAPER}; border: none;
 QPushButton#ask:hover {{ background: {PINE_HOVER}; }}
 QPushButton#ask:pressed {{ background: {PINE_PRESSED}; }}
 QPushButton#ask:disabled {{ background: {RULE}; color: {GRAPHITE}; }}
-QTableView#answers {{ background: {PAPER}; color: {INK};
-    gridline-color: {RULE}; border: 1px solid {INK}; font-size: 15px;
-    selection-background-color: {SELECTION}; selection-color: {INK}; }}
-QTableView#answers::item {{ padding: 6px 8px; }}
-QHeaderView::section {{ background: {PAPER}; color: {INK};
-    border: none; border-bottom: 1px solid {INK};
-    padding: 7px 8px; font-size: 13px; font-weight: 600; }}
+QTextEdit#chatHistory {{ background: {PAPER}; color: {INK};
+    border: 1px solid {INK}; padding: 8px; font-size: 15px; }}
 QLabel#section {{ color: {INK}; font-size: 13px; font-weight: 600;
     background: transparent; }}
-QWidget#confirm {{ background: {PAPER}; border: 1px solid {INK}; }}
-QLabel#snippet {{ color: {INK}; font-size: 15px; background: transparent; }}
-QLabel#snippet[hint="yes"] {{ color: {GRAPHITE}; }}
-QLabel#verdict {{ font-size: 17px; font-weight: 600; padding: 12px 14px; }}
-QLabel#verdict[plate="ink"] {{ background: {INK}; color: {PAPER};
-    border: none; }}
-QLabel#verdict[plate="refusal"] {{ background: {REFUSAL_PLATE};
-    color: {PAPER}; border: none; }}
-QLabel#verdict[plate="none"] {{ background: transparent;
-    color: {GRAPHITE}; border: none; }}
 QDialog {{ background: {DESK}; }}
 QWidget#sheetCard {{ background: {PAPER}; border: 1px solid {INK}; }}
 QPlainTextEdit#sheetText {{ background: {PAPER}; color: {INK};
@@ -156,7 +108,7 @@ QPushButton#settings:hover {{ background: {SELECTION}; }}
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    """One-window answer screen: question, verified table, confirmation, verdict."""
+    """One-window chat for answers with machine-verified citations."""
 
     def __init__(self, store_path: str, registry_path: str,
                  missing_hint: str = "",
@@ -224,12 +176,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._store = None
 
     def _show_store_note(self, text: str) -> None:
-        """Calm store-problem verdict: no rows, empty panel, neutral plate."""
+        """Append a calm assistant refusal when the graph is unavailable."""
         self._rows = []
-        self._fill_table([])
-        self._set_snippet("")
-        self._set_verdict_plate("none")
-        self.verdict_label.setText(text)
+        self.chat_widget.append_message("assistant", text, kind="refusal")
 
     # -- widgets ------------------------------------------------------------
 
@@ -290,70 +239,17 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addLayout(aircraft_row)
         layout.addSpacing(8)
 
-        row = QtWidgets.QHBoxLayout()
-        row.setSpacing(10)
-        self.question_edit = QtWidgets.QLineEdit(objectName="question")
-        self.question_edit.setPlaceholderText("Вопрос по техдокументации, например: радиомаяк ПАРМ-406А")
-        self.question_edit.returnPressed.connect(self._ask_clicked)
-        self.ask_button = QtWidgets.QPushButton("Спросить", objectName="ask")
-        self.ask_button.setDefault(True)
-        self.ask_button.clicked.connect(self._ask_clicked)
-        row.addWidget(self.question_edit, 1)
-        row.addWidget(self.ask_button)
-        layout.addLayout(row)
-
-        # Zone 2: answers table.
+        # Replace the one-shot question, results table and snippet panel with
+        # the conversation. Citations are rendered inside assistant messages.
+        self.chat_widget = ChatWidget(card)
+        self.chat_widget.question_input.setObjectName("question")
+        self.chat_widget.send_button.setObjectName("ask")
+        self.chat_widget.send_button.setDefault(True)
+        self.chat_widget.message_submitted.connect(self.ask)
         layout.addSpacing(16)
-        self.table = QtWidgets.QTableWidget(0, len(COLUMNS), objectName="answers")
-        self.table.setHorizontalHeaderLabels(COLUMNS)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
-        self.table.setWordWrap(True)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
-        for column, width in ((1, 180), (2, 70), (3, 110), (4, 110)):
-            header.setSectionResizeMode(column, QtWidgets.QHeaderView.Fixed)
-            self.table.setColumnWidth(column, width)
-        self.table.setItemDelegateForColumn(4, _VerifiedDelegate(self.table))
-        # Selection colors are pinned in code as well as QSS: the sandbox
-        # palette can carry a broken HighlightedText, and the design keeps
-        # ink text on the pale pine tint.
-        selection = QtGui.QPalette()
-        selection.setColor(QtGui.QPalette.Highlight, QtGui.QColor(SELECTION))
-        selection.setColor(QtGui.QPalette.HighlightedText, QtGui.QColor(INK))
-        self.table.setPalette(selection)
-        self.table.itemSelectionChanged.connect(self._show_selected_snippet)
-        self.table.cellDoubleClicked.connect(self._on_double_click)
-        layout.addWidget(self.table, 1)
-
-        # Zone 3: «Подтверждение» panel with the fragment text.
-        layout.addSpacing(16)
-        confirm_label = QtWidgets.QLabel("Подтверждение", objectName="section")
-        layout.addWidget(confirm_label)
-        layout.addSpacing(6)
-        panel = QtWidgets.QWidget(objectName="confirm")
-        panel_layout = QtWidgets.QVBoxLayout(panel)
-        panel_layout.setContentsMargins(12, 10, 12, 10)
-        self.snippet_label = QtWidgets.QLabel(_SNIPPET_HINT, objectName="snippet")
-        self.snippet_label.setProperty("hint", "yes")
-        self.snippet_label.setWordWrap(True)
-        self.snippet_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        panel_layout.addWidget(self.snippet_label)
-        layout.addWidget(panel)
-
-        # Zone 4: verdict plate.
-        layout.addSpacing(14)
-        self.verdict_label = QtWidgets.QLabel(_AWAITING_TEXT, objectName="verdict")
-        self.verdict_label.setWordWrap(True)
-        self._set_verdict_plate("none")
-        layout.addWidget(self.verdict_label)
+        layout.addWidget(self.chat_widget, 1)
 
     # -- actions ------------------------------------------------------------
-
-    def _ask_clicked(self) -> None:
-        self.ask(self.question_edit.text())
 
     def _current_aircraft_type(self) -> str | None:
         """Aircraft type selected in the filter; «Все» maps to ``None``."""
@@ -385,7 +281,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._settings_dialog = None
 
     def ask(self, question: str) -> list[AnswerRow]:
-        """Answer ``question``, fill the table/panel/verdict, return display rows.
+        """Answer ``question``, append the chat reply, and return display rows.
 
         Citations are machine-checked before anything is shown; the row list
         is returned for tests and callers, UI updates happen as a side effect.
@@ -426,22 +322,30 @@ class MainWindow(QtWidgets.QMainWindow):
             if use_rag_fusion or use_synthesis:
                 QtWidgets.QApplication.restoreOverrideCursor()
         rows = answer_rows(answer, checks)
-
         self._rows = rows
-        self._fill_table(rows)
-        if rows:
-            self.table.selectRow(0)
-            self._set_verdict_plate("ink")
+        if answer.refusal or not rows:
+            message_text = answer.reason or verdict_text(rows)
+            message_kind = "refusal"
+            citations = []
         else:
-            # Отказ: панель подтверждения пуста — тихо, не подсказка и не ошибка.
-            self._set_snippet("")
-            self._set_verdict_plate("refusal")
-        refusal_text = (
-            answer.reason
-            if answer.refusal and answer.reason.startswith("LLM недоступен:")
-            else verdict_text(rows)
+            answer_text = "\n\n".join(row.text for row in rows if row.text)
+            message_text = "\n\n".join(
+                part for part in (answer_text, verdict_text(rows)) if part
+            )
+            message_kind = "answer"
+            citations = [
+                {
+                    "document": row.document,
+                    "page": row.page,
+                    "snippet": row.snippet,
+                }
+                for row in rows
+                if row.verified and row.document and row.page >= 0
+            ]
+
+        self.chat_widget.append_message(
+            "assistant", message_text, citations=citations, kind=message_kind,
         )
-        self.verdict_label.setText(refusal_text)
         return rows
 
     def open_sheet(self, document: str, page: int) -> None:
@@ -507,59 +411,10 @@ class MainWindow(QtWidgets.QMainWindow):
             return f"Лист {page} документа «{document}» не найден в графе — возможно, он ещё не обработан."
         return "Лист пустой — граница раздела или техкарты; это не дефект скана."
 
-    # -- rendering helpers ----------------------------------------------------
-
-    def _fill_table(self, rows: list[AnswerRow]) -> None:
-        self.table.setRowCount(len(rows))
-        for r, row in enumerate(rows):
-            text_item = QtWidgets.QTableWidgetItem(row.text)
-            text_item.setTextAlignment(
-                QtCore.Qt.AlignTop | QtCore.Qt.AlignLeft | QtCore.Qt.TextWordWrap)
-            doc_item = QtWidgets.QTableWidgetItem(row.document or "—")
-            page_item = QtWidgets.QTableWidgetItem(str(row.page) if row.page >= 0 else "—")
-            page_item.setTextAlignment(QtCore.Qt.AlignTop | QtCore.Qt.AlignRight)
-            code_item = QtWidgets.QTableWidgetItem(row.code or "—")
-            mark_item = QtWidgets.QTableWidgetItem()
-            mark_item.setData(QtCore.Qt.UserRole, bool(row.verified))
-            mark_item.setToolTip("подтверждено на листе" if row.verified else "не подтверждено на листе")
-            for item in (text_item, doc_item, page_item, code_item, mark_item):
-                item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
-            for c, item in enumerate((text_item, doc_item, page_item, code_item, mark_item)):
-                self.table.setItem(r, c, item)
-        self.table.resizeRowsToContents()
-
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        # Wrapped claim text is measured against the current column width, so
-        # row heights are recomputed whenever the window changes size.
-        if hasattr(self, "table"):
-            self.table.resizeRowsToContents()
-
-    def _show_selected_snippet(self) -> None:
-        row = self._current_row()
-        self._set_snippet(row.snippet if row is not None else "")
-
-    def _set_snippet(self, text: str, hint: bool = False) -> None:
-        self.snippet_label.setProperty("hint", "yes" if hint else "no")
-        self.snippet_label.style().polish(self.snippet_label)
-        self.snippet_label.setText(text)
-
-    def _current_row(self) -> AnswerRow | None:
-        indexes = self.table.selectionModel().selectedRows()
-        if not indexes:
-            return None
-        number = indexes[0].row()
-        return self._rows[number] if 0 <= number < len(self._rows) else None
-
     def _on_double_click(self, row: int, _column: int) -> None:
         if 0 <= row < len(self._rows):
             source = self._rows[row]
             self.open_sheet(source.document, source.page)
-
-    def _set_verdict_plate(self, kind: str) -> None:
-        self.verdict_label.setProperty("plate", kind)
-        self.verdict_label.style().unpolish(self.verdict_label)
-        self.verdict_label.style().polish(self.verdict_label)
 
 
 def main(argv=None) -> int:
