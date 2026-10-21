@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import urllib.request
 from unittest.mock import Mock
@@ -108,7 +109,8 @@ def test_call_llm_raises_runtime_error_without_leaking_key(monkeypatch):
     assert settings.api_key not in str(exc.value)
 
 
-def test_synthesize_answer_sends_full_text_only_for_top_three(monkeypatch):
+def test_synthesize_answer_sends_full_text_only_for_top_three(
+        monkeypatch, caplog):
     from pdfgraph.rag_fusion import synthesize_answer
 
     class RecordingStore:
@@ -134,17 +136,33 @@ def test_synthesize_answer_sends_full_text_only_for_top_three(monkeypatch):
         ],
     }
 
+    responses = iter([
+        json.dumps({
+            "has_answer": True,
+            "reason": "Фрагменты содержат ответ",
+        }, ensure_ascii=False),
+        json.dumps(response, ensure_ascii=False),
+    ])
+
     def fake_call(_settings, messages):
         messages_seen.extend(messages)
-        return json.dumps(response, ensure_ascii=False)
+        return next(responses)
 
     monkeypatch.setattr("pdfgraph.rag_fusion._call_llm", fake_call)
-    result = synthesize_answer(store, "минимальное давление масла", fragments,
-                               _settings())
+    with caplog.at_level(logging.DEBUG, logger="pdfgraph.rag_fusion"):
+        result = synthesize_answer(
+            store, "минимальное давление масла", fragments, _settings(),
+        )
 
     assert store.calls == [("doc-0.pdf", 0), ("doc-1.pdf", 1),
                            ("doc-2.pdf", 2)]
     prompt = "\n".join(message["content"] for message in messages_seen)
+    assert "дай только подтверждённую часть и обозначь ограничение" in prompt
+    assert "answerability judge" in caplog.text
+    assert "has_answer=True" in caplog.text
+    assert "answer synthesis response" in caplog.text
+    assert json.dumps(response, ensure_ascii=False) in caplog.text
+    assert "SNIPPET-0" in caplog.text
     assert "PAGE-0:" + "X" * (1500 - len("PAGE-0:")) in prompt
     assert "PAGE-0:" + "X" * (1501 - len("PAGE-0:")) not in prompt
     for i in range(3, 10):
@@ -163,11 +181,15 @@ def test_synthesize_answer_parses_marked_citation_list(monkeypatch):
     store.page_text.return_value = FX_TEXT_47
     monkeypatch.setattr(
         "pdfgraph.rag_fusion._call_llm",
-        lambda *_args: (
+        Mock(side_effect=[
+            json.dumps({
+                "has_answer": True,
+                "reason": "Фрагмент содержит ответ",
+            }, ensure_ascii=False),
             "Ответ: X кгс/см²\n"
             f"Цитаты:\n- document: {FX_DOCUMENT}; page: 47; "
-            f"snippet: {FX_TEXT_47}"
-        ),
+            f"snippet: {FX_TEXT_47}",
+        ]),
     )
 
     result = synthesize_answer(store, "давление", [fragment], _settings())
@@ -197,6 +219,92 @@ def test_synthesize_answer_refuses_when_model_has_no_evidence(
     assert result["reason"]
 
 
+def test_synthesize_answer_runs_judge_for_low_score_fragments(monkeypatch):
+    from pdfgraph.rag_fusion import synthesize_answer
+
+    llm = Mock(side_effect=[
+        json.dumps({
+            "has_answer": True,
+            "reason": "Фрагмент содержит частичный ответ",
+        }, ensure_ascii=False),
+        json.dumps({"answer": "ответ", "citations": []}, ensure_ascii=False),
+    ])
+    store = Mock()
+    store.page_text.return_value = "page text"
+    monkeypatch.setattr("pdfgraph.rag_fusion._call_llm", llm)
+    fragment = _fragment(
+        "manual.pdf", 1, "unrelated fragment",
+        score=0.29,
+    )
+
+    result = synthesize_answer(
+        store, "расход топлива Боинг-747", [fragment], _settings(),
+    )
+
+    assert result["refusal"] is False
+    assert result["answer"] == "ответ"
+    assert llm.call_count == 2
+    store.page_text.assert_called_once_with("manual.pdf", 1)
+
+
+def test_synthesize_answer_refuses_when_judge_says_no(monkeypatch, caplog):
+    from pdfgraph.rag_fusion import synthesize_answer
+
+    llm = Mock(return_value=json.dumps({
+        "has_answer": False,
+        "reason": "Не уверен: прямого ответа нет",
+    }, ensure_ascii=False))
+    store = Mock()
+    store.page_text.return_value = "page text"
+    fragments = [
+        _fragment(f"doc-{i}.pdf", i, "X" * 1200, score=0.8)
+        for i in range(12)
+    ]
+    monkeypatch.setattr("pdfgraph.rag_fusion._call_llm", llm)
+
+    with caplog.at_level(logging.DEBUG, logger="pdfgraph.rag_fusion"):
+        result = synthesize_answer(
+            store, "расход топлива Боинг-747", fragments, _settings(),
+        )
+
+    assert result == {
+        "answer": "", "citations": [], "refusal": True,
+        "reason": "нет подтверждений в документах",
+    }
+    assert "has_answer=False" in caplog.text
+    assert "Не уверен: прямого ответа нет" in caplog.text
+    assert "X" * 200 in caplog.text
+    llm.assert_called_once()
+    store.page_text.assert_not_called()
+    judge_messages = llm.call_args.args[1]
+    assert "Есть ли в этих фрагментах ответ на вопрос?" in (
+        judge_messages[1]["content"])
+    assert "очевидные опечатки в вопросе" in judge_messages[0]["content"]
+    judge_contexts = json.loads(
+        judge_messages[1]["content"].split("Фрагменты:\n", 1)[1])
+    assert len(judge_contexts) == 10
+    assert all(len(context["text"]) == 1000 for context in judge_contexts)
+
+
+def test_synthesize_answer_refuses_when_judge_call_fails(monkeypatch):
+    from pdfgraph.rag_fusion import synthesize_answer
+
+    llm = Mock(side_effect=RuntimeError("service unavailable"))
+    store = Mock()
+    store.page_text.return_value = "page text"
+    monkeypatch.setattr("pdfgraph.rag_fusion._call_llm", llm)
+
+    result = synthesize_answer(
+        store, "вопрос", [_fragment("a.pdf", 1, "snippet", score=0.8)],
+        _settings(),
+    )
+
+    assert result["refusal"] is True
+    assert result["reason"] == "нет подтверждений в документах"
+    llm.assert_called_once()
+    store.page_text.assert_not_called()
+
+
 def test_synthesize_answer_provider_error_returns_refusal(monkeypatch):
     from pdfgraph.rag_fusion import synthesize_answer
 
@@ -204,10 +312,13 @@ def test_synthesize_answer_provider_error_returns_refusal(monkeypatch):
         def page_text(self, document, page):
             return "page text for testing"
 
-    def fail(*_args):
-        raise RuntimeError("service unavailable")
-
-    monkeypatch.setattr("pdfgraph.rag_fusion._call_llm", fail)
+    monkeypatch.setattr("pdfgraph.rag_fusion._call_llm", Mock(side_effect=[
+        json.dumps({
+            "has_answer": True,
+            "reason": "Фрагмент содержит ответ",
+        }, ensure_ascii=False),
+        RuntimeError("service unavailable"),
+    ]))
     result = synthesize_answer(TextStore(), "вопрос",
                                [_fragment("a.pdf", 1, "x")],
                                _settings())
@@ -225,11 +336,14 @@ def test_synthesize_answer_403_returns_refusal_with_provider_diagnostic(
         def page_text(self, _document, _page):
             return "page text"
 
-    def forbidden(*_args):
-        raise RuntimeError(
-            "LLM API ошибка 403: модель не разрешена для этого API-ключа")
-
-    monkeypatch.setattr("pdfgraph.rag_fusion._call_llm", forbidden)
+    monkeypatch.setattr("pdfgraph.rag_fusion._call_llm", Mock(side_effect=[
+        json.dumps({
+            "has_answer": True,
+            "reason": "Фрагмент содержит ответ",
+        }, ensure_ascii=False),
+        RuntimeError(
+            "LLM API ошибка 403: модель не разрешена для этого API-ключа"),
+    ]))
     result = synthesize_answer(TextStore(), "вопрос",
                                [_fragment("a.pdf", 1, "quote")], _settings())
 
@@ -247,11 +361,13 @@ def test_synthesize_answer_repeated_429_returns_rate_limit_refusal(monkeypatch):
         def page_text(self, _document, _page):
             return "page text"
 
-    monkeypatch.setattr(
-        "pdfgraph.rag_fusion._call_llm",
-        lambda *_args: (_ for _ in ()).throw(
-            RuntimeError("429: Rate limit. Подождите и повторите.")),
-    )
+    monkeypatch.setattr("pdfgraph.rag_fusion._call_llm", Mock(side_effect=[
+        json.dumps({
+            "has_answer": True,
+            "reason": "Фрагмент содержит ответ",
+        }, ensure_ascii=False),
+        RuntimeError("429: Rate limit. Подождите и повторите."),
+    ]))
     result = synthesize_answer(TextStore(), "вопрос",
                                [_fragment("a.pdf", 1, "quote")], _settings())
 

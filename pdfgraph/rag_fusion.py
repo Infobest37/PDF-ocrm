@@ -284,8 +284,19 @@ _SYNTHESIS_SYSTEM_PROMPT = (
     "Верни только JSON вида {\"answer\": str, \"citations\": "
     "[{\"document\": str, \"page\": int, \"snippet\": str}]}. "
     "В snippet копируй дословную выдержку из соответствующего фрагмента. "
-    "Если подтверждения нет, answer должен быть «нет подтверждений», "
-    "а citations — пустым списком."
+    "Если фрагменты частично отвечают на вопрос, дай только подтверждённую "
+    "часть и обозначь ограничение. Если ответа нет и фрагменты совсем не "
+    "по теме, answer должен быть «нет подтверждений», а citations — пустым "
+    "списком."
+)
+
+_ANSWERABILITY_SYSTEM_PROMPT = (
+    "Ты проверяешь, есть ли в переданных фрагментах ответ на вопрос. "
+    "Если фрагменты содержат частичный ответ (упоминание темы, синоним "
+    "или OCR-вариант) — true. Если фрагменты совсем не по теме — false. "
+    "Учитывай очевидные опечатки в вопросе, включая перестановку соседних "
+    "букв и близкие OCR-варианты терминов. "
+    "Если не уверен — false. Верни только JSON с полями has_answer и reason."
 )
 
 
@@ -361,6 +372,59 @@ def _parse_synthesis_response(content: str) -> dict:
             "reason": ""}
 
 
+def _check_answerability(settings: LLMSettings, question: str,
+                         fragments: list[Fragment]) -> bool:
+    """Check whether the top fragments contain an answer; fail closed."""
+    snippets = [
+        {
+            "document": fragment.document,
+            "page": fragment.page,
+            "snippet": fragment.snippet[:200],
+        }
+        for fragment in fragments[:3]
+    ]
+    logger.debug("answerability snippets question=%r fragments=%s", question,
+                 json.dumps(snippets, ensure_ascii=False))
+    response_text = ""
+    try:
+        contexts = [
+            {
+                "document": fragment.document,
+                "page": fragment.page,
+                "text": fragment.snippet[:1000],
+            }
+            for fragment in fragments[:10]
+        ]
+        messages = [
+            {"role": "system", "content": _ANSWERABILITY_SYSTEM_PROMPT},
+            {"role": "user", "content": (
+                "Есть ли в этих фрагментах ответ на вопрос? Верни JSON "
+                "{\"has_answer\": true/false, \"reason\": \"...\"}. "
+                "Если не уверен — false.\n"
+                f"Вопрос: {question}\nФрагменты:\n"
+                + json.dumps(contexts, ensure_ascii=False, indent=2)
+            )},
+        ]
+        response_text = _call_llm(settings, messages).strip()
+        if response_text.startswith("```"):
+            response_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", response_text,
+                          flags=re.IGNORECASE).strip()
+        parsed = json.loads(response_text)
+        if (not isinstance(parsed, dict)
+                or not isinstance(parsed.get("has_answer"), bool)
+                or not isinstance(parsed.get("reason"), str)):
+            logger.debug("answerability judge invalid response question=%r "
+                         "response=%r", question, response_text)
+            return False
+        logger.debug("answerability judge question=%r has_answer=%s reason=%r",
+                     question, parsed["has_answer"], parsed["reason"])
+        return parsed["has_answer"]
+    except Exception as exc:
+        logger.debug("answerability judge failed question=%r error=%s "
+                     "response=%r", question, exc, response_text)
+        return False
+
+
 def synthesize_answer(store: Store, question: str,
                       fragments: list[Fragment], settings: LLMSettings) -> dict:
     """Synthesize an answer while sending full page text for only top 3 hits.
@@ -373,6 +437,9 @@ def synthesize_answer(store: Store, question: str,
         return {"answer": "", "citations": [], "refusal": True,
                 "reason": "LLM недоступен: API-ключ не задан"}
     if not fragments:
+        return {"answer": "", "citations": [], "refusal": True,
+                "reason": "нет подтверждений в документах"}
+    if not _check_answerability(settings, question, fragments):
         return {"answer": "", "citations": [], "refusal": True,
                 "reason": "нет подтверждений в документах"}
 
@@ -396,6 +463,8 @@ def synthesize_answer(store: Store, question: str,
             )},
         ]
         response = _call_llm(settings, messages)
+        logger.debug("answer synthesis response question=%r json=%s",
+                     question, response)
         return _parse_synthesis_response(response)
     except Exception as exc:
         logger.debug("answer synthesis failed: %s", exc)
