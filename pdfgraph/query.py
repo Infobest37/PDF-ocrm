@@ -10,11 +10,12 @@ Three deterministic branches, tried in order:
    (``kind="part"``, ``score=1.0``).
 3. **Free text** — FTS5 ``MATCH`` over the stored search text with ``bm25()``
    ranking (``kind="text"``). The query is tried as all-tokens AND, then OR,
-   then all-tokens prefix queries using FTS5 ``*``. A topic absent from the
-   index returns no hits. The score is normalised to the best hit of the
-   branch: ``score = penalty * |rank| / max(|rank|)`` — the branch leader
-   carries the full weight (1.0 for AND, 0.8 for OR, 0.6 for prefix) and weaker
-   hits scale down proportionally. Stage 2: the previous absolute scale
+   then all-tokens prefix queries using FTS5 ``*``. If those miss, a trigram
+   FTS5 index performs indexed substring searches with one-character typo
+   tolerance. The score is normalised to the best hit of the branch:
+   ``score = penalty * |rank| / max(|rank|)`` — the branch leader carries the
+   full weight (1.0 for AND, 0.8 for OR, 0.6 for prefix, 0.5 for trigram) and
+   weaker hits scale down proportionally. Stage 2: the previous absolute scale
    (``penalty / (1 + |bm25|)``) gave ~0.15 for real РЭ pages — every real
    question sat under ``answer.min_score=0.35``, so the graph refused all
    answers («не ищет»); the relative scale makes the threshold meaningful.
@@ -42,6 +43,8 @@ SNIPPET_LEAD = 60
 OR_PENALTY = 0.8
 #: Score multiplier for the broader FTS5 token-prefix retry.
 PREFIX_PENALTY = 0.6
+#: Score multiplier for the trigram-index fallback.
+TRIGRAM_PENALTY = 0.5
 
 #: Stage-2 diagnostics: question → branch → SQL → count is logged at DEBUG
 #: (visible with ``pdfgraph ask --debug``).
@@ -150,6 +153,21 @@ def _fts_prefix_expr(tokens: list[str], joiner: str) -> str:
     )
 
 
+def _trigram_patterns(token: str) -> list[str]:
+    """Build indexed substring patterns, including one-character typos."""
+    if len(token) < 4 or "%" in token or "_" in token:
+        return []
+
+    patterns = [f"%{token}%"]
+    if len(token) >= 5:
+        patterns.extend(
+            f"%{token[:i]}_{token[i + 1:]}%"
+            for i in range(len(token))
+            if max(i, len(token) - i - 1) >= 3
+        )
+    return patterns
+
+
 def search(
     store: Store,
     query: str,
@@ -160,8 +178,8 @@ def search(
 
     Branches: normalized code → sheets of that code; existing part-number key
     → sheets carrying that part; otherwise FTS5/BM25 over the whole query
-    (all tokens, AND), a tolerant OR retry, and—if both miss—an all-token
-    prefix retry with :data:`PREFIX_PENALTY`. Text-branch scores are
+    (all tokens, AND), a tolerant OR retry, an all-token prefix retry, and
+    finally a trigram-indexed substring fallback. Text-branch scores are
     normalised to the best hit of the branch (see :func:`_by_fts`).
     ``aircraft_type`` restricts hits to pages of that type. A topic absent
     from the index returns ``[]``.
@@ -211,6 +229,8 @@ def _by_part(store: Store, part_key: str,
 
 def _by_fts(store: Store, needle: str, aircraft_type: str | None,
             limit: int) -> list[Fragment]:
+    if limit <= 0:
+        return []
     tokens = needle.split()
     rows = store.search_pages(_fts_expr(tokens, " AND "), aircraft_type, limit)
     penalty = 1.0
@@ -224,6 +244,20 @@ def _by_fts(store: Store, needle: str, aircraft_type: str | None,
             _fts_prefix_expr(tokens, " AND "), aircraft_type, limit
         )
         penalty = PREFIX_PENALTY
+    if not rows:
+        trigram_hits: dict[tuple[str, int], tuple[str, int, str, str]] = {}
+        for token in tokens:
+            for pattern in _trigram_patterns(token):
+                for row in store.search_trigrams(pattern, aircraft_type):
+                    trigram_hits.setdefault((row[0], row[1]), row)
+                    if len(trigram_hits) >= limit:
+                        break
+                if len(trigram_hits) >= limit:
+                    break
+            if len(trigram_hits) >= limit:
+                break
+        rows = [(*row, -1.0) for row in trigram_hits.values()]
+        penalty = TRIGRAM_PENALTY
     logger.debug("fts: needle=%r tokens=%d penalty=%.1f hits=%d",
                  needle, len(tokens), penalty, len(rows))
     if not rows:
@@ -231,7 +265,7 @@ def _by_fts(store: Store, needle: str, aircraft_type: str | None,
     # Stage 2: normalise the score to the best hit of the branch. bm25() is
     # negative and smaller means better, so |rank| is the raw relevance;
     # scaling by the branch maximum keeps the leader at the full weight
-    # (1.0 for AND / OR_PENALTY for the retry) and turns
+    # (1.0 for AND, the retry penalty, or the fixed trigram penalty) and turns
     # answer.build_answer's min_score into a real relative threshold instead
     # of a filter that removed every long real-world page hit.
     best_rank = max(abs(rank) for _, _, _, _, rank in rows)

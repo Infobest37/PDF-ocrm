@@ -107,6 +107,7 @@ def test_aircraft_type_filters_results(fx_store):
 
 def test_limit_is_respected(fx_store):
     assert len(search(fx_store, "радиомаяк ПАРМ-406А", limit=1)) == 1
+    assert search(fx_store, "радиомаяк", limit=0) == []
 
 
 def test_fragment_is_a_dataclass_with_declared_fields(fx_store):
@@ -144,6 +145,22 @@ def test_text_query_falls_back_to_token_prefix(fx_store):
 
     assert hits and hits[0].page == 91 and hits[0].kind == "text"
     assert 0.0 < hits[0].score <= 0.6
+
+
+def test_text_query_falls_back_to_trigram_for_single_character_typo(fx_store):
+    from pdfprepare.normalize import normalize_for_search
+
+    text = "Анероидно-мембранный механизм"
+    fx_store.upsert_page("РТЭ кн.1.pdf", 92, "Ми-8МТВ",
+                         "023.00.00", "023.11.30", text,
+                         normalize_for_search(text))
+
+    hits = search(fx_store, "анеройдно")
+
+    hit = next(h for h in hits if h.page == 92)
+    assert hit.kind == "text"
+    assert hit.score == 0.5
+    assert text[hit.char_start:hit.char_end] == hit.snippet
 
 
 def test_whitespace_query_returns_nothing(fx_store):

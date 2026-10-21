@@ -65,6 +65,12 @@ class Store:
                 page UNINDEXED,
                 body
             );
+            CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts_trigram USING fts5(
+                document UNINDEXED,
+                page UNINDEXED,
+                body,
+                tokenize='trigram'
+            );
 
             -- Sheets that landed in the re-scan report (task 2.7). Blank
             -- divider sheets never appear in that report, so they are never
@@ -93,6 +99,13 @@ class Store:
             "WHERE key = 'schema_version' AND CAST(value AS INTEGER) < ?",
             (str(SCHEMA_VERSION), SCHEMA_VERSION),
         )
+        if self._connection.execute(
+            "SELECT 1 FROM pages_fts_trigram LIMIT 1"
+        ).fetchone() is None:
+            self._connection.execute(
+                "INSERT INTO pages_fts_trigram (document, page, body) "
+                "SELECT document, page, body FROM pages_fts"
+            )
         self._connection.commit()
 
     def close(self) -> None:
@@ -180,6 +193,15 @@ class Store:
             )
             self._connection.execute(
                 "INSERT INTO pages_fts (document, page, body) VALUES (?, ?, ?)",
+                (document, str(page), search_text),
+            )
+            self._connection.execute(
+                "DELETE FROM pages_fts_trigram WHERE document = ? AND page = ?",
+                (document, str(page)),
+            )
+            self._connection.execute(
+                "INSERT INTO pages_fts_trigram (document, page, body) "
+                "VALUES (?, ?, ?)",
                 (document, str(page), search_text),
             )
 
@@ -326,6 +348,26 @@ class Store:
             sql += " LIMIT ?"
             args.append(limit)
         logger.debug("search_pages sql=%r args=%r", sql, args)
+        return self._connection.execute(sql, args).fetchall()
+
+    def search_trigrams(
+        self,
+        pattern: str,
+        aircraft_type: str | None = None,
+    ) -> list[tuple[str, int, str, str]]:
+        """Search the trigram-indexed normalized text with a LIKE pattern."""
+        sql = (
+            "SELECT pg.document, pg.page, pg.system_code, pg.subsystem_code "
+            "FROM pages_fts_trigram "
+            "JOIN pages pg ON pg.document = pages_fts_trigram.document "
+            "AND pg.page = CAST(pages_fts_trigram.page AS INTEGER) "
+            "WHERE pages_fts_trigram.body LIKE ?"
+        )
+        args: list[object] = [pattern]
+        if aircraft_type is not None:
+            sql += " AND pg.aircraft_type = ?"
+            args.append(aircraft_type)
+        sql += " ORDER BY pg.document, pg.page"
         return self._connection.execute(sql, args).fetchall()
 
     def stats(self) -> dict[str, int]:
