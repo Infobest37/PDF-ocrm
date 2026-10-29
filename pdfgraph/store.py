@@ -2,6 +2,7 @@
 
 import logging
 import sqlite3
+from datetime import datetime
 
 #: Stage-2 diagnostics: the FTS SQL is logged at DEBUG (visible with
 #: ``pdfgraph ask --debug``).
@@ -10,7 +11,7 @@ logger = logging.getLogger(__name__)
 #: Current schema version. Additive changes (new ``CREATE TABLE IF NOT
 #: EXISTS`` tables) are applied on every open; :class:`Store` bumps the
 #: recorded version of older databases to this value (see __init__).
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class Store:
@@ -46,6 +47,22 @@ class Store:
                 FOREIGN KEY (dst) REFERENCES nodes (id)
             );
             CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges (dst, kind);
+
+            -- Card 0.1b step 2: read-only-duplicate marks, fully additive.
+            -- A row with status 'duplicate' hides that document's sheets
+            -- from every search branch (see _dup_filter); 'canonical'
+            -- records the surviving edition the duplicates point to.
+            -- Nothing here is created from `documents` — that table is a
+            -- later-stage concern and must not appear yet.
+            CREATE TABLE IF NOT EXISTS document_aliases (
+                name TEXT PRIMARY KEY,
+                canonical_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                reason TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_document_aliases_status
+                ON document_aliases (status);
 
             CREATE TABLE IF NOT EXISTS pages (
                 document TEXT NOT NULL,
@@ -260,6 +277,146 @@ class Store:
         """Return True when a node of this kind and key exists."""
         return self.find_node_id(kind, key) is not None
 
+    def _dup_filter(self, document_ref: str = "pages.document") -> str:
+        """SQL-условие, скрывающее листы документов-дублей (карточка 0.1б).
+
+        ``document_ref`` — ссылка на колонку с именем документа в
+        конкретном запросе (``pg.document`` для запросов через join).
+        Таблица создаётся на каждом открытии (:meth:`__init__`), поэтому
+        условие валидно и для старых баз: пустая таблица ничего не прячет.
+        """
+        return (
+            " AND NOT EXISTS ("
+            "SELECT 1 FROM document_aliases da "
+            "WHERE da.name = " + document_ref +
+            " AND da.status = 'duplicate')"
+        )
+
+    def mark_duplicate(
+        self, name: str, canonical: str, reason: str = ""
+    ) -> list[tuple[str, int]]:
+        """Пометить ``name`` дублем ``canonical``; вернуть скрытые листы.
+
+        Идемпотентно: повторный вызов переписывает канон/причину и не
+        плодит строки. Листы и текст не удаляются — поиск лишь исключает
+        документы со статусом ``duplicate`` из всех поисковых веток.
+        Канон, если сам помечен дублем, отвергается — цепочка «дубль →
+        дубль» не допускается.
+
+        Raises:
+            ValueError: ``name`` равен ``canonical`` или ``canonical``
+                уже помечен дублем.
+            LookupError: ``name`` или ``canonical`` отсутствует в таблице
+                ``pages`` (у документа нет ни одного листа).
+        """
+        if name == canonical:
+            raise ValueError(
+                "mark_duplicate: name and canonical must differ: "
+                f"{name!r}")
+        if not self._document_in_pages(name):
+            raise LookupError(f"mark_duplicate: no such document: {name!r}")
+        if not self._document_in_pages(canonical):
+            raise LookupError(
+                f"mark_duplicate: no such canonical document: {canonical!r}")
+        if self._alias_status(canonical) == "duplicate":
+            raise ValueError(
+                "mark_duplicate: canonical is itself marked duplicate: "
+                f"{canonical!r}")
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO document_aliases (
+                    name, canonical_name, status, reason, created_at
+                ) VALUES (?, ?, 'duplicate', ?, ?)
+                ON CONFLICT (name) DO UPDATE SET
+                    canonical_name = excluded.canonical_name,
+                    status = excluded.status,
+                    reason = excluded.reason,
+                    created_at = excluded.created_at
+                """,
+                (name, canonical, reason, self._now()),
+            )
+            self._connection.execute(
+                """
+                INSERT INTO document_aliases (
+                    name, canonical_name, status, reason, created_at
+                ) VALUES (?, ?, 'canonical', '', ?)
+                ON CONFLICT (name) DO UPDATE SET
+                    status = excluded.status,
+                    created_at = excluded.created_at
+                """,
+                (canonical, canonical, self._now()),
+            )
+        return self.affected_sheets(name)
+
+    def _document_in_pages(self, name: str) -> bool:
+        """Есть ли хоть один лист документа ``name`` в таблице pages."""
+        return self._connection.execute(
+            "SELECT 1 FROM pages WHERE document = ? LIMIT 1", (name,)
+        ).fetchone() is not None
+
+    def _alias_status(self, name: str) -> str | None:
+        """Текущий статус строки document_aliases для ``name`` или None."""
+        row = self._connection.execute(
+            "SELECT status FROM document_aliases WHERE name = ?", (name,)
+        ).fetchone()
+        return row[0] if row is not None else None
+
+    def _now(self) -> str:
+        """Локальная отметка времени для created_at (секунды)."""
+        return datetime.now().isoformat(timespec="seconds")
+
+    def unmark_duplicate(self, name: str) -> bool:
+        """Снять пометку дубля у ``name``; вернуть True, если канон очищен.
+
+        Идемпотентно: отсутствие помётки — нормальный no-op. Строка канона
+        удаляется, когда на неё больше не указывает ни один дубль.
+        """
+        with self._connection:
+            row = self._connection.execute(
+                "SELECT canonical_name FROM document_aliases "
+                "WHERE name = ? AND status = 'duplicate'",
+                (name,),
+            ).fetchone()
+            canonical = row[0] if row is not None else ""
+            self._connection.execute(
+                "DELETE FROM document_aliases "
+                "WHERE name = ? AND status = 'duplicate'",
+                (name,),
+            )
+            if not canonical or self._connection.execute(
+                "SELECT 1 FROM document_aliases "
+                "WHERE name = ? AND status = 'canonical'",
+                (canonical,),
+            ).fetchone() is None:
+                return False
+            orphans = self._connection.execute(
+                "SELECT COUNT(*) FROM document_aliases "
+                "WHERE status = 'duplicate' AND canonical_name = ?",
+                (canonical,),
+            ).fetchone()[0]
+            if orphans == 0:
+                self._connection.execute(
+                    "DELETE FROM document_aliases WHERE name = ?",
+                    (canonical,))
+                return True
+        return False
+
+    def list_aliases(self) -> list[tuple[str, str, str, str, str]]:
+        """Все строки document_aliases: (name, status, canonical, reason, at)."""
+        return self._connection.execute(
+            "SELECT name, status, canonical_name, reason, created_at "
+            "FROM document_aliases ORDER BY name"
+        ).fetchall()
+
+    def affected_sheets(self, name: str) -> list[tuple[str, int]]:
+        """Листы документа, попадающие под пометку, отсортированные."""
+        return self._connection.execute(
+            "SELECT document, page FROM pages WHERE document = ? "
+            "ORDER BY page",
+            (name,),
+        ).fetchall()
+
     def sheets_by_code(
         self,
         code: str,
@@ -280,6 +437,7 @@ class Store:
         if aircraft_type is not None:
             sql += " AND aircraft_type = ?"
             args.append(aircraft_type)
+        sql += self._dup_filter()
         sql += " ORDER BY document, page"
         if limit is not None:
             sql += " LIMIT ?"
@@ -310,6 +468,7 @@ class Store:
         if aircraft_type is not None:
             sql += " AND pg.aircraft_type = ?"
             args.append(aircraft_type)
+        sql += self._dup_filter("pg.document")
         sql += " GROUP BY pg.document, pg.page ORDER BY pg.document, pg.page"
         if limit is not None:
             sql += " LIMIT ?"
@@ -349,6 +508,7 @@ class Store:
                 "pg.document LIKE ?" for _ in document_terms
             ) + ")"
             args.extend(f"%{term}%" for term in document_terms)
+        sql += self._dup_filter("pg.document")
         sql += " ORDER BY rank"
         if limit is not None:
             sql += " LIMIT ?"
@@ -379,6 +539,7 @@ class Store:
                 "pg.document LIKE ?" for _ in document_terms
             ) + ")"
             args.extend(f"%{term}%" for term in document_terms)
+        sql += self._dup_filter("pg.document")
         sql += " ORDER BY pg.document, pg.page"
         return self._connection.execute(sql, args).fetchall()
 

@@ -35,8 +35,10 @@ import glob
 import json
 import logging
 import os
+import pathlib
 import sqlite3
 import sys
+from datetime import datetime
 
 from pdfgraph.answer import Answer, build_answer
 from pdfgraph.build import build, mark_defects
@@ -232,6 +234,102 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     return 0 if verified else 1
 
 
+def _log_duplicate(
+    store_path: str, action: str, name: str,
+    canonical: str, reason: str, sheets: int,
+) -> None:
+    """Append one audit line to duplicates.log next to the graph file."""
+    log_path = pathlib.Path(store_path).with_name("duplicates.log")
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = (
+        f"{stamp} {action} name={name} canonical={canonical} "
+        f"reason={reason} sheets={sheets}\n"
+    )
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+
+
+def _safe_print(text: str, stream=None) -> None:
+    """Print text, surviving console encodings lacking some characters.
+
+    Реальная Windows-консоль (cp1251/cp866) не содержит «→» и «…»:
+    TextIOWrapper бросает UnicodeEncodeError при печати. Замена
+    непредставимых знаков на «?» затрагивает только вывод консоли;
+    данные базы и duplicates.log остаются нетронутыми.
+    """
+    stream = stream if stream is not None else sys.stdout
+    try:
+        stream.write(text + "\n")
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "ascii"
+        stream.write((text + "\n").encode(encoding, "replace")
+                     .decode(encoding, "replace"))
+
+
+def _cmd_mark_duplicate(args: argparse.Namespace) -> int:
+    """Mark a document duplicate; its sheets leave every search branch."""
+    store_path = pathlib.Path(resolve_store_path(args.store_path))
+    if not store_path.exists():
+        print(f"error: store not found: {args.store_path!r} "
+              "(run 'pdfgraph build' first)", file=sys.stderr)
+        return 2
+    if args.name == args.canonical:
+        print("error: --name must differ from --canonical", file=sys.stderr)
+        return 2
+    store = Store(str(store_path))
+    try:
+        try:
+            touched = store.mark_duplicate(
+                args.name, args.canonical, reason=args.reason)
+        except (LookupError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        _log_duplicate(str(store_path), "mark-duplicate", args.name,
+                       args.canonical, args.reason, len(touched))
+        if touched:
+            listed = ", ".join(str(page) for _doc, page in touched)
+            _safe_print(f"mark-duplicate: «{args.name}» → канон "
+                        f"«{args.canonical}»; листов скрыто: {len(touched)} "
+                        f"({listed})")
+            for document, page in touched:
+                text = store.page_text(document, page)
+                quote = (text[:70] + "…") if len(text) > 70 else text
+                _safe_print(f"  лист {page}: {quote}")
+        else:
+            _safe_print(f"mark-duplicate: «{args.name}» → канон "
+                        f"«{args.canonical}»; повторная пометка, список "
+                        "листов не изменился")
+        _safe_print("Пометка записана в document_aliases (дубль исключён "
+                    "из всех веток поиска; листы и текст не удалялись)")
+    finally:
+        store.close()
+    return 0
+
+
+def _cmd_unmark_duplicate(args: argparse.Namespace) -> int:
+    """Remove the duplicate mark; sheets return to every search branch."""
+    store_path = pathlib.Path(resolve_store_path(args.store_path))
+    if not store_path.exists():
+        print(f"error: store not found: {args.store_path!r} "
+              "(run 'pdfgraph build' first)", file=sys.stderr)
+        return 2
+    store = Store(str(store_path))
+    try:
+        orphan_marked = store.unmark_duplicate(args.name)
+        if orphan_marked:
+            _safe_print(f"unmark-duplicate: «{args.name}» пометка снята; "
+                        "строка канона удалена из document_aliases (на "
+                        "неё не указывал ни один дубль)")
+        else:
+            _safe_print(f"unmark-duplicate: «{args.name}» пометка снята "
+                        "(или отсутствовала); строка канона не удалялась")
+        _log_duplicate(str(store_path), "unmark-duplicate", args.name,
+                       "", "", 0)
+    finally:
+        store.close()
+    return 0
+
+
 def main(argv: list[str]) -> int:
     """Dispatch ``pdfgraph`` subcommands; return the process exit code."""
     parser = argparse.ArgumentParser(
@@ -277,6 +375,30 @@ def main(argv: list[str]) -> int:
         "--debug", action="store_true",
         help="Log the question→branch→SQL→count chain to stderr.")
     ask_parser.set_defaults(handler=_cmd_ask)
+
+    mark_parser = commands.add_parser(
+        "mark-duplicate",
+        help="Mark a document duplicate (idempotent, audited).")
+    mark_parser.add_argument("store_path", help="SQLite graph file.")
+    mark_parser.add_argument(
+        "--name", required=True,
+        help="Exact document name to mark duplicate.")
+    mark_parser.add_argument(
+        "--canonical", required=True,
+        help="Exact document name of the surviving canonical edition.")
+    mark_parser.add_argument(
+        "--reason", default="",
+        help="Why this duplicate was marked (stored and logged).")
+    mark_parser.set_defaults(handler=_cmd_mark_duplicate)
+
+    unmark_parser = commands.add_parser(
+        "unmark-duplicate",
+        help="Remove the duplicate mark (idempotent, audited).")
+    unmark_parser.add_argument("store_path", help="SQLite graph file.")
+    unmark_parser.add_argument(
+        "--name", required=True,
+        help="Exact document name whose duplicate mark is removed.")
+    unmark_parser.set_defaults(handler=_cmd_unmark_duplicate)
 
     args = parser.parse_args(argv)
     return args.handler(args)
