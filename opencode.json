@@ -6,7 +6,10 @@
         "type": "local",
         "command": [
           "C:/Users/user/.local/bin/codebase-memory-mcp.exe"
-        ]
+        ],
+        "timeout": {
+          "startup": 90000
+        }
       }
     }
   },
