@@ -4,12 +4,12 @@
 - копирует ``graph.db`` в темп-каталог (рабочая БД не открывается —
   правка 4 владельца);
 - выполняет один холостой прогрев-запрос вне учёта (правка 3);
-- прогоняет 30 вопросов ``tests/golden/questions.toml`` через цепочку
+- прогоняет 34 вопроса ``tests/golden/questions.toml`` через цепочку
   CLI ``ask`` (``build_answer`` + ``verify_citations``) на копии;
 - печатает человекочитаемую таблицу (видна с ``pytest -s`` либо
   отдельным запуском ``venv\\Scripts\\python.exe tests\\golden\\metrics.py``)
   и пишет ``reports/golden_run.json``;
-- проверяет только структуру: 30 строк, отчёт записан, у метрик n,
+- проверяет только структуру: 34 строки, отчёт записан, у метрик n,
   счётчики графа на копии не изменились. Порогов нет — низкая метрика
   показывается, но не валит сборку; блокирующие пороги появятся в
   Фазе 1.
@@ -37,6 +37,14 @@ PLANNED_METRICS = (
     "hit_at_5", "citation_precision",
     "refusal_recall", "refusal_false", "latency_median_ms",
 )
+
+#: Полный размер золотого набора (дополнение 0.1в: 30 + 4 внекорпусных).
+EXPECTED_TOTAL = 34
+
+#: Распределение записей golden-набора по mode (карточка 0.1 + 0.1в).
+EXPECTED_PER_MODE: dict[str, int] = {
+    "explain": 11, "fault": 11, "procedure": 12,
+}
 
 
 def _load_metrics():
@@ -94,12 +102,12 @@ def _entry(id_text: str, mode: str = "explain", status: str = "todo",
 
 # ==== ТЕСТ-ЧАСТЬ 2: негативная валидация загрузчика ====
 def test_loader_full_set(metrics):
-    """30 вопросов; по 10 в каждом mode; id уникальны; ready валидны."""
+    """Размер EXPECTED_TOTAL/EXPECTED_PER_MODE; id уникальны; ready валидны."""
     questions = metrics.load_questions(QUESTIONS_PATH)
-    assert len(questions) == 30
+    assert len(questions) == EXPECTED_TOTAL
     modes = [item.mode for item in questions]
-    for mode in ("explain", "fault", "procedure"):
-        assert modes.count(mode) == 10
+    for mode, count in EXPECTED_PER_MODE.items():
+        assert modes.count(mode) == count
     ready = [item for item in questions if item.in_metrics]
     todo = [item for item in questions if not item.in_metrics]
     assert ready and todo
@@ -145,7 +153,7 @@ def test_ready_with_doc_but_no_pages_rejected(tmp_path, metrics):
 
 
 def test_golden_run(store_copy, metrics):
-    """Полный прогон 30 вопросов на копии БД: отчёт и структура.
+    """Полный прогон 34 вопросов на копии БД: отчёт и структура.
 
     Только структурные проверки без порогов: количество строк,
     записанный отчёт, согласованность value/n у метрик, неизменность
@@ -163,10 +171,10 @@ def test_golden_run(store_copy, metrics):
     }
     report_path = metrics.save_report(REPORT_PATH, rows, metrics_value,
                                       meta_full)
-    assert len(rows) == len(questions) == 30
+    assert len(rows) == len(questions) == EXPECTED_TOTAL
     with open(report_path, encoding="utf-8") as handle:
         payload = json.load(handle)
-    assert payload["counts"]["total"] == 30
+    assert payload["counts"]["total"] == EXPECTED_TOTAL
     assert payload["todo"] == [{"id": row.id, "question": row.question}
                                for row in questions if not row.in_metrics]
     assert payload["counts"]["expect_answer"] > 0

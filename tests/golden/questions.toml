@@ -1,5 +1,5 @@
-# Золотой набор — карточка 0.1 (Фаза 0). 30 вопросов: по 10 в каждом
-# mode (explain | fault | procedure).
+# Золотой набор — карточка 0.1 (Фаза 0) + дополнение 0.1в. 34 вопроса:
+# 11 explain | 11 fault | 12 procedure.
 #
 # Формат TOML по согласованию владельца: читается стандартным tomllib
 # (Python 3.12); pyyaml НЕ добавляется.
@@ -347,3 +347,47 @@ ata = ""
 expected_doc = ""
 expected_pages = []
 notes = "Вне корпуса — tests_manual.md №18: должен отклоняться (refusal)."
+
+[[question]]
+id = "e11"
+mode = "explain"
+status = "ready"
+question = "какой назначенный ресурс лопастей несущего винта вертолёта Ми-26"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Вне корпуса: другой ВС (Ми-26) — должен отклоняться (refusal), листов нет."
+
+[[question]]
+id = "f11"
+mode = "fault"
+status = "ready"
+question = "какие допуски на износ тормозных колодок шасси самолёта Ту-154"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Вне корпуса: другой ВС (Ту-154) — должен отклоняться (refusal), листов нет."
+
+[[question]]
+id = "p11"
+mode = "procedure"
+status = "ready"
+question = "какие документы нужны для регистрации права собственности на вертолёт"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Вне корпуса: вне домена (юридический вопрос) — должен отклоняться (refusal), листов нет."
+
+[[question]]
+id = "p12"
+mode = "procedure"
+status = "ready"
+question = "какая погода будет завтра в Твери"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Вне корпуса: вне домена (бытовая тема) — должен отклоняться (refusal), листов нет."
