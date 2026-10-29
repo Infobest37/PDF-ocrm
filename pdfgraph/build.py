@@ -135,6 +135,44 @@ def _mark_page_flags(store: Store, document: str, page: PageInfo) -> None:
                               "auto: " + rescan[0])
 
 
+def mark_flags_auto(store: Store) -> int:
+    """Разовая авто-разметка готовой базы правилами 0.2 без пересборки.
+
+    Переиспользует :func:`_mark_page_flags` — правила те же, что при build.
+    Текст листа берётся из колонки ``pages.text`` (сохранённый OCR-текст,
+    без нормализации). Флага ``is_blank`` в схеме графа нет, поэтому лист
+    считается пустым, если текст отсутствует, либо build уже пометил его
+    «пустой лист» (эти листы остаются границей раздела и никогда не
+    получают needs_rescan). Идемпотентно по контракту 0.2: авто-метки
+    перезаписываются auto → auto, причины «manual: ...» неприкосновенны
+    (:meth:`Store._set_auto_flag`). Возвращает число листов, у которых
+    изменилась позиция флагов/причин (идемпотентный прогон даёт 0).
+    """
+    connection = store._connection
+    state_query = (
+        "SELECT document, page, needs_rescan, needs_rescan_reason, "
+        "is_service, is_service_reason FROM pages")
+    before = {(document, page): (rescan, rescan_reason, service,
+                                 service_reason)
+              for document, page, rescan, rescan_reason, service,
+              service_reason in connection.execute(state_query)}
+    rows = connection.execute(
+        "SELECT document, page, text, is_service, is_service_reason "
+        "FROM pages").fetchall()
+    for document, page, text, service_flag, service_reason in rows:
+        blank = not (text or "").strip() or (
+            service_flag == 1 and service_reason == "auto: пустой лист")
+        info = PageInfo(page_index=page, is_native_text=False,
+                        is_blank=blank, system_code="", subsystem_code="",
+                        full_text=text or "", words=[])
+        _mark_page_flags(store, document, info)
+    after = {(document, page): (rescan, rescan_reason, service,
+                                service_reason)
+             for document, page, rescan, rescan_reason, service,
+             service_reason in connection.execute(state_query)}
+    return sum(1 for key in after if before.get(key) != after[key])
+
+
 def build(
     results: list[DocResult],
     aircraft_type: str,

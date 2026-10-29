@@ -41,7 +41,7 @@ import sys
 from datetime import datetime
 
 from pdfgraph.answer import Answer, build_answer
-from pdfgraph.build import build, mark_defects
+from pdfgraph.build import build, mark_defects, mark_flags_auto
 from pdfgraph.paths import resolve_store_path
 from pdfgraph.store import Store
 from pdfgraph.verify import CitationCheck, all_verified, verify_citations
@@ -432,6 +432,54 @@ def _cmd_unmark_service(args: argparse.Namespace) -> int:
     return _cmd_unmark_flag(args, "service")
 
 
+def _log_flags_run(store_path: str, rescan: int, service: int,
+                   manual: int, changed: int) -> None:
+    """Append one mark-flags-auto audit line to garbage.log (0.2а)."""
+    log_path = pathlib.Path(store_path).with_name("garbage.log")
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = (f"{stamp} mark-flags-auto rescan={rescan} service={service} "
+            f"manual={manual} changed={changed}\n")
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+
+
+def _cmd_mark_flags_auto(args: argparse.Namespace) -> int:
+    """Разовая авто-разметка готовой базы правилами 0.2 без пересборки.
+
+    Те же правила, что при build (:func:`pdfgraph.build.mark_flags_auto`
+    переиспользует ``_mark_page_flags``). Идемпотентно: авто-метки
+    перезаписываются auto → auto, причины «manual: ...» не перезаписываются.
+    Печатает счётчики (rescan/service — все авто и ручные вместе, manual —
+    листы, помеченные вручную) и число изменённых листов; одна
+    аудит-строка пишется в garbage.log рядом с базой.
+    """
+    store_path = pathlib.Path(resolve_store_path(args.store_path))
+    if not store_path.exists():
+        print(f"error: store not found: {args.store_path!r} "
+              "(run 'pdfgraph build' first)", file=sys.stderr)
+        return 2
+    store = _open_store(str(store_path))
+    if store is None:
+        return 2
+    try:
+        changed = mark_flags_auto(store)
+        flags = store.garbage_stats()
+        manual = store._connection.execute(
+            "SELECT COUNT(*) FROM pages WHERE "
+            "(needs_rescan = 1 AND needs_rescan_reason LIKE 'manual:%') "
+            "OR (is_service = 1 AND is_service_reason LIKE 'manual:%')"
+        ).fetchone()[0]
+    finally:
+        store.close()
+    _safe_print(
+        f"mark-flags-auto: rescan={flags['rescan']} "
+        f"service={flags['service']} manual={manual} changed={changed} "
+        "(идемпотентно; причины «manual: …» не перезаписывались)")
+    _log_flags_run(str(store_path), int(flags["rescan"]),
+                   int(flags["service"]), int(manual), changed)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     """Dispatch ``pdfgraph`` subcommands; return the process exit code."""
     parser = argparse.ArgumentParser(
@@ -565,6 +613,14 @@ def main(argv: list[str]) -> int:
         help="Why the mark is removed (appended to the 'manual: снято' "
              "reason, protecting from auto re-marking).")
     service_unmark_parser.set_defaults(handler=_cmd_unmark_service)
+
+    # Разовая авто-разметка готовой базы (0.2а, шаг приёмки 29.10): правила
+    # те же, что при build; manual:* неприкосновенны; аудит в garbage.log.
+    flags_auto_parser = commands.add_parser(
+        "mark-flags-auto",
+        help="Re-run 0.2 auto flagging over an existing store (idempotent).")
+    flags_auto_parser.add_argument("store_path", help="SQLite graph file.")
+    flags_auto_parser.set_defaults(handler=_cmd_mark_flags_auto)
 
     args = parser.parse_args(argv)
     return args.handler(args)

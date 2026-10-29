@@ -531,3 +531,103 @@ def test_cli_build_prints_flag_counts(fx_prepared_dir, tmp_path, capsys):
                  "--type", "Ми-8МТВ"]) == 0
     out = capsys.readouterr().out
     assert "rescan=" in out and "service=" in out
+
+
+# ---------------------------------------------------------------------------
+# CLI: mark-flags-auto — разовая авто-разметка готовой базы без пересборки
+# (шаг 1 приёмки 0.2, 29.10.2026): правила те же, что при build
+# (_mark_page_flags), идемпотентно, «manual: ...» не перезаписывается.
+# ---------------------------------------------------------------------------
+
+def _flags_prepared_dir(tmp_path) -> str:
+    """Schema-v2 JSON: резанка (R1), хороший лист, пустой лист, титул."""
+    from pdfprepare.output import write_json
+    out_dir = tmp_path / "prep"
+    out_dir.mkdir()
+    pages = [
+        _page(page_index=0, full_text=" ".join(["о"] * 18 + ["т"] * 3)),
+        _page(page_index=1,
+              full_text="Установка кронштейна согласно ведомости"),
+        _page(page_index=2, is_blank=True, full_text=""),
+        _page(page_index=3,
+              full_text="ДОПОЛНЕНИЕ К КАТАЛОГУ ДЕТАЛЕЙ Стр. 3"),
+    ]
+    result = DocResult(source_path=str(out_dir / "Каталог.pdf"),
+                       page_count=4, pages=pages, system_names={})
+    write_json(result, str(out_dir / "Каталог.pdf.json"))
+    return str(out_dir)
+
+
+def test_cli_mark_flags_auto_matches_build_and_idempotent(fx_prepared_dir,
+                                                          capsys):
+    """mark-flags-auto повторяет флаги build (changed=0) и идемпотентен."""
+    import pathlib
+    from pdfgraph.cli import main
+    from pdfgraph.store import Store
+    store_path = str(pathlib.Path(fx_prepared_dir).with_name("flags-auto.db"))
+    assert main(["build", fx_prepared_dir, store_path,
+                 "--type", "Ми-8МТВ"]) == 0
+    snapshot_query = (
+        "SELECT document, page, needs_rescan, needs_rescan_reason, "
+        "is_service, is_service_reason FROM pages ORDER BY document, page")
+    store = Store(store_path)
+    try:
+        rows_after_build = store._connection.execute(
+            snapshot_query).fetchall()
+    finally:
+        store.close()
+    assert main(["mark-flags-auto", store_path]) == 0
+    out = capsys.readouterr().out
+    assert "mark-flags-auto" in out and "changed=0" in out
+    assert "manual=0" in out
+    store = Store(store_path)
+    try:
+        assert store._connection.execute(snapshot_query).fetchall() \
+            == rows_after_build
+        stats = store.garbage_stats()
+    finally:
+        store.close()
+    assert f"rescan={stats['rescan']}" in out
+    assert f"service={stats['service']}" in out
+    # аудит: одна строка за прогон в garbage.log рядом с базой
+    log_path = pathlib.Path(store_path).with_name("garbage.log")
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "mark-flags-auto" in log_text
+    assert f"rescan={stats['rescan']} service={stats['service']}" in log_text
+    # повторный прогон тоже ничего не меняет
+    assert main(["mark-flags-auto", store_path]) == 0
+    out = capsys.readouterr().out
+    assert "changed=0" in out
+
+
+def test_cli_mark_flags_auto_preserves_manual(tmp_path):
+    """manual-снятие резанки и manual-пометка переживают mark-flags-auto."""
+    from pdfgraph.cli import main
+    from pdfgraph.store import Store
+    prepared = _flags_prepared_dir(tmp_path)
+    store_path = str(tmp_path / "manual.db")
+    assert main(["build", prepared, store_path, "--type", "Ми-8МТВ"]) == 0
+    store = Store(store_path)
+    try:
+        row = store._connection.execute(
+            "SELECT needs_rescan, needs_rescan_reason FROM pages "
+            "WHERE page = 0").fetchone()
+        assert row == (1, "auto: обрывочный лист")
+        assert store.unmark_rescan("Каталог.pdf", 0,
+                                   "проверка содержания") is True
+        assert store.mark_rescan("Каталог.pdf", 1, "manual: проба") is True
+    finally:
+        store.close()
+    assert main(["mark-flags-auto", store_path]) == 0
+    store = Store(store_path)
+    try:
+        row = store._connection.execute(
+            "SELECT needs_rescan, needs_rescan_reason FROM pages "
+            "WHERE page = 0").fetchone()
+        assert row == (0, "manual: снято: проверка содержания")
+        row = store._connection.execute(
+            "SELECT needs_rescan, needs_rescan_reason FROM pages "
+            "WHERE page = 1").fetchone()
+        assert row == (1, "manual: проба")
+    finally:
+        store.close()
