@@ -1,8 +1,8 @@
 # Инструкции для агентов
 
 ## Проект
-- Windows-приложение состоит из двух актуальных пакетов: `pdfprepare/` готовит PDF (OCR, searchable PDF, JSON, отчёт качества); `pdfgraph/` строит SQLite-граф из JSON и отвечает по документам с проверяемыми цитатами. `pdf_ocr_app.py` и `pdfocrm.py` — отдельный legacy-код.
-- `requirements.txt` относится к legacy (`PyQt5`, `ocrmypdf`), не устанавливает зависимости новых пакетов. Зависимости `pdfprepare`/`pdfgraph` описаны в `pyproject.toml`.
+- Windows-приложение состоит из двух пакетов: `pdfprepare/` готовит PDF (OCR, searchable PDF, JSON, отчёт качества); `pdfgraph/` строит SQLite-граф из JSON и отвечает по документам с проверяемыми цитатами.
+- Зависимости описаны в `pyproject.toml`. Старый legacy-код (`pdf_ocr_app.py`, `pdfocrm.py`, `_massA.py`, `_massB.py`, `requirements.txt`, `install.bat`, `OCR.bat`) удалён 29.10.2026 вместе со старым бэкапом `graph.db.backup-20261028-docswap` и перенесён в соседний каталог-архив `PDF_OCR_APP_legacy_archive_2026-10-29` (вне репозитория). Восстановление — только из архива, не из git.
 - В корне есть рабочее окружение Python 3.12: `venv\Scripts\python.exe`. Используйте его, не системный Python.
 
 ## Команды
