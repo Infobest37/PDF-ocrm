@@ -144,6 +144,82 @@ def test_loader_bad_mode(tmp_path, metrics):
             _write_questions(tmp_path, _entry("q1", mode="chat")))
 
 
+# --- Диагностика отказа 0.1г: семантика refusal-метрик -------------------
+
+def _refusal_row(qid: str, mode: str, refusal: bool,
+                 expected_pages: list[int], latency_ms: float = 90.0,
+                 ok_citations: int = 0, total_citations: int = 0,
+                 hit: bool | None = None) -> dict:
+    """Синтетическая строка прогона с полями, нужными compute_metrics.
+
+    correct_refusal/wrong_refusal заполняются как в real-прогоне
+    (metrics.py: refus — if expect_refusal, wrong_refusal — if expect_answer).
+    """
+    refus_known = not expected_pages
+    answer_known = bool(expected_pages)
+    return {
+        "id": qid, "mode": mode, "status": "ready",
+        "question": f"вопрос {qid}", "aircraft_type": "Ми-8МТВ",
+        "ata": "", "expected_doc": "" if refus_known else f"{qid}.pdf",
+        "expected_pages": expected_pages, "notes": "",
+        "refusal": refusal,
+        "refusal_reason": "нет подтверждений в документах" if refusal else "",
+        "verified": False if refusal and total_citations == 0 else True,
+        "latency_ms": latency_ms,
+        "top5": [], "citations": [  # имитация проверенных цитат ответа
+            {"ok": True, "reason": ""}
+            for _ in range(total_citations)],
+        "hit": hit,
+        "correct_refusal": refusal if refus_known else None,
+        "wrong_refusal": refusal if answer_known else None,
+    }
+
+
+def test_refusal_recall_counts_true_refusals(metrics):
+    """refusal_recall = доля внекорпусных, у которых answer.refusal True.
+
+    Фиксация достоверности (0.1г): формулировка «вопрос вне корпуса»
+    должна превращаться в отказ только при фактическом refusal=True;
+    перевёрнутая формула или счёт пустой выдачи дают ложь — тест валит.
+    """
+    rows = [
+        _refusal_row("f10", "fault", refusal=False, expected_pages=[]),
+        _refusal_row("e11", "explain", refusal=True, expected_pages=[]),
+        _refusal_row("p11", "procedure", refusal=False, expected_pages=[]),
+    ]
+    block = metrics.compute_metrics(rows)["summary"]["refusal_recall"]
+    assert block == {"value": 1 / 3, "n": 3}
+    none_refusals = [
+        _refusal_row("p12", "procedure", refusal=False, expected_pages=[]),
+    ]
+    block = metrics.compute_metrics(none_refusals)["summary"]["refusal_recall"]
+    assert block == {"value": 0.0, "n": 1}
+
+
+def test_refusal_false_counts_refusals_on_answerable(metrics):
+    """refusal_false = доля корпусных (с известным листом), получивших отказ."""
+    rows = [
+        _refusal_row("q_ok", "explain", refusal=False, expected_pages=[30],
+                     total_citations=3, hit=True),
+        _refusal_row("q_refused", "fault", refusal=True, expected_pages=[9],
+                     total_citations=0, hit=False),
+    ]
+    block = metrics.compute_metrics(rows)["summary"]["refusal_false"]
+    assert block == {"value": 0.5, "n": 2}
+
+
+def test_refusal_rows_use_out_of_corpus_denominator_only(metrics):
+    """Внекорпусные не попадают в refusal_false, а корпусные — в refusal_recall."""
+    rows = [
+        _refusal_row("e11", "explain", refusal=False, expected_pages=[]),
+        _refusal_row("q_ok", "fault", refusal=False, expected_pages=[11],
+                     total_citations=1, hit=True),
+    ]
+    summary = metrics.compute_metrics(rows)["summary"]
+    assert summary["refusal_recall"] == {"value": 0.0, "n": 1}
+    assert summary["refusal_false"] == {"value": 0.0, "n": 1}
+
+
 def test_ready_with_doc_but_no_pages_rejected(tmp_path, metrics):
     """ready с expected_doc, но без листов — ошибка (не внекорпусный)."""
     with pytest.raises(ValueError, match="expected_doc"):
