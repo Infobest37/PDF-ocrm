@@ -118,6 +118,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
                       root=args.prepared_dir)
         defects = mark_defects(store, list(zip(paths, results)),
                                root=args.prepared_dir)
+        flags = store.garbage_stats()
     finally:
         store.close()
 
@@ -125,6 +126,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
         f"nodes={stats['nodes']} edges={stats['edges']} "
         f"sheets={stats['sheets']} pending={stats['pending']} "
         f"defects={defects} "
+        f"rescan={flags['rescan']} service={flags['service']} "
         f"(документов: {len(results)})"
     )
     return 0
@@ -249,6 +251,19 @@ def _log_duplicate(
         handle.write(line)
 
 
+def _log_garbage(store_path: str, action: str, document: str,
+                 page: int, reason: str, changed: bool) -> None:
+    """Append one audit line to garbage.log next to the graph file (0.2)."""
+    log_path = pathlib.Path(store_path).with_name("garbage.log")
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = (
+        f"{stamp} {action} document={document} page={page} "
+        f"reason={reason} changed={int(changed)}\n"
+    )
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+
+
 def _safe_print(text: str, stream=None) -> None:
     """Print text, surviving console encodings lacking some characters.
 
@@ -330,6 +345,93 @@ def _cmd_unmark_duplicate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_mark_flag(args: argparse.Namespace, flag: str) -> int:
+    """Ручная пометка листа (mark-rescan / mark-service); idempotent.
+
+    Лист уходит из поисковых веток (см. Store._garbage_filter), текст и
+    узлы сохраняются; повторная пометка — норма (код 0, changed=0).
+    Ошибка листа — код 2.
+    """
+    store_path = pathlib.Path(resolve_store_path(args.store_path))
+    if not store_path.exists():
+        print(f"error: store not found: {args.store_path!r} "
+              "(run 'pdfgraph build' first)", file=sys.stderr)
+        return 2
+    store = Store(str(store_path))
+    try:
+        try:
+            changed = getattr(store, f"mark_{flag}")(
+                args.document, args.page, args.reason)
+        except LookupError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        _log_garbage(str(store_path), f"mark-{flag}", args.document,
+                     args.page, args.reason, changed)
+        text = store.page_text(args.document, args.page)
+        quote = (text[:70] + "…") if len(text) > 70 else text
+    finally:
+        store.close()
+    if changed:
+        _safe_print(f"mark-{flag}: «{args.document}» лист {args.page} "
+                    f"— {args.reason}")
+        _safe_print(f"  лист {args.page}: {quote or '(без текста)'}")
+        _safe_print(f"Пометка записана ({flag}); лист исключён из веток "
+                    "поиска, цитаты остаются проверяемыми")
+    else:
+        _safe_print(f"mark-{flag}: «{args.document}» лист {args.page} "
+                    "уже был помечен; причина сохранена прежней")
+    return 0
+
+
+def _cmd_unmark_flag(args: argparse.Namespace, flag: str) -> int:
+    """Ручное снятие пометки листа (unmark-rescan / unmark-service)."""
+    store_path = pathlib.Path(resolve_store_path(args.store_path))
+    if not store_path.exists():
+        print(f"error: store not found: {args.store_path!r} "
+              "(run 'pdfgraph build' first)", file=sys.stderr)
+        return 2
+    store = Store(str(store_path))
+    try:
+        try:
+            changed = getattr(store, f"unmark_{flag}")(
+                args.document, args.page, args.reason)
+        except LookupError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        _log_garbage(str(store_path), f"unmark-{flag}", args.document,
+                     args.page, args.reason, changed)
+    finally:
+        store.close()
+    if changed:
+        _safe_print(f"unmark-{flag}: «{args.document}» лист {args.page} "
+                    "пометка снята; лист возвращается в поисковые ветки, "
+                    "авто-разметка его не перепометит (manual-защита)")
+    else:
+        _safe_print(f"unmark-{flag}: «{args.document}» лист {args.page} "
+                    "не был помечен; причина «manual: снято» не записана")
+    return 0
+
+
+def _cmd_mark_rescan(args: argparse.Namespace) -> int:
+    """CLI-handler: mark-rescan (needs_rescan)."""
+    return _cmd_mark_flag(args, "rescan")
+
+
+def _cmd_unmark_rescan(args: argparse.Namespace) -> int:
+    """CLI-handler: unmark-rescan (needs_rescan)."""
+    return _cmd_unmark_flag(args, "rescan")
+
+
+def _cmd_mark_service(args: argparse.Namespace) -> int:
+    """CLI-handler: mark-service (is_service)."""
+    return _cmd_mark_flag(args, "service")
+
+
+def _cmd_unmark_service(args: argparse.Namespace) -> int:
+    """CLI-handler: unmark-service (is_service)."""
+    return _cmd_unmark_flag(args, "service")
+
+
 def main(argv: list[str]) -> int:
     """Dispatch ``pdfgraph`` subcommands; return the process exit code."""
     parser = argparse.ArgumentParser(
@@ -399,6 +501,70 @@ def main(argv: list[str]) -> int:
         "--name", required=True,
         help="Exact document name whose duplicate mark is removed.")
     unmark_parser.set_defaults(handler=_cmd_unmark_duplicate)
+
+    # Пометки листов 0.2 (пересмотр 29.10.2026): needs_rescan — исключён
+    # из веток поиска до перескана; is_service — служебная страница.
+    rescan_mark_parser = commands.add_parser(
+        "mark-rescan",
+        help="Mark a sheet as bad OCR, exclude from search branches.")
+    rescan_mark_parser.add_argument("store_path", help="SQLite graph file.")
+    rescan_mark_parser.add_argument(
+        "--document", required=True, metavar="ИМЯ",
+        help="Exact document name (as stored in pages).")
+    rescan_mark_parser.add_argument(
+        "--page", required=True, type=int, metavar="N",
+        help="Sheet number to mark.")
+    rescan_mark_parser.add_argument(
+        "--reason", default="",
+        help="Why the sheet is marked (stored and logged).")
+    rescan_mark_parser.set_defaults(handler=_cmd_mark_rescan)
+
+    rescan_unmark_parser = commands.add_parser(
+        "unmark-rescan",
+        help="Remove the needs_rescan mark (idempotent, audited).")
+    rescan_unmark_parser.add_argument("store_path", help="SQLite graph file.")
+    rescan_unmark_parser.add_argument(
+        "--document", required=True, metavar="ИМЯ",
+        help="Exact document name.")
+    rescan_unmark_parser.add_argument(
+        "--page", required=True, type=int, metavar="N",
+        help="Sheet number to unmark.")
+    rescan_unmark_parser.add_argument(
+        "--reason", default="",
+        help="Why the mark is removed (appended to the 'manual: снято' "
+             "reason, protecting from auto re-marking).")
+    rescan_unmark_parser.set_defaults(handler=_cmd_unmark_rescan)
+
+    service_mark_parser = commands.add_parser(
+        "mark-service",
+        help="Mark a sheet service page (stamp/divider list, audited).")
+    service_mark_parser.add_argument("store_path", help="SQLite graph file.")
+    service_mark_parser.add_argument(
+        "--document", required=True, metavar="ИМЯ",
+        help="Exact document name (as stored in pages).")
+    service_mark_parser.add_argument(
+        "--page", required=True, type=int, metavar="N",
+        help="Sheet number to mark.")
+    service_mark_parser.add_argument(
+        "--reason", default="",
+        help="Why the sheet is marked (stored and logged).")
+    service_mark_parser.set_defaults(handler=_cmd_mark_service)
+
+    service_unmark_parser = commands.add_parser(
+        "unmark-service",
+        help="Remove the is_service mark (idempotent, audited).")
+    service_unmark_parser.add_argument("store_path", help="SQLite graph file.")
+    service_unmark_parser.add_argument(
+        "--document", required=True, metavar="ИМЯ",
+        help="Exact document name.")
+    service_unmark_parser.add_argument(
+        "--page", required=True, type=int, metavar="N",
+        help="Sheet number to unmark.")
+    service_unmark_parser.add_argument(
+        "--reason", default="",
+        help="Why the mark is removed (appended to the 'manual: снято' "
+             "reason, protecting from auto re-marking).")
+    service_unmark_parser.set_defaults(handler=_cmd_unmark_service)
 
     args = parser.parse_args(argv)
     return args.handler(args)

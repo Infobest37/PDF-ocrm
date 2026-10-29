@@ -11,7 +11,8 @@ logger = logging.getLogger(__name__)
 #: Current schema version. Additive changes (new ``CREATE TABLE IF NOT
 #: EXISTS`` tables) are applied on every open; :class:`Store` bumps the
 #: recorded version of older databases to this value (see __init__).
-SCHEMA_VERSION = 3
+#: v4 (card 0.2, 29.10.2026): pages gains needs_rescan/is_service triplets.
+SCHEMA_VERSION = 4
 
 
 class Store:
@@ -108,6 +109,22 @@ class Store:
             ON CONFLICT (key) DO NOTHING;
             """
         )
+        # Пометки листов 0.2 (миграция 3→4): аддитивные колонки на pages —
+        # needs_rescan (повреждённый OCR) и is_service (служебная страница),
+        # каждая с причиной и score; вручную и авто управляются методами ниже.
+        page_columns = {row[1] for row in self._connection.execute(
+            "PRAGMA table_info(pages)")}
+        for column, decl in (
+            ("needs_rescan", "INTEGER NOT NULL DEFAULT 0"),
+            ("needs_rescan_reason", "TEXT NOT NULL DEFAULT ''"),
+            ("needs_rescan_score", "REAL NOT NULL DEFAULT 0.0"),
+            ("is_service", "INTEGER NOT NULL DEFAULT 0"),
+            ("is_service_reason", "TEXT NOT NULL DEFAULT ''"),
+            ("is_service_score", "REAL NOT NULL DEFAULT 0.0"),
+        ):
+            if column not in page_columns:
+                self._connection.execute(
+                    f"ALTER TABLE pages ADD COLUMN {column} {decl}")
         # Migrate on open: the additive tables above bring an old database
         # to the current shape, so its recorded version must follow —
         # otherwise meta would keep claiming a schema it no longer has.
@@ -248,6 +265,165 @@ class Store:
         return self._connection.execute(
             "SELECT document, page FROM defects ORDER BY document, page"
         ).fetchall()
+
+    def _sheet_exists(self, document: str, page: int) -> bool:
+        """Есть ли лист ``(document, page)`` в таблице pages."""
+        return self._connection.execute(
+            "SELECT 1 FROM pages WHERE document = ? AND page = ?",
+            (document, page),
+        ).fetchone() is not None
+
+    def _flag_state(self, flag: str, document: str, page: int
+                    ) -> tuple[int, float, str] | None:
+        """Текущее состояние флага листа или None, если листа нет."""
+        row = self._connection.execute(
+            f"SELECT {flag}, {flag}_score, {flag}_reason "
+            "FROM pages WHERE document = ? AND page = ?",
+            (document, page),
+        ).fetchone()
+        return None if row is None else (row[0], row[1], row[2])
+
+    def _mark_flag(self, flag: str, document: str, page: int,
+                   reason: str) -> bool:
+        """Ручная пометка одного флага.
+
+        True при первом включении или переходе auto → manual (ручная
+        причина переписывает авто и защищает лист от перепометки);
+        False, если ручная пометка уже стоит.
+        """
+        state = self._flag_state(flag, document, page)
+        if state is None:
+            raise LookupError(
+                f"mark_{flag}: no such sheet: {document!r}#{page}")
+        if state[0] == 1 and state[2].startswith("manual:"):
+            return False
+        with self._connection:
+            self._connection.execute(
+                f"UPDATE pages SET {flag} = 1, {flag}_reason = ?, "
+                f"{flag}_score = 1.0 WHERE document = ? AND page = ?",
+                (reason, document, page),
+            )
+        return True
+
+    def _unmark_flag(self, flag: str, document: str, page: int,
+                     text: str) -> bool:
+        """Снять ручным решением один флаг; True только при включённом флаге.
+
+        Причина переписывается на ``text`` («manual: снято»), чтобы авто
+        не вернул метку при пересборке: set_*_auto не трогает manual:*.
+        """
+        state = self._flag_state(flag, document, page)
+        if state is None:
+            raise LookupError(
+                f"unmark_{flag}: no such sheet: {document!r}#{page}")
+        if state[0] == 0:
+            return False
+        with self._connection:
+            self._connection.execute(
+                f"UPDATE pages SET {flag} = 0, {flag}_reason = ?, "
+                f"{flag}_score = 0.0 WHERE document = ? AND page = ?",
+                (text, document, page),
+            )
+        return True
+
+    def _set_auto_flag(self, flag: str, document: str, page: int,
+                       score: float, reason: str) -> bool:
+        """Авто-пометка при build: auto переписывается, manual — нет.
+
+        Возвращает True, только если флаг был выключен или состояние было
+        другое (auto → auto). Причина «manual: ...» неприкосновенна.
+        """
+        state = self._flag_state(flag, document, page)
+        if state is None:
+            raise LookupError(
+                f"set_{flag}_auto: no such sheet: {document!r}#{page}")
+        if state[2].startswith("manual:"):
+            return False
+        if state == (1, score, reason):
+            return False
+        with self._connection:
+            self._connection.execute(
+                f"UPDATE pages SET {flag} = 1, {flag}_reason = ?, "
+                f"{flag}_score = ? WHERE document = ? AND page = ?",
+                (reason, score, document, page),
+            )
+        return True
+
+    def mark_rescan(self, document: str, page: int, reason: str) -> bool:
+        """Пометить лист повреждённым (needs_rescan) вручную; см. _mark_flag."""
+        return self._mark_flag("needs_rescan", document, page, reason)
+
+    def unmark_rescan(self, document: str, page: int,
+                      reason: str = "") -> bool:
+        """Снять needs_rescan; reason дописывается в причину, см. _unmark_flag."""
+        text = "manual: снято" + (f": {reason}" if reason else "")
+        return self._unmark_flag("needs_rescan", document, page, text)
+
+    def mark_service(self, document: str, page: int, reason: str) -> bool:
+        """Пометить лист служебным (is_service) вручную; см. _mark_flag."""
+        return self._mark_flag("is_service", document, page, reason)
+
+    def unmark_service(self, document: str, page: int,
+                       reason: str = "") -> bool:
+        """Снять is_service; reason дописывается в причину, см. _unmark_flag."""
+        text = "manual: снято" + (f": {reason}" if reason else "")
+        return self._unmark_flag("is_service", document, page, text)
+
+    def set_rescan_auto(self, document: str, page: int, score: float,
+                        reason: str) -> bool:
+        """Авто-пометка needs_rescan при build; см. _set_auto_flag."""
+        return self._set_auto_flag("needs_rescan", document, page,
+                                   score, reason)
+
+    def set_service_auto(self, document: str, page: int, score: float,
+                         reason: str) -> bool:
+        """Авто-пометка is_service при build; см. _set_auto_flag."""
+        return self._set_auto_flag("is_service", document, page,
+                                   score, reason)
+
+    def rescan_sheets(self) -> list[tuple[str, int]]:
+        """Листы с needs_rescan, отсортированные (очередь перескана)."""
+        return self._connection.execute(
+            "SELECT document, page FROM pages WHERE needs_rescan = 1 "
+            "ORDER BY document, page"
+        ).fetchall()
+
+    def service_sheets(self) -> list[tuple[str, int]]:
+        """Листы с is_service (включая титулы), отсортированные."""
+        return self._connection.execute(
+            "SELECT document, page FROM pages WHERE is_service = 1 "
+            "ORDER BY document, page"
+        ).fetchall()
+
+    def garbage_stats(self) -> dict[str, object]:
+        """Счётчики помеченных: {total, rescan, service, reasons}.
+
+        ``reasons`` — частоты причин обеих пометок (ручные и авто): то,
+        что попадает в отчёт для владельца.
+        """
+        total = self._connection.execute(
+            "SELECT COUNT(*) FROM pages").fetchone()[0]
+        rescan = self._connection.execute(
+            "SELECT COUNT(*) FROM pages WHERE needs_rescan = 1"
+        ).fetchone()[0]
+        service = self._connection.execute(
+            "SELECT COUNT(*) FROM pages WHERE is_service = 1"
+        ).fetchone()[0]
+        reasons: dict[str, int] = {}
+        for reason, count in self._connection.execute(
+            "SELECT needs_rescan_reason, COUNT(*) FROM pages "
+            "WHERE needs_rescan = 1 AND needs_rescan_reason <> '' "
+            "GROUP BY needs_rescan_reason"
+        ).fetchall():
+            reasons[reason] = int(count)
+        for reason, count in self._connection.execute(
+            "SELECT is_service_reason, COUNT(*) FROM pages "
+            "WHERE is_service = 1 AND is_service_reason <> '' "
+            "GROUP BY is_service_reason"
+        ).fetchall():
+            reasons[reason] = reasons.get(reason, 0) + int(count)
+        return {"total": total, "rescan": rescan, "service": service,
+                "reasons": reasons}
 
     def distinct_documents(self, limit: int = 5) -> list[str]:
         """Most recent distinct ``pages.document`` keys, descending.
@@ -417,6 +593,21 @@ class Store:
             (name,),
         ).fetchall()
 
+    def _garbage_filter(self, column_prefix: str = "") -> str:
+        """SQL-условие, скрывающее помеченные листы (карточка 0.2).
+
+        ``column_prefix``: "" для запросов прямо по таблице pages, "pg."
+        для запросов с псевдонимом. needs_rescan скрывается всегда;
+        is_service скрывается, кроме титулов каталога (причина начинается
+        с «auto: титул») — титулы несут применимость и борта (0.3).
+        Валидно и для старых баз: колонки создаются при открытии.
+        """
+        return (
+            " AND " + column_prefix + "needs_rescan = 0 AND ("
+            + column_prefix + "is_service = 0 OR "
+            + column_prefix + "is_service_reason LIKE 'auto: титул%')"
+        )
+
     def sheets_by_code(
         self,
         code: str,
@@ -438,6 +629,7 @@ class Store:
             sql += " AND aircraft_type = ?"
             args.append(aircraft_type)
         sql += self._dup_filter()
+        sql += self._garbage_filter()
         sql += " ORDER BY document, page"
         if limit is not None:
             sql += " LIMIT ?"
@@ -469,6 +661,7 @@ class Store:
             sql += " AND pg.aircraft_type = ?"
             args.append(aircraft_type)
         sql += self._dup_filter("pg.document")
+        sql += self._garbage_filter("pg.")
         sql += " GROUP BY pg.document, pg.page ORDER BY pg.document, pg.page"
         if limit is not None:
             sql += " LIMIT ?"
@@ -509,6 +702,7 @@ class Store:
             ) + ")"
             args.extend(f"%{term}%" for term in document_terms)
         sql += self._dup_filter("pg.document")
+        sql += self._garbage_filter("pg.")
         sql += " ORDER BY rank"
         if limit is not None:
             sql += " LIMIT ?"
@@ -540,6 +734,7 @@ class Store:
             ) + ")"
             args.extend(f"%{term}%" for term in document_terms)
         sql += self._dup_filter("pg.document")
+        sql += self._garbage_filter("pg.")
         sql += " ORDER BY pg.document, pg.page"
         return self._connection.execute(sql, args).fetchall()
 

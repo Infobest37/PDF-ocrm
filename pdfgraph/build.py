@@ -20,8 +20,9 @@ import re
 import sys
 
 from pdfprepare.codes import normalize_code, system_of
-from pdfprepare.models import DocResult
+from pdfprepare.models import DocResult, PageInfo
 from pdfprepare.normalize import normalize_for_search, normalize_part_number
+from pdfprepare.quality import rescan_component, service_component
 from pdfgraph.store import Store
 
 #: Longest page-text-derived label kept for codes missing from the registry.
@@ -104,6 +105,36 @@ def _system_label(code: str, registry: dict[str, str], names: dict[str, str],
     return ""
 
 
+def _mark_page_flags(store: Store, document: str, page: PageInfo) -> None:
+    """Авто-пометки листа 0.2 (пересмотр 29.10): needs_rescan/is_service.
+
+    Порядок решений (по разметке владельца 29.10):
+    1. ``is_blank`` — служебный «пустой лист»; needs_rescan не ставится
+       никогда (пустая страница — граница раздела, не дефект скана).
+    2. ``service_component`` (заглушка, разделитель, титул каталога) —
+       is_service; титул каталога остаётся в выдаче (фильтр store его не
+       скрывает), остальные три причины исключаются из веток поиска.
+    3. ``rescan_component`` (обрывочный/вырожденный длинный текст) —
+       needs_rescan, исключён из всех четырёх веток.
+    Штампы копий и листы изменений не распознаются — только ручной CLI.
+    Авто-пометка не трогает manual:* (снятия владельца переживают build).
+    """
+    if page.is_blank:
+        store.set_service_auto(document, page.page_index, 1.0,
+                               "auto: пустой лист")
+        return
+    text = page.full_text
+    service = service_component(text)
+    if service is not None:
+        store.set_service_auto(document, page.page_index, service[1],
+                               "auto: " + service[0])
+        return
+    rescan = rescan_component(text)
+    if rescan is not None:
+        store.set_rescan_auto(document, page.page_index, rescan[1],
+                              "auto: " + rescan[0])
+
+
 def build(
     results: list[DocResult],
     aircraft_type: str,
@@ -182,6 +213,7 @@ def build(
                 system_code, subsystem_code,
                 page.full_text, normalize_for_search(page.full_text),
             )
+            _mark_page_flags(store, doc_key, page)
 
             for figure in page.figures:
                 figure_id = store.add_node(
