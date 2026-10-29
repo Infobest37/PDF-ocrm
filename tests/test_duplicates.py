@@ -293,3 +293,44 @@ def test_refusal_answer_without_duplicate_documents(tmp_path):
         assert all_verified(verify_citations(answer, store))
     finally:
         store.close()
+
+
+# --- Карточка 0.1б: по каждой ветке поиска отдельно ----------------------
+
+#: Точная копия проверок из ``test_mark_filters_every_branch``, но каждая
+#: ветка — самостоятельный тест-кейс: mark_duplicate должен убрать листы
+#: дубля из этой ветки, а unmark_duplicate — вернуть исходную выдачу.
+
+
+@pytest.mark.parametrize(
+    "branch, query, penalty",
+    [
+        ("code_system", "023.00.00", 1.0),
+        ("code_subsystem", "023.11.30", 1.0),
+        ("part", "8МТ.6101.100", 1.0),
+        ("fts_and", "радиомаяк", 1.0),
+        ("fts_or", "радиомаяк гидроагрегат", 0.8),
+        ("fts_prefix", "радиом", 0.6),
+        ("trigram", "омаяк", 0.5),
+    ],
+)
+def test_branch_mark_unmark_per_branch(tmp_path, branch, query, penalty):
+    """Карточка 0.1б: mark/unmark в одной ветке — фильтр и реставрация."""
+    store = Store(str(tmp_path / "branch.db"))
+    try:
+        _fill(store)
+        base = _branch_hits(store)[branch]
+        assert abs(base[1] - penalty) < 0.05
+        assert DUP_DOC in {doc for doc, _ in base[0]}, branch
+
+        store.mark_duplicate(DUP_DOC, CAN_DOC)
+        marked = _branch_hits(store)[branch]
+        assert marked[0]
+        assert DUP_DOC not in {doc for doc, _ in marked[0]}, branch
+        assert {doc for doc, _ in marked[0]} <= {CAN_DOC}
+
+        store.unmark_duplicate(DUP_DOC)
+        restored = _branch_hits(store)[branch]
+        assert restored == base, branch
+    finally:
+        store.close()
