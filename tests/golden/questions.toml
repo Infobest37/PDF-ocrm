@@ -1,0 +1,349 @@
+# Золотой набор — карточка 0.1 (Фаза 0). 30 вопросов: по 10 в каждом
+# mode (explain | fault | procedure).
+#
+# Формат TOML по согласованию владельца: читается стандартным tomllib
+# (Python 3.12); pyyaml НЕ добавляется.
+#
+# Поля записи (все обязательны): id, mode, status, question,
+# aircraft_type, ata, expected_doc, expected_pages, notes.
+# status:
+#   "todo"  — заглушка: владелец заполняет expected_doc/expected_pages
+#             (по 4–5 на документ); в метриках НЕ считается,
+#             в отчёте перечисляется отдельным блоком.
+#   "ready" — эталон с подтверждёнными ожиданиями (док. tests_manual.md,
+#             сессионные прогоны CLI, превью содержимого страниц).
+#   Внекорпусный вопрос: status = "ready" с ПУСТЫМИ expected_pages и
+#   пустым expected_doc — «должен отказать» (ждаём refuse, а не листы).
+# expected_pages — нумерация листов, какую печатает CLI ``ask`` и
+# которую хранит граф (столбец pages.page).
+# ata — код системы/подсистемы ATA-100; пустая строка, если не задан.
+
+[[question]]
+id = "e01"
+mode = "explain"
+status = "ready"
+question = "давление масла при прогреве двигателя"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = "Двигатель ТВ3-117 078.00.5700 РЭ1 книга_1 (изм. от 05.03.2026).pdf"
+expected_pages = [38]
+notes = "Прогон CLI 2026-10-28 (цитаты 3/3); в листе 072.00.00 есть «при прогреве» и «малого газа»."
+
+[[question]]
+id = "e02"
+mode = "explain"
+status = "ready"
+question = "как распределяется топливо в топливной системе двигателя"
+aircraft_type = "Ми-8МТВ"
+ata = "028"
+expected_doc = "Руководство по технической эксплуатации РТЭ Ми-8МТВ-1 кн. 3 (изм. от 13.12.2024).pdf"
+expected_pages = [284]
+notes = "028.20.00 стр. 1 «РАСПРЕДЕЛЕНИЕ ТОПЛИВА - ОПИСАНИЕ И РАБОТА»; в tests_manual.md №5 фигурировала соседняя техокарта (стр. 209/210)."
+
+[[question]]
+id = "e03"
+mode = "explain"
+status = "ready"
+question = "что входит в дублирующую гидросистему вертолёта"
+aircraft_type = "Ми-8МТВ"
+ata = "029"
+expected_doc = "Руководство по технической эксплуатации РТЭ Ми-8МТВ-1 кн. 3 (изм. от 13.12.2024).pdf"
+expected_pages = [389, 454]
+notes = "389: 029.00.00 стр. 4 «А - Дублирующая гидросистема»; 454: карта 029.10.00."
+
+[[question]]
+id = "e04"
+mode = "explain"
+status = "ready"
+question = "какие работы по несущему винту описаны в разделе 065.50 РТЭ"
+aircraft_type = "Ми-8МТВ"
+ata = "065"
+expected_doc = "Руководство по технической эксплуатации РТЭ Ми-8МТВ-1 кн. 2 (изм. от 13.12.2024).pdf"
+expected_pages = [724]
+notes = "065.50.00 стр. 217, карта РО; tests_manual.md №2 (несущий винт)."
+
+[[question]]
+id = "e05"
+mode = "explain"
+status = "ready"
+question = "как устроена система охлаждения IV опоры двигателя ТВ3-117"
+aircraft_type = "Ми-8МТВ"
+ata = "148"
+expected_doc = "Каталок деталей и сборочных едениц КДЭ_Ми-8МТВ-1_книга_2 (файл 02.02.2022).pdf"
+expected_pages = [632, 621]
+notes = "632: «Рис. 3 Охлаждение IV опоры ТВ3-117» (148.10.00), 621: 148-СОДЕРЖАНИЕ; tests_manual.md №1. РТЭ кн.4 стр. 172 ожиданиям не ставился."
+
+[[question]]
+id = "e06"
+mode = "explain"
+status = "ready"
+question = "что изменяет дополнение к РТЭ по анероидно-мембранным приборам (118.00)"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = "Доп. к РТЭ Д-1594 кн. 2 вертолетов 22810 228811 24543 24543.pdf"
+expected_pages = [6, 160]
+notes = "6: титул/перечень изменений (024.00.00); 160: АМП, 034.00.00, 118.00-F9. Сниппетам Д-1638 стр. 292 ожидания не ставятся (ограничение сниппетов «СОДЕРЖАНИЕ»)."
+
+[[question]]
+id = "e07"
+mode = "explain"
+status = "todo"
+question = "радиомаяк"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Кейс уточняющего вопроса (ПАРМ, план графа знаний): заполнить после механизма уточнений; сейчас ожидания не заданы."
+
+[[question]]
+id = "e08"
+mode = "explain"
+status = "todo"
+question = "какая подготовка и запуск ВСУ АИ-9В"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Заполнить по «Вспомогательной силовой установки РЭ и ТО АИ-9В (изм. 10 от 31.05.2018).pdf» — 158 л."
+
+[[question]]
+id = "e09"
+mode = "explain"
+status = "todo"
+question = "какой ток и мощность генераторов ГТ40ПЧ8Б"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Заполнить по «Генераторы ГТ40ПЧ8Б ГТ40ПЧ8В РТЭ (изм. 10 от 29.02.2012)_OCR.pdf» — 55 л."
+
+[[question]]
+id = "e10"
+mode = "explain"
+status = "todo"
+question = "из каких узлов состоит редуктор ВР-14"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Заполнить по «Редуктор ВР-14_7871 РЭ (изм. 17 от 10.09.2021).pdf» — 120 л."
+
+[[question]]
+id = "f01"
+mode = "fault"
+status = "ready"
+question = "почему возникает тряска при работе несущего винта с включённым автопилотом"
+aircraft_type = "Ми-8МТВ"
+ata = "065"
+expected_doc = "Каталог дефектов Ми-8МТВ кн. 1 (ПиД) (изм. 1 от 25.05.2010).pdf"
+expected_pages = [52]
+notes = "065.10.01 НЕСУЩИЙ ВИНТ: «ТРЯСКА ВЕРТОЛЕТА ПРИ РАБОТЕ НЕСУЩЕГО ВИНТА (АВТОПИЛОТ ВКЛЮЧЕН)»; tests_manual.md №2."
+
+[[question]]
+id = "f02"
+mode = "fault"
+status = "ready"
+question = "двигатель не увеличивает частоту вращения ротора ТК выше малого газа"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = "Двигатель ТВ3-117 078.00.5700 РЭ1 книга_1 (изм. от 05.03.2026).pdf"
+expected_pages = [44]
+notes = "2.7 «Двигатель не увеличивает частоту вращения ротора ТК выше режима малого газа» (отыскание неисправностей)."
+
+[[question]]
+id = "f03"
+mode = "fault"
+status = "todo"
+question = "двигатель перегревается — какой отказ и что делать"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = ""
+expected_pages = []
+notes = "Заполнить по РЭ1 кн.1 (отыскание и устранение неисправностей, раздел про температуру)."
+
+[[question]]
+id = "f04"
+mode = "fault"
+status = "todo"
+question = "генератор ГТ40ПЧ8 не выдаёт ток"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Заполнить по «Генераторы ГТ40ПЧ8Б ГТ40ПЧ8В РТЭ»."
+
+[[question]]
+id = "f05"
+mode = "fault"
+status = "todo"
+question = "ВСУ АИ-9В не запускается"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Заполнить по РЭ ВСУ АИ-9В (неисправности запуска)."
+
+[[question]]
+id = "f06"
+mode = "fault"
+status = "todo"
+question = "нет выхода на связь по радиостанции"
+aircraft_type = "Ми-8МТВ"
+ata = "023"
+expected_doc = ""
+expected_pages = []
+notes = "Заполнить по РЭ радиооборудования (РТЭ кн.5/АиРЭО)."
+
+[[question]]
+id = "f07"
+mode = "fault"
+status = "todo"
+question = "течь масла в системе смазки двигателя"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = ""
+expected_pages = []
+notes = "Заполнить по РЭ1 кн.1, система смазки и суфлирования; рядом лежат гр. 583/584 (система смазки, отыскание неисправностей)."
+
+[[question]]
+id = "f08"
+mode = "fault"
+status = "todo"
+question = "перегрев редуктора ВР-14"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Заполнить по «Редуктор ВР-14_7871 РЭ»."
+
+[[question]]
+id = "f09"
+mode = "fault"
+status = "todo"
+question = "сигнализатор показывает Err на приборе"
+aircraft_type = "Ми-8МТВ"
+ata = "034"
+expected_doc = ""
+expected_pages = []
+notes = "Заполнить по РЭ сигнализатора (RT-11 / СМ-24, ata 034)."
+
+[[question]]
+id = "f10"
+mode = "fault"
+status = "ready"
+question = "почему не качают стабилизацию по расходу топлива Боинг 747"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Вне корпуса — tests_manual.md №16: должен отклоняться (refusal), листов нет."
+
+[[question]]
+id = "p01"
+mode = "procedure"
+status = "ready"
+question = "порядок регулировки давления масла в системе смазки двигателя"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = "Двигатель ТВ3-117 078.00.5700 РЭ1 книга_1 (изм. от 05.03.2026).pdf"
+expected_pages = [597]
+notes = "ТК № 203/205/206: «Наименование работы: Регулировка давления масла»."
+
+[[question]]
+id = "p02"
+mode = "procedure"
+status = "ready"
+question = "прогрев редуктора после запуска без предварительного подогрева"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = "Редуктор ВР-14_7871 РЭ (изм. 17 от 10.09.2021).pdf"
+expected_pages = [75]
+notes = "Таблица «Содержание операции и технические требования»: «После запуска прогрейте редуктор на режиме...»; прогон CLI 2026-10-28."
+
+[[question]]
+id = "p03"
+mode = "procedure"
+status = "ready"
+question = "что проверить по КПВ (клапанам перепуска воздуха) при подготовке двигателя"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = "Двигатель ТВ3-117 078.00.5700-04 РЭ книга 3 (изм. от 17.09.2024).sanitized.pdf"
+expected_pages = [76]
+notes = "072.00.00, работы при отклонениях от ТТ; прогон CLI 2026-10-28."
+
+[[question]]
+id = "p04"
+mode = "procedure"
+status = "todo"
+question = "как заправить маслосистему двигателя маслом"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = ""
+expected_pages = []
+notes = "Заполнить по РЭ1 кн.1 (заправка, 072.00.00)."
+
+[[question]]
+id = "p05"
+mode = "procedure"
+status = "todo"
+question = "что проверить при внешнем осмотре вертолёта перед вылетом"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Заполнить по РЭ.РО (Д-1263/Д-1411, ежедневные работы)."
+
+[[question]]
+id = "p06"
+mode = "procedure"
+status = "todo"
+question = "порядок запуска двигателя ТВ3-117"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = ""
+expected_pages = []
+notes = "Заполнить по РЭ1 кн.1 (запуск, 072.30.00)."
+
+[[question]]
+id = "p07"
+mode = "procedure"
+status = "todo"
+question = "как опрессовать гидросистему"
+aircraft_type = "Ми-8МТВ"
+ata = "029"
+expected_doc = ""
+expected_pages = []
+notes = "Заполнить по РТЭ кн.3 (029, опрессовка)."
+
+[[question]]
+id = "p08"
+mode = "procedure"
+status = "todo"
+question = "как заменить масло в редукторе ВР-14"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Заполнить по «Редуктор ВР-14_7871 РЭ»."
+
+[[question]]
+id = "p09"
+mode = "procedure"
+status = "todo"
+question = "сколько разрешено запусков двигателя в течение дня"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = ""
+expected_pages = []
+notes = "Заполнить по РЭ1 кн.1 (ограничения по запускам)."
+
+[[question]]
+id = "p10"
+mode = "procedure"
+status = "ready"
+question = "инструкция по ремонту автомобилей ВАЗ"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Вне корпуса — tests_manual.md №18: должен отклоняться (refusal)."
