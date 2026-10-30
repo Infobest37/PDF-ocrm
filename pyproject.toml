@@ -12,6 +12,10 @@ dependencies = [
     "pytest",
     # pdfgraph.gui (task 3.2/3.3): the windowed knowledge-graph UI.
     "pyqt5",
+    # Ф1.0 (владелец одобрил): локальный офлайн-векторный канал.
+    # Только ONNX Runtime + токенизатор; ни torch, ни transformers.
+    "onnxruntime",
+    "tokenizers",
 ]
 
 [project.optional-dependencies]

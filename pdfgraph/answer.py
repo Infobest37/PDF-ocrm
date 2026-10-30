@@ -9,7 +9,14 @@ import logging
 from dataclasses import dataclass
 from typing import Protocol
 
-from pdfgraph.query import Fragment, search
+from pdfgraph.query import (
+    SNIPPET_CHARS,
+    Fragment,
+    effective_search_mode,
+    expand_continuations,
+    search,
+    vector_search,
+)
 from pdfgraph.store import Store
 
 #: Stage-2 diagnostics: the question→branch→SQL→count chain is logged in
@@ -75,6 +82,7 @@ def build_answer(
     use_rag_fusion: bool = False,
     use_synthesis: bool = False,
     llm_settings=None,
+    search_mode: str | None = None,
 ) -> Answer:
     """Retrieve evidence and construct an answer, refusing unsupported queries.
 
@@ -88,13 +96,40 @@ def build_answer(
     ``llm_settings`` and ``use_synthesis``, the answer is synthesized from the
     retrieved fragments and each citation's exact snippet is verified. The
     ``min_score`` threshold and existing positional arguments are unchanged.
+
+    ``search_mode`` переопределяет режим гибридного поиска из
+    ``PDFGRAPH_SEARCH_MODE`` (:func:`pdfgraph.query.effective_search_mode`):
+    в гибридных режимах семантические листы
+    (:func:`pdfgraph.query.vector_search`) дописываются после лексической
+    выдачи — лексические листы остаются лидерами, а пустая лексика в
+    режиме по умолчанию по-прежнему даёт отказ без вызова модели. Лист,
+    помеченный «Продолжение табл.», расширяется предыдущим листом как
+    дословным фрагментом ``kind="continuation"`` (источник цитирует
+    «листы N–N+1», когда подтверждены оба листа).
     """
     if use_rag_fusion:
         from pdfgraph.rag_fusion import rag_search
         fragments = rag_search(store, question, aircraft_type, limit=10,
-                               settings=llm_settings)
+                               settings=llm_settings, search_mode=search_mode)
     else:
+        # Лексический поиск остаётся патчабельным входом существующих
+        # тестов (они подменяют answer_module.search); векторный канал
+        # подключается по режиму поверх его хитов (Ф1.0).
         fragments = search(store, question, aircraft_type)
+        mode_now = (effective_search_mode()
+                    if search_mode is None else search_mode)
+        if mode_now != "lexical" and (mode_now == "hybrid_full" or fragments):
+            merged = list(fragments)
+            seen = {(hit.document, hit.page) for hit in merged}
+            for hit in vector_search(store, question):
+                if (hit.document, hit.page) not in seen:
+                    seen.add((hit.document, hit.page))
+                    merged.append(hit)
+            fragments = merged
+    # Лист-продолжение таблицы расширяется предыдущим листом: дословный
+    # кусок с kind="continuation" (Ф1.0). Вызывается после любой ветки
+    # поиска — к отказу (пустой список) ничего не добавляет.
+    fragments = expand_continuations(store, fragments)
     mode = "rag-fusion" if use_rag_fusion else "обычный поиск"
     synthesis_enabled = bool(
         use_synthesis and llm_settings is not None

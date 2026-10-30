@@ -1,5 +1,5 @@
-# Золотой набор — карточка 0.1 (Фаза 0) + дополнение 0.1в. 34 вопроса:
-# 11 explain | 11 fault | 12 procedure.
+# Золотой набор — карточка 0.1 (Фаза 0) + дополнение 0.1в. 45 вопросов:
+# 16 explain | 11 fault | 18 procedure (incl. 6 refusal).
 #
 # Формат TOML по согласованию владельца: читается стандартным tomllib
 # (Python 3.12); pyyaml НЕ добавляется.
@@ -87,49 +87,49 @@ notes = "6: титул/перечень изменений (024.00.00); 160: А�
 [[question]]
 id = "e07"
 mode = "explain"
-status = "todo"
-question = "радиомаяк"
+status = "ready"
+question = "на какой угол поворачивается вертолёт при полном обороте ручки центровки"
 aircraft_type = "Ми-8МТВ"
-ata = ""
-expected_doc = ""
-expected_pages = []
-notes = "Кейс уточняющего вопроса (ПАРМ, план графа знаний): заполнить после механизма уточнений; сейчас ожидания не заданы."
+ata = "022.10.00"
+expected_doc = "Руководство по технической эксплуатации РТЭ Ми-8МТВ-1 кн. 7 (изм. от 24.08.2023).pdf"
+expected_pages = [20]
+notes = "10 градусов; на ручке десять делений по одному градусу"
 
 [[question]]
 id = "e08"
 mode = "explain"
-status = "todo"
-question = "какая подготовка и запуск ВСУ АИ-9В"
+status = "ready"
+question = "зачем ограничен диапазон перемещения органов управления от сигналов автопилота"
 aircraft_type = "Ми-8МТВ"
-ata = ""
-expected_doc = ""
-expected_pages = []
-notes = "Заполнить по «Вспомогательной силовой установки РЭ и ТО АИ-9В (изм. 10 от 31.05.2018).pdf» — 158 л."
+ata = "022.10.00"
+expected_doc = "Руководство по технической эксплуатации РТЭ Ми-8МТВ-1 кн. 7 (изм. от 24.08.2023).pdf"
+expected_pages = [20]
+notes = "безопасность при отказе автопилота: односторонний сигнал и быстрое отклонение органов управления"
 
 [[question]]
 id = "e09"
 mode = "explain"
-status = "todo"
-question = "какой ток и мощность генераторов ГТ40ПЧ8Б"
+status = "ready"
+question = "в каких пределах перемещаются штоки комбинированных гидроусилителей КАУ-115АМ при автоматической стабилизации"
 aircraft_type = "Ми-8МТВ"
-ata = ""
-expected_doc = ""
-expected_pages = []
-notes = "Заполнить по «Генераторы ГТ40ПЧ8Б ГТ40ПЧ8В РТЭ (изм. 10 от 29.02.2012)_OCR.pdf» — 55 л."
+ata = "022.10.00"
+expected_doc = "Руководство по технической эксплуатации РТЭ Ми-8МТВ-1 кн. 7 (изм. от 24.08.2023).pdf"
+expected_pages = [20]
+notes = "20 процентов полного хода; ручки управления остаются неподвижными, фиксируются пружинными механизмами загрузки"
 
 [[question]]
 id = "e10"
 mode = "explain"
-status = "todo"
-question = "из каких узлов состоит редуктор ВР-14"
+status = "ready"
+question = "какой элемент редуктора выполняет роль маслобака"
 aircraft_type = "Ми-8МТВ"
-ata = ""
-expected_doc = ""
-expected_pages = []
-notes = "Заполнить по «Редуктор ВР-14_7871 РЭ (изм. 17 от 10.09.2021).pdf» — 120 л."
+ata = "84.10.00"
+expected_doc = "Редуктор ВР-14_7871 РЭ (изм. 17 от 10.09.2021).pdf"
+expected_pages = [23]
+notes = "поддон — маслосборник и маслобак; к его нижней части крепится масляный агрегат; маслосистема независима от двигателя"
 
 [[question]]
-id = "f01"
+id = "f11"
 mode = "fault"
 status = "ready"
 question = "почему возникает тряска при работе несущего винта с включённым автопилотом"
@@ -140,7 +140,7 @@ expected_pages = [52]
 notes = "065.10.01 НЕСУЩИЙ ВИНТ: «ТРЯСКА ВЕРТОЛЕТА ПРИ РАБОТЕ НЕСУЩЕГО ВИНТА (АВТОПИЛОТ ВКЛЮЧЕН)»; tests_manual.md №2."
 
 [[question]]
-id = "f02"
+id = "f12"
 mode = "fault"
 status = "ready"
 question = "двигатель не увеличивает частоту вращения ротора ТК выше малого газа"
@@ -150,6 +150,247 @@ expected_doc = "Двигатель ТВ3-117 078.00.5700 РЭ1 книга_1 (и�
 expected_pages = [44]
 notes = "2.7 «Двигатель не увеличивает частоту вращения ротора ТК выше режима малого газа» (отыскание неисправностей)."
 
+[[question]]
+id = "e13"
+mode = "explain"
+status = "ready"
+question = "из чего состоит входной вал редуктора"
+aircraft_type = "Ми-8МТВ"
+ata = "84.10.00"
+expected_doc = "Редуктор ВР-14_7871 РЭ (изм. 17 от 10.09.2021).pdf"
+expected_pages = [23]
+notes = "ведущий вал муфты свободного хода и ведомый вал муфты; хвостовик, ролики, сепаратор и обод ведомого вала образуют муфту свободного хода"
+
+[[question]]
+id = "e14"
+mode = "explain"
+status = "ready"
+question = "для чего в приводе рессоры установлена пружина"
+aircraft_type = "Ми-8МТВ"
+ata = "84.10.00"
+expected_doc = "Редуктор ВР-14_7871 РЭ (изм. 17 от 10.09.2021).pdf"
+expected_pages = [23]
+notes = "устранение продольных колебаний рессоры, отжимает её в сторону двигателя через пяту"
+
+[[question]]
+id = "e15"
+mode = "explain"
+status = "ready"
+question = "через что передаётся крутящий момент от двигателей на входные валы редуктора"
+aircraft_type = "Ми-8МТВ"
+ata = "84.10.00"
+expected_doc = "Редуктор ВР-14_7871 РЭ (изм. 17 от 10.09.2021).pdf"
+expected_pages = [23]
+notes = "приводная рессора двигателя и сферические шлицы муфты; два входных вала в приливах передней крышки"
+
+[[question]]
+id = "e16"
+mode = "explain"
+status = "ready"
+question = "как редуктор крепится к вертолёту"
+aircraft_type = "Ми-8МТВ"
+ata = "84.10.00"
+expected_doc = "Редуктор ВР-14_7871 РЭ (изм. 17 от 10.09.2021).pdf"
+expected_pages = [23]
+notes = "к подредукторным опорам посредством пяти фланцев на силовом поясе корпуса"
+
+[[question]]
+id = "p17"
+mode = "procedure"
+status = "ready"
+question = "какая максимальная температура масла на выходе из двигателя допускается для масла Castrol 98"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = "Двигатель ТВ3-117 078.00.5700 РЭ1 книга_1 (изм. от 05.03.2026).pdf"
+expected_pages = [39]
+notes = "п. 2.3.14: плюс 150 градусов для ВЗВ, Turbonicoil 35M и Castrol 98; общий максимум плюс 160"
+
+[[question]]
+id = "e18"
+mode = "explain"
+status = "ready"
+question = "из каких корпусов состоит редуктор ВР-14"
+aircraft_type = "Ми-8МТВ"
+ata = "84.10.00"
+expected_doc = "Редуктор ВР-14_7871 РЭ (изм. 17 от 10.09.2021).pdf"
+expected_pages = [23]
+notes = "корпус вала винта, корпус редуктора, поддон, передняя крышка"
+
+[[question]]
+id = "p19"
+mode = "procedure"
+status = "ready"
+question = "какая температура воздуха на входе в воздушный стартер допускается для ВСУ SAFIR"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = "Двигатель ТВ3-117 078.00.5700 РЭ1 книга_1 (изм. от 05.03.2026).pdf"
+expected_pages = [39]
+notes = "п. 2.3.24: не более 200 градусов для SAFIR SK/G MI и ТА14; для АИ-9 и АИ-9В от минус 60 до 180"
+
+[[question]]
+id = "f20"
+mode = "fault"
+status = "ready"
+question = "почему не качают стабилизацию по расходу топлива Боинг 747"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Вне корпуса — tests_manual.md №16: должен отклоняться (refusal), листов нет."
+
+[[question]]
+id = "p21"
+mode = "procedure"
+status = "ready"
+question = "порядок регулировки давления масла в системе смазки двигателя"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = "Двигатель ТВ3-117 078.00.5700 РЭ1 книга_1 (изм. от 05.03.2026).pdf"
+expected_pages = [597]
+notes = "ТК № 203/205/206: «Наименование работы: Регулировка давления масла»."
+
+[[question]]
+id = "p22"
+mode = "procedure"
+status = "ready"
+question = "прогрев редуктора после запуска без предварительного подогрева"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = "Редуктор ВР-14_7871 РЭ (изм. 17 от 10.09.2021).pdf"
+expected_pages = [75]
+notes = "Таблица «Содержание операции и технические требования»: «После запуска прогрейте редуктор на режиме...»; прогон CLI 2026-10-28."
+
+[[question]]
+id = "p23"
+mode = "procedure"
+status = "ready"
+question = "что проверить по КПВ (клапанам перепуска воздуха) при подготовке двигателя"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = "Двигатель ТВ3-117 078.00.5700-04 РЭ книга 3 (изм. от 17.09.2024).sanitized.pdf"
+expected_pages = [76]
+notes = "072.00.00, работы при отклонениях от ТТ; прогон CLI 2026-10-28."
+
+[[question]]
+id = "p24"
+mode = "procedure"
+status = "ready"
+question = "каково минимальное время выбега ротора турбокомпрессора до полной остановки"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = "Двигатель ТВ3-117 078.00.5700 РЭ1 книга_1 (изм. от 05.03.2026).pdf"
+expected_pages = [39]
+notes = "п. 2.3.20: не менее 40 с до полной остановки, не менее 30 с до птк 5 процентов"
+
+[[question]]
+id = "p25"
+mode = "procedure"
+status = "ready"
+question = "каков максимальный расход масла двигателя"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = "Двигатель ТВ3-117 078.00.5700 РЭ1 книга_1 (изм. от 05.03.2026).pdf"
+expected_pages = [39]
+notes = "п. 2.3.15: не более 0,3 л/ч"
+
+[[question]]
+id = "p26"
+mode = "procedure"
+status = "ready"
+question = "какое давление масла должно быть на режимах выше малого газа"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = "Двигатель ТВ3-117 078.00.5700 РЭ1 книга_1 (изм. от 05.03.2026).pdf"
+expected_pages = [39]
+notes = "п. 2.3.16: (3,5 плюс-минус 0,5) кгс/см2"
+
+[[question]]
+id = "p27"
+mode = "procedure"
+status = "ready"
+question = "какое давление масла допускается при прогреве двигателя на режиме малого газа"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = "Двигатель ТВ3-117 078.00.5700 РЭ1 книга_1 (изм. от 05.03.2026).pdf"
+expected_pages = [39]
+notes = "п. 2.3.16: не более 4,8 кгс/см2 при температуре масла ниже +70"
+
+[[question]]
+id = "p28"
+mode = "procedure"
+status = "ready"
+question = "как заменить масло в редукторе ВР-14"
+aircraft_type = "Ми-8МТВ"
+ata = "84.10.00"
+expected_doc = "Редуктор ВР-14_7871 РЭ (изм. 17 от 10.09.2021).pdf"
+expected_pages = [49]
+notes = "карта 84.10.00г; полный ответ — цепочка 84.10.00б, 00ж, 00а, 00э; карта смазки — печатная стр. 30"
+
+[[question]]
+id = "p29"
+mode = "procedure"
+status = "ready"
+question = "сколько запусков двигателя разрешено выполнять подряд и какой перерыв требуется после них"
+aircraft_type = "Ми-8МТВ"
+ata = "072"
+expected_doc = "Двигатель ТВ3-117 078.00.5700 РЭ1 книга_1 (изм. от 05.03.2026).pdf"
+expected_pages = [39]
+notes = "п. 2.3.19: не более 5 подряд, между запусками не менее 1 мин, после — не менее 15 мин"
+
+[[question]]
+id = "p30"
+mode = "procedure"
+status = "ready"
+question = "инструкция по ремонту автомобилей ВАЗ"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Вне корпуса — tests_manual.md №18: должен отклоняться (refusal)."
+
+[[question]]
+id = "e31"
+mode = "explain"
+status = "ready"
+question = "какой назначенный ресурс лопастей несущего винта вертолёта Ми-26"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Вне корпуса: другой ВС (Ми-26) — должен отклоняться (refusal), листов нет."
+
+[[question]]
+id = "f32"
+mode = "fault"
+status = "ready"
+question = "какие допуски на износ тормозных колодок шасси самолёта Ту-154"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Вне корпуса: другой ВС (Ту-154) — должен отклоняться (refusal), листов нет."
+
+[[question]]
+id = "p11"
+mode = "procedure"
+status = "ready"
+question = "какие документы нужны для регистрации права собственности на вертолёт"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Вне корпуса: вне домена (юридический вопрос) — должен отклоняться (refusal), листов нет."
+
+[[question]]
+id = "p12"
+mode = "procedure"
+status = "ready"
+question = "какая погода будет завтра в Твери"
+aircraft_type = "Ми-8МТВ"
+ata = ""
+expected_doc = ""
+expected_pages = []
+notes = "Вне корпуса: вне домена (бытовая тема) — должен отклоняться (refusal), листов нет."
 [[question]]
 id = "f03"
 mode = "fault"
@@ -228,50 +469,6 @@ expected_pages = []
 notes = "Заполнить по РЭ сигнализатора (RT-11 / СМ-24, ata 034)."
 
 [[question]]
-id = "f10"
-mode = "fault"
-status = "ready"
-question = "почему не качают стабилизацию по расходу топлива Боинг 747"
-aircraft_type = "Ми-8МТВ"
-ata = ""
-expected_doc = ""
-expected_pages = []
-notes = "Вне корпуса — tests_manual.md №16: должен отклоняться (refusal), листов нет."
-
-[[question]]
-id = "p01"
-mode = "procedure"
-status = "ready"
-question = "порядок регулировки давления масла в системе смазки двигателя"
-aircraft_type = "Ми-8МТВ"
-ata = "072"
-expected_doc = "Двигатель ТВ3-117 078.00.5700 РЭ1 книга_1 (изм. от 05.03.2026).pdf"
-expected_pages = [597]
-notes = "ТК № 203/205/206: «Наименование работы: Регулировка давления масла»."
-
-[[question]]
-id = "p02"
-mode = "procedure"
-status = "ready"
-question = "прогрев редуктора после запуска без предварительного подогрева"
-aircraft_type = "Ми-8МТВ"
-ata = ""
-expected_doc = "Редуктор ВР-14_7871 РЭ (изм. 17 от 10.09.2021).pdf"
-expected_pages = [75]
-notes = "Таблица «Содержание операции и технические требования»: «После запуска прогрейте редуктор на режиме...»; прогон CLI 2026-10-28."
-
-[[question]]
-id = "p03"
-mode = "procedure"
-status = "ready"
-question = "что проверить по КПВ (клапанам перепуска воздуха) при подготовке двигателя"
-aircraft_type = "Ми-8МТВ"
-ata = "072"
-expected_doc = "Двигатель ТВ3-117 078.00.5700-04 РЭ книга 3 (изм. от 17.09.2024).sanitized.pdf"
-expected_pages = [76]
-notes = "072.00.00, работы при отклонениях от ТТ; прогон CLI 2026-10-28."
-
-[[question]]
 id = "p04"
 mode = "procedure"
 status = "todo"
@@ -314,80 +511,3 @@ ata = "029"
 expected_doc = ""
 expected_pages = []
 notes = "Заполнить по РТЭ кн.3 (029, опрессовка)."
-
-[[question]]
-id = "p08"
-mode = "procedure"
-status = "todo"
-question = "как заменить масло в редукторе ВР-14"
-aircraft_type = "Ми-8МТВ"
-ata = ""
-expected_doc = ""
-expected_pages = []
-notes = "Заполнить по «Редуктор ВР-14_7871 РЭ»."
-
-[[question]]
-id = "p09"
-mode = "procedure"
-status = "todo"
-question = "сколько разрешено запусков двигателя в течение дня"
-aircraft_type = "Ми-8МТВ"
-ata = "072"
-expected_doc = ""
-expected_pages = []
-notes = "Заполнить по РЭ1 кн.1 (ограничения по запускам)."
-
-[[question]]
-id = "p10"
-mode = "procedure"
-status = "ready"
-question = "инструкция по ремонту автомобилей ВАЗ"
-aircraft_type = "Ми-8МТВ"
-ata = ""
-expected_doc = ""
-expected_pages = []
-notes = "Вне корпуса — tests_manual.md №18: должен отклоняться (refusal)."
-
-[[question]]
-id = "e11"
-mode = "explain"
-status = "ready"
-question = "какой назначенный ресурс лопастей несущего винта вертолёта Ми-26"
-aircraft_type = "Ми-8МТВ"
-ata = ""
-expected_doc = ""
-expected_pages = []
-notes = "Вне корпуса: другой ВС (Ми-26) — должен отклоняться (refusal), листов нет."
-
-[[question]]
-id = "f11"
-mode = "fault"
-status = "ready"
-question = "какие допуски на износ тормозных колодок шасси самолёта Ту-154"
-aircraft_type = "Ми-8МТВ"
-ata = ""
-expected_doc = ""
-expected_pages = []
-notes = "Вне корпуса: другой ВС (Ту-154) — должен отклоняться (refusal), листов нет."
-
-[[question]]
-id = "p11"
-mode = "procedure"
-status = "ready"
-question = "какие документы нужны для регистрации права собственности на вертолёт"
-aircraft_type = "Ми-8МТВ"
-ata = ""
-expected_doc = ""
-expected_pages = []
-notes = "Вне корпуса: вне домена (юридический вопрос) — должен отклоняться (refusal), листов нет."
-
-[[question]]
-id = "p12"
-mode = "procedure"
-status = "ready"
-question = "какая погода будет завтра в Твери"
-aircraft_type = "Ми-8МТВ"
-ata = ""
-expected_doc = ""
-expected_pages = []
-notes = "Вне корпуса: вне домена (бытовая тема) — должен отклоняться (refusal), листов нет."

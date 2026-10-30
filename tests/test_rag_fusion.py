@@ -715,7 +715,8 @@ def test_build_answer_signature_keeps_min_score_and_appends_synthesis_options():
     assert params[5].name == "use_rag_fusion" and params[5].default is False
     assert params[6].name == "use_synthesis" and params[6].default is False
     assert params[7].name == "llm_settings" and params[7].default is None
-    assert len(names) == 8
+    assert params[8].name == "search_mode" and params[8].default is None
+    assert len(names) == 9
 
 
 def test_build_answer_true_routes_to_rag_search(fx_store, monkeypatch):

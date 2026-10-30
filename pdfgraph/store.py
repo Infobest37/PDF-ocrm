@@ -1,5 +1,6 @@
 """Persistent SQLite storage for the PDF knowledge graph."""
 
+import dataclasses
 import logging
 import sqlite3
 from datetime import datetime
@@ -12,7 +13,28 @@ logger = logging.getLogger(__name__)
 #: EXISTS`` tables) are applied on every open; :class:`Store` bumps the
 #: recorded version of older databases to this value (see __init__).
 #: v4 (card 0.2, 29.10.2026): pages gains needs_rescan/is_service triplets.
-SCHEMA_VERSION = 4
+#: v5 (карточка Ф1.0, 30.10.2026): таблица page_embeddings (векторный
+#: канал) и флаг is_continuation на pages (продолжение таблицы/фразы).
+SCHEMA_VERSION = 5
+
+
+@dataclasses.dataclass(frozen=True)
+class EmbeddingChunk:
+    """Одна векторная запись чанка одного листа (Ф1.0).
+
+    ``page_from``/``page_to`` у постраничного чанка равны ``page``; граница
+    листа для чанка непроходима, склеивание двух листов запрещено.
+    """
+
+    document: str
+    page: int
+    chunk_ix: int
+    model: str
+    dim: int
+    vec: memoryview
+    page_from: int
+    page_to: int
+    is_continuation: bool
 
 
 class Store:
@@ -125,6 +147,53 @@ class Store:
             if column not in page_columns:
                 self._connection.execute(
                     f"ALTER TABLE pages ADD COLUMN {column} {decl}")
+        # Ф1.0 (миграция 4→5): векторные чанки строго внутри одного листа
+        # (page_from == page_to == page — два листа не склеиваются) и флаг
+        # продолжения листа: таблица/фраза листа начинается на предыдущем.
+        self._connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS page_embeddings (
+                document TEXT NOT NULL,
+                page INTEGER NOT NULL,
+                chunk_ix INTEGER NOT NULL,
+                dim INTEGER NOT NULL,
+                model TEXT NOT NULL,
+                vec BLOB NOT NULL,
+                page_from INTEGER NOT NULL,
+                page_to INTEGER NOT NULL,
+                is_continuation INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (document, page, chunk_ix),
+                FOREIGN KEY (document, page)
+                    REFERENCES pages (document, page)
+                    ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_page_embeddings_page
+                ON page_embeddings (document, page);
+            """
+        )
+        page_columns = {row[1] for row in self._connection.execute(
+            "PRAGMA table_info(pages)")}
+        if "is_continuation" not in page_columns:
+            self._connection.execute(
+                "ALTER TABLE pages ADD COLUMN is_continuation "
+                "INTEGER NOT NULL DEFAULT 0")
+            page_columns.add("is_continuation")
+        # Сверка счётчиков до/после миграции (правило .clinerules 3.7):
+        # аддитивная миграция не меняет число листов и чанков.
+        before = (
+            self._connection.execute("SELECT COUNT(*) FROM pages").fetchone()[0],
+            self._connection.execute(
+                "SELECT COUNT(*) FROM page_embeddings").fetchone()[0],
+        )
+        self._connection.commit()
+        after = (
+            self._connection.execute("SELECT COUNT(*) FROM pages").fetchone()[0],
+            self._connection.execute(
+                "SELECT COUNT(*) FROM page_embeddings").fetchone()[0],
+        )
+        if before != after:
+            raise RuntimeError(
+                f"миграция схемы изменила счётчики: {before} -> {after}")
         # Migrate on open: the additive tables above bring an old database
         # to the current shape, so its recorded version must follow —
         # otherwise meta would keep claiming a schema it no longer has.
@@ -608,6 +677,47 @@ class Store:
             + column_prefix + "is_service_reason LIKE 'auto: титул%')"
         )
 
+    def searchable_pages(
+        self,
+        aircraft_type: str | None = None,
+    ) -> list[tuple[str, int]]:
+        """Sheets eligible for search, same cut-offs as the FTS branches.
+
+        Same hiding rules as :meth:`search_pages`: duplicate documents,
+        ``needs_rescan`` and service sheets (кроме титулов каталога) are
+        excluded. Used by the Ф1.0 vector index builder so it embeds only
+        what a question can ever reach.
+        """
+        sql = "SELECT document, page FROM pages WHERE 1 = 1"
+        args: list[object] = []
+        if aircraft_type is not None:
+            sql += " AND aircraft_type = ?"
+            args.append(aircraft_type)
+        sql += self._dup_filter()
+        sql += self._garbage_filter()
+        sql += " ORDER BY document, page"
+        return [(row[0], row[1]) for row in
+                self._connection.execute(sql, args).fetchall()]
+
+    def is_continuation(self, document: str, page: int) -> bool:
+        """Продолжается ли таблица/фраза листа с предыдущего листа (Ф1.0)."""
+        row = self._connection.execute(
+            "SELECT is_continuation FROM pages "
+            "WHERE document = ? AND page = ?",
+            (document, page),
+        ).fetchone()
+        return bool(row[0]) if row is not None else False
+
+    def set_page_continuation(self, document: str, page: int,
+                              value: bool = True) -> None:
+        """Пометить лист продолжением (или снять пометку); идемпотентно."""
+        with self._connection:
+            self._connection.execute(
+                "UPDATE pages SET is_continuation = ? "
+                "WHERE document = ? AND page = ?",
+                (int(bool(value)), document, page),
+            )
+
     def sheets_by_code(
         self,
         code: str,
@@ -749,3 +859,94 @@ class Store:
             "SELECT COUNT(*) FROM nodes WHERE kind = 'pending_reference'"
         ).fetchone()[0]
         return {"nodes": nodes, "edges": edges, "sheets": sheets, "pending": pending}
+
+    # ------------------------------------------------------------------
+    # Ф1.0: векторный индекс чанков (ONNX e5, полностью офлайн).
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Write one meta key (embedding config, versions)."""
+        with self._connection:
+            self._connection.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
+    def get_meta(self, key: str, default: str = "") -> str:
+        """Read one meta key; ``default`` when the key is absent."""
+        row = self._connection.execute(
+            "SELECT value FROM meta WHERE key = ?", (key,)
+        ).fetchone()
+        return row[0] if row is not None else default
+
+    def clear_embeddings(self, document: str | None = None) -> None:
+        """Drop stored chunks of one document (--rebuild) or of the whole store."""
+        with self._connection:
+            if document is None:
+                self._connection.execute("DELETE FROM page_embeddings")
+            else:
+                self._connection.execute(
+                    "DELETE FROM page_embeddings WHERE document = ?",
+                    (document,),
+                )
+
+    def put_embeddings(
+        self,
+        document: str,
+        page: int,
+        page_from: int,
+        page_to: int,
+        is_continuation: int,
+        model: str,
+        dim: int,
+        blobs: list[bytes],
+    ) -> int:
+        """Replace every chunk row of the sheet with ``blobs``; return count.
+
+        Идемпотентно: DELETE + INSERT в одной транзакции — повторная запись
+        тех же чанков не плодит строки. Текст листа и FTS не трогаются.
+        """
+        with self._connection:
+            self._connection.execute(
+                "DELETE FROM page_embeddings "
+                "WHERE document = ? AND page = ?",
+                (document, page),
+            )
+            self._connection.executemany(
+                "INSERT INTO page_embeddings ("
+                "document, page, chunk_ix, dim, model, vec, "
+                "page_from, page_to, is_continuation) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (document, page, chunk_ix, dim, model, vec,
+                     page_from, page_to, int(is_continuation))
+                    for chunk_ix, vec in enumerate(blobs)
+                ],
+            )
+        return len(blobs)
+
+    def embedded_pages(self) -> set[tuple[str, int]]:
+        """Already-embedded sheets; the index builder skips them by default."""
+        return {
+            (row[0], row[1])
+            for row in self._connection.execute(
+                "SELECT DISTINCT document, page FROM page_embeddings")
+        }
+
+    def embedding_rows(self) -> list[EmbeddingChunk]:
+        """All stored chunks, ordered; flag taken live from ``pages``."""
+        rows = self._connection.execute(
+            "SELECT e.document, e.page, e.chunk_ix, e.model, e.dim, e.vec, "
+            "e.page_from, e.page_to, "
+            "COALESCE(pg.is_continuation, e.is_continuation) "
+            "FROM page_embeddings e LEFT JOIN pages pg "
+            "ON pg.document = e.document AND pg.page = e.page "
+            "ORDER BY e.document, e.page, e.chunk_ix"
+        ).fetchall()
+        return [
+            EmbeddingChunk(
+                row[0], row[1], row[2], row[3], row[4], row[5],
+                row[6], row[7], bool(row[8]),
+            )
+            for row in rows
+        ]

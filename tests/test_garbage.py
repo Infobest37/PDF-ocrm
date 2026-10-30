@@ -184,7 +184,7 @@ def test_migration_3_to_4_adds_flag_columns(tmp_path):
         version = reopened._connection.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()[0]
-        assert version == "4"
+        assert version == "5"
         assert _page_row(reopened, "d.pdf", 1) == (0, "", 0.0, 0, "", 0.0)
     finally:
         reopened.close()

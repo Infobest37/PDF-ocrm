@@ -139,9 +139,14 @@ def test_cli_ask_refusal_json_marks_unverified(fx_prepared_dir, tmp_path, capsys
     assert "нет подтверждений в документах" in capsys.readouterr().out
 
 
-def test_cli_ask_text_prints_evidence_block(fx_prepared_dir, tmp_path, capsys):
+def test_cli_ask_text_prints_evidence_block(fx_prepared_dir, tmp_path, capsys,
+                                            monkeypatch):
     """Text mode: answer, then «Доказательства» with document/page/code, verdict."""
     from pdfgraph.cli import main
+    # Тест закрепляет лексический вид вывода CLI; векторный канал выключаем
+    # явно, чтобы тест не зависел от наличия скачанной модели e5 (Ф1.0):
+    # модель на диске добавила бы второй семантический хит («2 из 2»).
+    monkeypatch.setenv("PDFGRAPH_MODELS_DIR", str(tmp_path / "nomodel"))
     store = str(tmp_path / "g.db")
     main(["build", str(fx_prepared_dir), store, "--type", "Ми-8МТВ"])
     capsys.readouterr()

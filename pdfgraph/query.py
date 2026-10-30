@@ -20,6 +20,16 @@ Three deterministic branches, tried in order:
    question sat under ``answer.min_score=0.35``, so the graph refused all
    answers («не ищет»); the relative scale makes the threshold meaningful.
 
+4. **Semantic channel (Ф1.0)** — optional, off in the pure-lexical mode:
+   :func:`vector_search` runs cosine search over per-page e5-small ONNX
+   int8 embeddings (:mod:`pdfgraph.embedding`) and returns ``kind="semantic"``
+   fragments whose snippets are verbatim chunk slices and whose scores are
+   mapped into the exclusive band ``(0.9901, 1.0]``, so exact code/part hits
+   (``score=1.0``) stay unbeaten while genuinely weak lexical hits can be
+   reinforced. :func:`hybrid_search` merges that channel behind the three
+   branches according to ``PDFGRAPH_SEARCH_MODE``
+   (:func:`effective_search_mode`).
+
 Snippet honesty (anti-goal "не искажать документ"): ``Fragment.snippet`` is
 always a verbatim slice of the ORIGINAL stored page text —
 ``store.page_text(document, page)[char_start:char_end] == snippet`` holds for
@@ -29,6 +39,7 @@ back onto original-text offsets before the window is taken.
 """
 
 import logging
+import os
 import re
 from dataclasses import dataclass, replace
 
@@ -46,6 +57,13 @@ OR_PENALTY = 0.8
 PREFIX_PENALTY = 0.6
 #: Score multiplier for the trigram-index fallback.
 TRIGRAM_PENALTY = 0.5
+#: Environment variable selecting the hybrid search mode; read on every
+#: :func:`effective_search_mode` call, never cached.
+SEARCH_MODE_ENV = "PDFGRAPH_SEARCH_MODE"
+#: Default mode: the vector channel joins in only when the lexical branches
+#: found something (see :func:`hybrid_search`).
+DEFAULT_SEARCH_MODE = "hybrid_gated"
+_SEARCH_MODES = ("lexical", "hybrid_gated", "hybrid_full")
 _TECHCARD_QUERY_RE = re.compile(
     r"^(?:\d{2,3}\.\d{2}\.\d{2}\s*[a-zа-я]?|№?\s*\d{2,4})$",
     re.IGNORECASE,
@@ -345,3 +363,132 @@ def _by_fts(store: Store, needle: str, aircraft_type: str | None,
                   penalty * (abs(rank) / best_rank), "text", needle)
         for document, page, system_code, subsystem_code, rank in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Ф1.0: гибридный поиск — три лексические ветки плюс локальный векторный канал
+
+
+def effective_search_mode() -> str:
+    """Текущий режим гибридного поиска: ``PDFGRAPH_SEARCH_MODE`` или дефолт.
+
+    Читается при каждом вызове (без кэша). Неизвестное значение считается
+    ``DEFAULT_SEARCH_MODE``, чтобы опечатка в переменной окружения не
+    отключала отказ-инвариант и мусор-фильтр.
+    """
+    mode = os.environ.get(SEARCH_MODE_ENV, DEFAULT_SEARCH_MODE)
+    return mode if mode in _SEARCH_MODES else DEFAULT_SEARCH_MODE
+
+
+def _page_codes(store: Store, document: str, page: int) -> tuple[str, str]:
+    """Коды системы/подсистемы листа; записи нет — ('', '')."""
+    # Прямое чтение колонок pages — как в embedding.py (единый источник).
+    row = store._connection.execute(
+        "SELECT system_code, subsystem_code FROM pages "
+        "WHERE document = ? AND page = ?",
+        (document, page),
+    ).fetchone()
+    return ("", "") if row is None else (row[0], row[1])
+
+
+def vector_search(store: Store, question: str, limit: int = 10,
+                  model_dir: str | None = None) -> list[Fragment]:
+    """Семантические фрагменты «вопрос — лист» поверх чанк-векторов.
+
+    Каждый хит — дословный срез текста одного листа (границы даёт
+    :func:`pdfgraph.embedding.chunk_span`); скор отображается в полосу
+    ``(SEMANTIC_BASE_LOW, SEMANTIC_BASE_HIGH]``, чтобы точные ветки
+    (код, номер листа) оставались впереди. Хранилище без индекса даёт
+    ``[]`` без вызова модели: канал вспомогательный и отказ не поднимает.
+    """
+    from pdfgraph import embedding
+
+    hits = embedding.search_chunks(store, question, model_dir=model_dir,
+                                   limit=limit)
+    if not hits:
+        return []
+    allowed = set(store.searchable_pages())
+    fragments: list[Fragment] = []
+    seen: set[tuple[str, int]] = set()
+    for (document, page, chunk_ix), cosine in hits:
+        if (document, page) not in allowed or (document, page) in seen:
+            continue
+        seen.add((document, page))
+        text = store.page_text(document, page)
+        stripped = text.strip()
+        offset = text.find(stripped) if stripped else -1
+        if offset < 0:
+            continue
+        start, end = embedding.chunk_span(stripped, chunk_ix)
+        system_code, subsystem_code = _page_codes(store, document, page)
+        fragments.append(Fragment(
+            document=document, page=page,
+            system_code=system_code, subsystem_code=subsystem_code,
+            snippet=text[offset + start:offset + end],
+            char_start=offset + start, char_end=offset + end,
+            score=embedding.SEMANTIC_BASE_LOW
+            + (embedding.SEMANTIC_BASE_HIGH - embedding.SEMANTIC_BASE_LOW)
+            * max(0.0, min(1.0, cosine)),
+            kind="semantic",
+        ))
+    return fragments
+
+
+def hybrid_search(store: Store, question: str,
+                  aircraft_type: str | None = None, limit: int = 10,
+                  model_dir: str | None = None) -> list[Fragment]:
+    """Лексические ветки (:func:`search`) плюс векторный канал по режиму.
+
+    ``lexical`` — только лексика; ``hybrid_gated`` (дефолт) — семантические
+    листы дописываются только после непустой лексики (пустая лексика
+    ведёт к ``[]`` без вызова модели — отказ-инвариант); ``hybrid_full``
+    — векторный лист добавляется и к пустой лексике. Порядок выдачи не
+    меняется: лексические листы остаются лидерами.
+    """
+    fragments = search(store, question, aircraft_type, limit)
+    mode = effective_search_mode()
+    if mode == "lexical":
+        return fragments
+    if fragments or mode == "hybrid_full":
+        merged = list(fragments)
+        seen = {(fragment.document, fragment.page) for fragment in merged}
+        for hit in vector_search(store, question, limit=limit,
+                                 model_dir=model_dir):
+            if (hit.document, hit.page) not in seen:
+                seen.add((hit.document, hit.page))
+                merged.append(hit)
+        fragments = merged
+    return fragments
+
+
+def expand_continuations(store: Store,
+                         fragments: list[Fragment]) -> list[Fragment]:
+    """Дословный предыдущий лист для листов-продолжений таблиц.
+
+    Лист с ``is_continuation`` («Продолжение табл.») получает в хвост
+    выдачи фрагмент предыдущего листа (``kind="continuation"``, первый
+    срез исходного текста листа); порядок исходной выдачи не меняется.
+    """
+    merged = list(fragments)
+    seen = {(fragment.document, fragment.page) for fragment in merged}
+    for fragment in list(fragments):
+        document, page = fragment.document, fragment.page
+        if page <= 1 or (document, page - 1) in seen:
+            continue
+        if not store.is_continuation(document, page):
+            continue
+        text = store.page_text(document, page - 1)
+        snippet = text.strip()[:SNIPPET_CHARS]
+        if not snippet:
+            continue
+        char_start = text.find(snippet)
+        system_code, subsystem_code = _page_codes(store, document, page - 1)
+        merged.append(Fragment(
+            document=document, page=page - 1,
+            system_code=system_code, subsystem_code=subsystem_code,
+            snippet=snippet, char_start=char_start,
+            char_end=char_start + len(snippet), score=fragment.score,
+            kind="continuation",
+        ))
+        seen.add((document, page - 1))
+    return merged

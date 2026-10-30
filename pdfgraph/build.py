@@ -15,6 +15,7 @@ Raw text is never rewritten: normalizations only produce lookup *keys*, while
 evidence strings (raw cell, raw reference clause, caption) travel on edges.
 """
 
+import logging
 import os
 import re
 import sys
@@ -354,3 +355,29 @@ def mark_defects(store: Store,
             if match:
                 store.mark_defect(document, int(match.group(1)))
     return len(store.defect_sheets())
+
+
+# --------------------------------------------------------------------------
+# Ф1.0: векторный индекс при сборке графа (модель уже скачана — строим).
+
+
+def auto_embeddings(store: Store) -> dict | None:
+    """Построить чанк-векторный индекс после build (если модель доступна).
+
+    Модель не скачана — ``None`` и тихий пропуск («сборка графа важнее
+    векторов»; FileNotFoundError поднимается только в явном
+    ``emb-index``). Отчёт совместим с
+    :func:`pdfgraph.embedding.build_page_embeddings`
+    (``chunks/embedded/bumped/version``) и дополняется счётчиком
+    листов-продолжений после пересчёта флагов (Ф1.0, п. 2 дополнения).
+    """
+    from pdfgraph import embedding
+
+    embedding.write_continuation_flags(store)
+    try:
+        report = embedding.build_page_embeddings(store)
+    except FileNotFoundError:
+        return None
+    flagged = sum(1 for document, page in store.searchable_pages()
+                  if store.is_continuation(document, page))
+    return {**report, "continuation": flagged}

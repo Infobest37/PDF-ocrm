@@ -43,7 +43,12 @@ def verify_citations(answer: Answer, store: Store) -> list[CitationCheck]:
 
             fragment = answer.fragments[fragment_index]
             document, page = fragment.document, fragment.page
-            if not store.has_node("sheet", f"{document}:{page}"):
+            # Лист считается существующим, если он есть в графе или в
+            # таблице pages (store.page_text даёт "" и для пустой записи,
+            # и для отсутствующей — оба не подтверждают дословную цитату;
+            # юнит-сторы Ф1.0 строятся без узлов графа).
+            if (not store.has_node("sheet", f"{document}:{page}")
+                    and not store.page_text(document, page)):
                 checks.append(CitationCheck(
                     document=document, page=page, claim_index=claim_index,
                     ok=False, reason="лист отсутствует в графе",

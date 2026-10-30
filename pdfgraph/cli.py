@@ -13,11 +13,22 @@ Subcommands
     (``registry = {}``); with ``--registry`` but a missing file, a warning
     goes to stderr and the registry stays empty.
 
-``ask "<вопрос>" --store <path> [--type <ВС>] [--json]``
+``ask "<вопрос>" --store <path> [--type <ВС>] [--json] [--search-mode <режим>]``
     Answers through :func:`pdfgraph.answer.build_answer` and **always** reports
     the :func:`pdfgraph.verify.verify_citations` result: one line per citation
-    (document, sheet, system code) plus a verdict — how many citations were
-    confirmed, or the refusal reason.
+    (document, sheet or sheet range, system code) plus a verdict — how many
+    citations were confirmed, or the refusal reason. A cited table
+    continuation whose previous sheet is also cited prints as «листы 7–8».
+    ``--search-mode`` переопределяет режим гибридного поиска
+    (``lexical | hybrid_gated | hybrid_full``); по умолчанию берётся
+    ``PDFGRAPH_SEARCH_MODE``, иначе ``hybrid_gated``.
+
+``emb-index <store_path> [--chunk-size N] [--rebuild]``
+    Ф1.0: пересчитывает флаги «продолжение таблицы» и строит постраничный
+    чанк-векторный индекс (e5-small ONNX int8, офлайн; модель ставит
+    ``scripts/fetch_models.ps1``, каталог — ``PDFGRAPH_MODELS_DIR``).
+    Модель не найдена → печать ошибки и код 2. Идемпотентно: без
+    ``--rebuild`` уже закодированные листы не пересчитываются.
 
 Exit codes (project contract: an answer is only trustworthy with verified
 citations):
@@ -41,7 +52,12 @@ import sys
 from datetime import datetime
 
 from pdfgraph.answer import Answer, build_answer
-from pdfgraph.build import build, mark_defects, mark_flags_auto
+from pdfgraph.build import (
+    auto_embeddings,
+    build,
+    mark_defects,
+    mark_flags_auto,
+)
 from pdfgraph.paths import resolve_store_path
 from pdfgraph.store import Store
 from pdfgraph.verify import CitationCheck, all_verified, verify_citations
@@ -119,6 +135,13 @@ def _cmd_build(args: argparse.Namespace) -> int:
         defects = mark_defects(store, list(zip(paths, results)),
                                root=args.prepared_dir)
         flags = store.garbage_stats()
+        # Ф1.0: векторный индекс строится сразу после сборки, если модель
+        # уже скачана; без модели поведение build прежнее (тихий пропуск).
+        try:
+            emb_report = auto_embeddings(store)
+        except Exception as exc:  # noqa: BLE001 — сборка графа важнее векторов
+            print(f"warning: auto-embeddings skipped: {exc}", file=sys.stderr)
+            emb_report = None
     finally:
         store.close()
 
@@ -129,11 +152,24 @@ def _cmd_build(args: argparse.Namespace) -> int:
         f"rescan={flags['rescan']} service={flags['service']} "
         f"(документов: {len(results)})"
     )
+    if emb_report:
+        _safe_print(
+            f"emb: chunks={emb_report['chunks']} "
+            f"embedded={emb_report['embedded']} "
+            f"version={emb_report['version']} "
+            f"continuation={emb_report['continuation']}")
     return 0
 
 
-def _evidence_rows(answer: Answer, checks: list[CitationCheck]) -> list[dict]:
-    """One row per citation: where it points, the sheet's code and the verdict."""
+def _evidence_rows(answer: Answer, checks: list[CitationCheck],
+                   store: Store | None = None) -> list[dict]:
+    """One row per citation: where it points, the sheet's code and the verdict.
+
+    ``store`` здесь не используется: строки остаются взаимно-однозначными с
+    цитатами (счётчик «Подтверждено N из N» неизменен). Текстовый рендер
+    принимает store отдельно, чтобы лист-продолжение печатался диапазоном
+    «листы 7–8» (:func:`_print_text`); json-контракт не меняется.
+    """
     by_sheet = {(fragment.document, fragment.page): fragment
                 for fragment in answer.fragments}
     rows = []
@@ -173,17 +209,43 @@ def _print_json(answer: Answer, rows: list[dict], verified: bool) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def _print_text(answer: Answer, rows: list[dict], verified: bool) -> None:
-    """Human-readable answer: claims, «Доказательства» block, verdict."""
+def _continuation_sheet_label(store: Store, fragment, cited: set) -> str:
+    """Метка листа цитаты; лист-продолжение таблицы → «листы 7–8».
+
+    Диапазон показывается, только когда предыдущий лист тоже процитирован:
+    иначе проверенный текст принадлежит одному листу, и указание чужого
+    диапазона нарушило бы честность доказательства (Ф1.0).
+    """
+    document, page = fragment.document, fragment.page
+    shown = document or "?"
+    if (page > 1 and (document, page - 1) in cited
+            and store.is_continuation(document, page)):
+        return f"{shown} листы {page - 1}–{page}"
+    return f"{shown} лист {page}"
+
+
+def _print_text(answer: Answer, rows: list[dict], verified: bool,
+                store: Store | None = None) -> None:
+    """Human-readable answer: claims, «Доказательства» block, verdict.
+
+    С ``store`` лист-продолжение, чей предыдущий лист тоже процитирован,
+    печатается диапазоном «листы 7–8»; без ``store`` вывод прежний.
+    """
     print(f"Вопрос: {answer.question}")
     if answer.claims:
         print("Ответ:")
         for claim in answer.claims:
             print(f"  - {claim.text}")
     if rows:
+        by_sheet = {(fragment.document, fragment.page): fragment
+                    for fragment in answer.fragments}
         print("Доказательства:")
         for row in rows:
-            sheet = f"{row['document'] or '?'} лист {row['page']}"
+            fragment = by_sheet.get((row["document"], row["page"]))
+            if store is not None and fragment is not None:
+                sheet = _continuation_sheet_label(store, fragment, by_sheet)
+            else:
+                sheet = f"{row['document'] or '?'} лист {row['page']}"
             code = row["system_code"] or row["subsystem_code"] or "без кода"
             mark = "ok" if row["ok"] else "НЕ ПОДТВЕРЖДЕНА"
             line = f"  [{mark}] {sheet} код {code}"
@@ -222,17 +284,18 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     if store is None:
         return 2
     try:
-        answer = build_answer(store, args.question, args.aircraft_type)
+        answer = build_answer(store, args.question, args.aircraft_type,
+                              search_mode=args.search_mode)
         checks = verify_citations(answer, store)
     finally:
         store.close()
 
     verified = all_verified(checks) and not answer.refusal
-    rows = _evidence_rows(answer, checks)
+    rows = _evidence_rows(answer, checks, store)
     if args.as_json:
         _print_json(answer, rows, verified)
     else:
-        _print_text(answer, rows, verified)
+        _print_text(answer, rows, verified, store)
     return 0 if verified else 1
 
 
@@ -480,6 +543,56 @@ def _cmd_mark_flags_auto(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_emb_index(args: argparse.Namespace) -> int:
+    """Ф1.0: пересчитать флаги продолжений и построить индекс.
+
+    Модель не скачана (``FileNotFoundError``) или не установлен onnxruntime
+    (``ImportError``) — печать ошибки и код 2. Идемпотентно: уже закодированные
+    листы не пересчитываются без ``--rebuild``; флаги «продолжение таблицы»
+    пересчитываются всегда. Печатает счётчики чанков,
+    закодированных листов, версию индекса и число листов с продолжением.
+    """
+    from pdfgraph import embedding
+
+    store_path = pathlib.Path(resolve_store_path(args.store_path))
+    if not store_path.exists():
+        print(f"error: store not found: {args.store_path!r} "
+              "(run 'pdfgraph build' first)", file=sys.stderr)
+        return 2
+    try:
+        embedding.model_file_paths(None)
+    except FileNotFoundError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    store = _open_store(str(store_path))
+    if store is None:
+        return 2
+    try:
+        if args.chunk_size is not None and args.chunk_size <= 0:
+            print("error: --chunk-size must be a positive integer",
+                  file=sys.stderr)
+            return 2
+        embedding.write_continuation_flags(store)
+        kwargs = {}
+        if args.chunk_size is not None:
+            kwargs["chunk_size"] = args.chunk_size
+        report = embedding.build_page_embeddings(
+            store, rebuild=args.rebuild, **kwargs)
+        continuations = sum(
+            1 for document, page in store.searchable_pages()
+            if store.is_continuation(document, page))
+    except (FileNotFoundError, ImportError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        store.close()
+    _safe_print(
+        f"emb-index: chunks={report['chunks']} "
+        f"embedded={report['embedded']} version={report['version']} "
+        f"continuation={continuations}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     """Dispatch ``pdfgraph`` subcommands; return the process exit code."""
     parser = argparse.ArgumentParser(
@@ -524,6 +637,11 @@ def main(argv: list[str]) -> int:
     ask_parser.add_argument(
         "--debug", action="store_true",
         help="Log the question→branch→SQL→count chain to stderr.")
+    ask_parser.add_argument(
+        "--search-mode", dest="search_mode", default=None,
+        choices=("lexical", "hybrid_gated", "hybrid_full"),
+        help="Override the hybrid search mode for this run "
+             "(default: PDFGRAPH_SEARCH_MODE, else hybrid_gated).")
     ask_parser.set_defaults(handler=_cmd_ask)
 
     mark_parser = commands.add_parser(
@@ -621,6 +739,21 @@ def main(argv: list[str]) -> int:
         help="Re-run 0.2 auto flagging over an existing store (idempotent).")
     flags_auto_parser.add_argument("store_path", help="SQLite graph file.")
     flags_auto_parser.set_defaults(handler=_cmd_mark_flags_auto)
+
+    # Ф1.0: эмбеддинг-индекс готовой базы (офлайн, после
+    # scripts\fetch_models.ps1).
+    emb_parser = commands.add_parser(
+        "emb-index",
+        help="Build/rebuild the per-page chunk embedding index.")
+    emb_parser.add_argument("store_path", help="SQLite graph file.")
+    emb_parser.add_argument(
+        "--chunk-size", dest="chunk_size", type=int, default=None,
+        metavar="N",
+        help="Chunk size in characters (default: 600).")
+    emb_parser.add_argument(
+        "--rebuild", action="store_true",
+        help="Re-encode every sheet, ignoring the previous index.")
+    emb_parser.set_defaults(handler=_cmd_emb_index)
 
     args = parser.parse_args(argv)
     return args.handler(args)

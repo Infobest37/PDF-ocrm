@@ -37,7 +37,12 @@ from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError
 
 from pdfprepare.codes import normalize_code
-from pdfgraph.query import Fragment, search
+from pdfgraph.query import (
+    Fragment,
+    effective_search_mode,
+    search,
+    vector_search,
+)
 from pdfgraph.store import Store
 
 if TYPE_CHECKING:
@@ -254,7 +259,8 @@ def rrf_fuse(rankings: list[list[Fragment]], k: int = RRF_K) -> list[Fragment]:
 
 def rag_search(store: Store, question: str, aircraft_type: str | None = None,
                limit: int = 10,
-               settings: LLMSettings | None = None) -> list[Fragment]:
+               settings: LLMSettings | None = None,
+               search_mode: str | None = None) -> list[Fragment]:
     """Search ``question`` and its LLM paraphrases, fused with RRF.
 
     Code queries (``normalize_code`` non-empty) get exactly one ordinary
@@ -264,6 +270,15 @@ def rag_search(store: Store, question: str, aircraft_type: str | None = None,
     ``limit``. The fused rankings are truncated to ``limit``. When expansion
     falls back to the original question, the result equals ordinary
     ``search`` in fragments, order and scores.
+
+    ``search_mode`` overrides the ``PDFGRAPH_SEARCH_MODE`` mode of
+    :func:`pdfgraph.query.effective_search_mode`. In the hybrid modes the
+    semantic channel (:func:`pdfgraph.query.vector_search`) joins as an
+    extra RRF ranking whenever the mode allows it: ``hybrid_gated`` only
+    when at least one lexical ranking is non-empty (the gate keeps the
+    refusal invariant — no lexical hits means no model call),
+    ``hybrid_full`` always, ``lexical`` never. ``rrf_fuse`` never mutates
+    scores, so semantic fragments keep their ``(0.9901, 1.0]`` band.
     """
     if normalize_code(question):
         logger.debug("rag-fusion: code query %r — plain search", question)
@@ -275,6 +290,9 @@ def rag_search(store: Store, question: str, aircraft_type: str | None = None,
             queries.append(stripped)
     rankings = [search(store, query, aircraft_type, limit)
                 for query in queries]
+    mode = search_mode if search_mode is not None else effective_search_mode()
+    if mode != "lexical" and (mode == "hybrid_full" or any(rankings)):
+        rankings.append(vector_search(store, question, limit=limit))
     return rrf_fuse(rankings)[:limit]
 
 
