@@ -24,3 +24,7 @@ __pycache__/
 *.pkg
 *.pyz
 *.exe
+graph.db*
+*.db.backup*
+*.db-wal
+*.db-shm
