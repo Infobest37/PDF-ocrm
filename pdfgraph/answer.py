@@ -156,6 +156,25 @@ def build_answer(
             reason="нет подтверждений в документах",
         )
 
+    # Ф1.3б: гейты отказа по конкретике — конъюнкция включённых гейтов
+    # (ENABLED_GATES); провал хотя бы одного — отказ с указанием гейта.
+    # Лидер — первый фрагмент выдачи; поиск, слияние и verify_citations
+    # не затрагиваются (verify вызывается дальше по-прежнему).
+    from pdfgraph.gates import decide_refusal
+    gate_failures = decide_refusal(store, question, fragments)
+    if gate_failures:
+        reason = "гейты конкретики: " + "; ".join(
+            f"{failure['gate']} ({failure['detail']})"
+            for failure in gate_failures)
+        logger.debug("question=%r -> refusal (gates): %s", question, reason)
+        return Answer(
+            question=question,
+            claims=[],
+            fragments=fragments,
+            refusal=True,
+            reason=reason,
+        )
+
     if synthesis_enabled:
         from pdfgraph.rag_fusion import classify_answerability
         classification = classify_answerability(
