@@ -32,10 +32,13 @@ QUESTIONS_PATH = REPO_ROOT / "tests" / "golden" / "questions.toml"
 STORE_SOURCE = REPO_ROOT / "graph.db"
 REPORT_PATH = REPO_ROOT / "reports" / "golden_run.json"
 
-#: Метрики карточки 0.1 + doc_hit_at_5 (Ф1.1); по каждой печатается n.
+#: Метрики карточки 0.1 + doc_hit_at_5 (Ф1.1) + деление отказа
+#: (refusal_false_on_found/refusal_on_miss, Ф1.3б.1); по каждой печатается n.
+#: ``refusal_false`` остаётся сводным (смесь ложных и обязательных отказов).
 PLANNED_METRICS = (
     "hit_at_5", "doc_hit_at_5", "citation_precision",
-    "refusal_recall", "refusal_false", "latency_median_ms",
+    "refusal_recall", "refusal_false", "refusal_false_on_found",
+    "refusal_on_miss", "latency_median_ms",
 )
 
 #: Полный размер золотого набора (карточка Ф1.0: восстановлены f03–f09,
@@ -209,6 +212,34 @@ def test_refusal_false_counts_refusals_on_answerable(metrics):
     ]
     block = metrics.compute_metrics(rows)["summary"]["refusal_false"]
     assert block == {"value": 0.5, "n": 2}
+
+
+def test_refusal_split_separates_on_found_from_on_miss(metrics):
+    """Ф1.3б.1: деление отказа — как на полигоне tools/gates_polygon_f13b.py.
+
+    ``refusal_false_on_found`` — отказ при правильном листе в топ-5
+    (ложный, требование 0.00); ``refusal_on_miss`` — доля промахов, где
+    отказ отдан (обязательный); сводный ``refusal_false`` = смесь обоих.
+    Негативы (пустые ожидания) не попадают ни в on_found, ни в on_miss.
+    """
+    rows = [
+        _refusal_row("q_found_ok", "explain", refusal=False,
+                     expected_pages=[30], total_citations=3, hit=True),
+        _refusal_row("q_found_refused", "fault", refusal=True,
+                     expected_pages=[9], total_citations=0, hit=True),
+        _refusal_row("q_miss_refused", "procedure", refusal=True,
+                     expected_pages=[5], total_citations=0, hit=False),
+        _refusal_row("q_miss_answered", "explain", refusal=False,
+                     expected_pages=[7], total_citations=2, hit=False),
+        _refusal_row("e_ooc", "explain", refusal=False, expected_pages=[]),
+    ]
+    summary = metrics.compute_metrics(rows)["summary"]
+    assert summary["refusal_false_on_found"] == {"value": 0.5, "n": 2}
+    assert summary["refusal_on_miss"] == {"value": 0.5, "n": 2}
+    # Сводный смешивает оба класса: 2 отказанных из 4 корпусных.
+    assert summary["refusal_false"] == {"value": 0.5, "n": 4}
+    # Негативы остались только в refusal_recall.
+    assert summary["refusal_recall"] == {"value": 0.0, "n": 1}
 
 
 def test_refusal_rows_use_out_of_corpus_denominator_only(metrics):

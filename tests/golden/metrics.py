@@ -25,8 +25,14 @@
   ready-вопросов;
 - ``refusal_recall`` — корректно отклонённые внекорпусные / все
   внекорпусные (готовые вопросы с пустыми ожиданиями);
-- ``refusal_false`` — зря отклонённые с известным листом / все вопросы
-  с известным листом;
+- ``refusal_false_on_found`` — отказ при правильном листе в топ-5 /
+  все найденные; ложный отказ, требование 0.00 (Ф1.3б.1 — деление,
+  как на полигоне ``tools/gates_polygon_f13b.py``);
+- ``refusal_on_miss`` — отказ на промахе (правильного листа в топ-5
+  не было — отказ обязателен) / все промахи; доля выполненных;
+- ``refusal_false`` — сводный по корпусным (смесь найденных и
+  промахов); для контроля ложных отказов использовать
+  ``refusal_false_on_found`` (Ф1.3б.1);
 - ``latency_median_ms`` — медиана (build_answer + verify) по
   ready-вопросам; старт процесса и открытие БД не входят.
 """
@@ -298,6 +304,10 @@ def _bucket_metrics(subset: list[dict]) -> dict[str, dict]:
     ready = [row for row in subset if row["status"] == "ready"]
     answerable = [row for row in ready if row["expected_pages"]]
     out_of_corpus = [row for row in ready if not row["expected_pages"]]
+    # Деление отказа (Ф1.3б.1, как на полигоне gates_polygon_f13b.py):
+    # «найденные» — правильный лист в топ-5, «промахи» — его не было.
+    found = [row for row in answerable if row["hit"]]
+    missed = [row for row in answerable if row["hit"] is False]
     ok_citations = sum(1 for row in ready
                        for item in row["citations"] if item["ok"])
     total_citations = sum(len(row["citations"]) for row in ready)
@@ -317,6 +327,16 @@ def _bucket_metrics(subset: list[dict]) -> dict[str, dict]:
             "value": _ratio(sum(1 for row in out_of_corpus
                                 if row["correct_refusal"]),
                             len(out_of_corpus)), "n": len(out_of_corpus)},
+        "refusal_false_on_found": {
+            "value": _ratio(sum(1 for row in found
+                                if row["wrong_refusal"]),
+                            len(found)), "n": len(found)},
+        "refusal_on_miss": {
+            "value": _ratio(sum(1 for row in missed
+                                if row["wrong_refusal"]),
+                            len(missed)), "n": len(missed)},
+        # Сводный (как раньше): смесь on_found и on_miss; контроль
+        # ложных отказов — по refusal_false_on_found (Ф1.3б.1).
         "refusal_false": {
             "value": _ratio(sum(1 for row in answerable
                                 if row["wrong_refusal"]),
@@ -384,7 +404,8 @@ def render_table(rows: list[dict], metrics: dict[str, dict]) -> str:
               "не единица."]
     lines.append(f"{'mode':<10} {'hit_at_5':<14} "
                  f"{'doc_hit@5':<14} {'citation_prec':<14} "
-                 f"{'refus_recall':<14} {'refus_false':<14} "
+                 f"{'refus_recall':<14} {'false_found':<14} "
+                 f"{'on_miss':<14} {'refus_false(свод)':<18} "
                  f"{'median_лат':<14}")
     for mode in (*MODES, "summary"):
         block = metrics[mode]
@@ -393,7 +414,9 @@ def render_table(rows: list[dict], metrics: dict[str, dict]) -> str:
             f"{_fmt_share(block['doc_hit_at_5']):<14} "
             f"{_fmt_share(block['citation_precision']):<14} "
             f"{_fmt_share(block['refusal_recall']):<14} "
-            f"{_fmt_share(block['refusal_false']):<14} "
+            f"{_fmt_share(block['refusal_false_on_found']):<14} "
+            f"{_fmt_share(block['refusal_on_miss']):<14} "
+            f"{_fmt_share(block['refusal_false']):<18} "
             f"{_fmt_ms(block['latency_median_ms']):<14}")
     todos = [row for row in rows if row["status"] == "todo"]
     if todos:

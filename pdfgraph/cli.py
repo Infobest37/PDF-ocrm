@@ -287,15 +287,18 @@ def _cmd_ask(args: argparse.Namespace) -> int:
         answer = build_answer(store, args.question, args.aircraft_type,
                               search_mode=args.search_mode)
         checks = verify_citations(answer, store)
+        # Печать идёт до закрытия store: текстовый рендер проверяет
+        # store.is_continuation у листов-продолжений, процитированных
+        # парой «листы 7–8» (Ф1.3б.1; печать после close падала с
+        # sqlite3.ProgrammingError на закрытой БД).
+        verified = all_verified(checks) and not answer.refusal
+        rows = _evidence_rows(answer, checks, store)
+        if args.as_json:
+            _print_json(answer, rows, verified)
+        else:
+            _print_text(answer, rows, verified, store)
     finally:
         store.close()
-
-    verified = all_verified(checks) and not answer.refusal
-    rows = _evidence_rows(answer, checks, store)
-    if args.as_json:
-        _print_json(answer, rows, verified)
-    else:
-        _print_text(answer, rows, verified, store)
     return 0 if verified else 1
 
 

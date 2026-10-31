@@ -158,6 +158,114 @@ def test_cli_ask_text_prints_evidence_block(fx_prepared_dir, tmp_path, capsys,
     assert "Подтверждено 1 из 1" in out
 
 
+# --- Ф1.3б.1: печать доказательств идёт до закрытия store ------------------
+
+def _write_two_adjacent_sheets(tmp_path) -> str:
+    """Schema-v2 JSON «РЭ кн.2.pdf» с двумя соседними листами одной таблицы.
+
+    Оба листа содержат полное лексическое совпадение с вопросом
+    «радиомаяк ПАРМ-406А», поэтому оба попадают в цитаты ответа
+    (проверено прогоном); это единственный известный сценарий, где
+    ``_print_text`` дотягивается до ``store.is_continuation``.
+    """
+    from pdfprepare.models import DocResult, PageInfo
+    from pdfprepare.output import write_json
+
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    result = DocResult(
+        source_path="РЭ кн.2.pdf", page_count=3,
+        pages=[
+            PageInfo(page_index=1, is_native_text=True, is_blank=False,
+                     system_code="023.00.00", subsystem_code="023.11.30",
+                     full_text=("023.11.30 АВАРИЙНЫЙ ПЕРЕНОСНОЙ РАДИОМАЯК "
+                                "ПАРМ-406А ТАБЛИЦА ПАРАМЕТРОВ "
+                                "ЧАСТОТА МОЩНОСТЬ"), words=[]),
+            PageInfo(page_index=2, is_native_text=True, is_blank=False,
+                     system_code="023.00.00", subsystem_code="023.11.30",
+                     full_text=("023.11.30 РАДИОМАЯК ПАРМ-406А ПРОДОЛЖЕНИЕ "
+                                "ТАБЛИЦЫ ЧАСТОТА МОЩНОСТЬ"), words=[]),
+        ],
+        system_names={"023.00.00": "СВЯЗНОЕ РАДИООБОРУДОВАНИЕ"},
+    )
+    write_json(result, str(prepared / ("РЭ кн.2.pdf" + ".json")))
+    return str(prepared)
+
+
+def test_cli_ask_prints_continuation_pair_before_close(tmp_path, capsys,
+                                                       monkeypatch):
+    """Оба соседних листа цитируются: обе подписи печатаются, exit 0.
+
+    До правки `_cmd_ask` закрывал store до `_print_text`: ответ с двумя
+    соседними процитированными листами падал с
+    `sqlite3.ProgrammingError: Cannot operate on a closed database`
+    в `_continuation_sheet_label → store.is_continuation`.
+    """
+    from pdfgraph.cli import main
+    from pdfgraph.store import Store
+
+    # Векторный канал выключаем явно: тест закрепляет лексический вывод
+    # и не должен зависеть от наличия скачанной модели (как в соседнем
+    # test_cli_ask_text_prints_evidence_block).
+    monkeypatch.setenv("PDFGRAPH_MODELS_DIR", str(tmp_path / "nomodel"))
+    prepared = _write_two_adjacent_sheets(tmp_path)
+    store = str(tmp_path / "g.db")
+    assert main(["build", prepared, store, "--type", "Ми-8МТВ"]) == 0
+    # Лист 2 — продолжение листа 1: подпись листа 2 должна стать «листы 1–2».
+    marker = Store(store)
+    try:
+        marker.set_page_continuation("РЭ кн.2.pdf", 2, True)
+    finally:
+        marker.close()
+
+    capsys.readouterr()
+    rc = main(["ask", "радиомаяк ПАРМ-406А", "--store", store])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "Подтверждено 2 из 2" in out
+    # Обе подписи на месте: пара диапазоном, одиночный лист — по одному.
+    assert "РЭ кн.2.pdf листы 1–2" in out
+    assert "РЭ кн.2.pdf лист 1" in out
+
+
+def test_cli_ask_closes_store_only_after_printing(tmp_path, capsys,
+                                                  monkeypatch):
+    """store закрыт ПОСЛЕ печати, а не до: в момент `_print_text` он жив.
+
+    Фиксирует порядок операций: spy печатает при открытом соединении
+    (SELECT 1 проходит), а после возврата из main соединение закрыто.
+    """
+    import sqlite3
+
+    import pdfgraph.cli as cli
+    import pytest
+    from pdfgraph.store import Store
+
+    monkeypatch.setenv("PDFGRAPH_MODELS_DIR", str(tmp_path / "nomodel"))
+    prepared = _write_two_adjacent_sheets(tmp_path)
+    store = str(tmp_path / "g.db")
+    assert cli.main(["build", prepared, store, "--type", "Ми-8МТВ"]) == 0
+    marker = Store(store)
+    try:
+        marker.set_page_continuation("РЭ кн.2.pdf", 2, True)
+    finally:
+        marker.close()
+
+    captured: dict = {}
+    real_print_text = cli._print_text
+
+    def spy(answer, rows, verified, store_arg=None):
+        """Печатать при живом store; запомнить соединение для проверки."""
+        store_arg._connection.execute("SELECT 1").fetchone()  # открыт ещё
+        captured["connection"] = store_arg._connection
+        real_print_text(answer, rows, verified, store_arg)
+
+    monkeypatch.setattr(cli, "_print_text", spy)
+    assert cli.main(["ask", "радиомаяк ПАРМ-406А", "--store", store]) == 0
+    with pytest.raises(sqlite3.ProgrammingError):
+        captured["connection"].execute("SELECT 1")  # закрыт после печати
+
+
 def test_cli_build_missing_registry_still_builds(fx_prepared_dir, tmp_path,
                                                  capsys):
     """Absent registry file: warn on stderr, build with empty names ({})."""
