@@ -18,6 +18,11 @@ a sheet that several phrasings agree on rises to the top. Design notes:
 * **Code queries bypass the LLM.** A normalized ATA code already selects
   exact sheets; paraphrasing adds latency and noise, so ``rag_search`` runs
   one ordinary ``search`` for them.
+* **One fusion policy (Ф1.1).** The per-variant rag_search fusion and the
+  two-channel hybrid fusion (:func:`fuse_hybrid`) share one config: ``k``
+  (:func:`effective_fusion_k`, default 10 — при k=60 первые ранги каналов
+  почти не различаются) and the exact-branch boost
+  (:func:`effective_exact_boost`, default 0.05).
 
 The module is imported lazily from :func:`pdfgraph.answer.build_answer` only
 when ``use_rag_fusion=True``, keeping the default retrieval path free of it.
@@ -27,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import time
@@ -54,7 +60,54 @@ LLM_TIMEOUT_SECONDS = 30
 DEFAULT_429_RETRY_SECONDS = 5
 OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
 #: RRF damping constant from the original paper.
+#: RRF-константа оригинальной статьи — дефолт прямых вызовов :func:`rrf_fuse`;
+#: канальное слияние Ф1.1 берёт k из :func:`effective_fusion_k`.
 RRF_K = 60
+
+#: Конфиг слияния каналов гибридного поиска (карточка Ф1.1).
+#: k слияния каналов: env старше дефолта, читается при каждом вызове;
+#: k=60 сглаживает каналы настолько, что первый и пятый ранги почти
+#: не различаются — при четырёх-пяти каналах берётся меньший k.
+FUSION_K_ENV = "PDFGRAPH_FUSION_K"
+DEFAULT_FUSION_K = 10
+#: Буст листов точной ветки (код/партномер): не тонут в семантике.
+EXACT_BOOST_ENV = "PDFGRAPH_EXACT_BOOST"
+DEFAULT_EXACT_BOOST = 0.05
+#: Виды фрагментов точных веток — чей kind получает буст.
+EXACT_KINDS = ("code", "part")
+#: Глубина выдачи КАЖДОГО канала до слияния: ранги глубже топ-N
+#: участвуют в слиянии; отсечение топ-N — только после него.
+FUSION_CHANNEL_DEPTH = 50
+
+
+def _env_float(env_name: str, default: float) -> float:
+    """Число из env при каждом вызове; мусор, inf/nan и минус — дефолт.
+
+    Стиль :func:`pdfgraph.embedding.effective_min_cosine`: правка видна
+    без перезапуска, а опечатка в переменной окружения не ломает выдачу.
+    """
+    raw = os.environ.get(env_name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    if math.isnan(value) or math.isinf(value) or value < 0.0:
+        return default
+    return value
+
+
+def effective_fusion_k() -> float:
+    """k RRF-слияния каналов: PDFGRAPH_FUSION_K, иначе
+    DEFAULT_FUSION_K."""
+    return _env_float(FUSION_K_ENV, DEFAULT_FUSION_K)
+
+
+def effective_exact_boost() -> float:
+    """Буст точных веток: PDFGRAPH_EXACT_BOOST, иначе
+    DEFAULT_EXACT_BOOST."""
+    return _env_float(EXACT_BOOST_ENV, DEFAULT_EXACT_BOOST)
 
 logger = logging.getLogger(__name__)
 
@@ -233,28 +286,58 @@ def generate_queries(question: str, n: int = 3,
     return variants
 
 
-def rrf_fuse(rankings: list[list[Fragment]], k: int = RRF_K) -> list[Fragment]:
+def rrf_fuse(rankings: list[list[Fragment]], k: int = RRF_K,
+             boost: float = 0.0,
+             boost_kinds: tuple[str, ...] = ()) -> list[Fragment]:
     """Reciprocal Rank Fusion over ``(document, page)`` keys, ranks from 1.
 
     Each key accumulates ``1 / (k + rank)`` from every ranking it appears in;
-    the result is sorted by that fused value (descending), ties keep the
-    first-seen order. The returned ``Fragment`` for a key is the original
-    instance with the maximum *search* ``.score`` — scores are never mutated
-    or replaced by RRF values.
+    keys whose fragment kind is in ``boost_kinds`` additionally gain a one-off
+    ``boost`` (карточка Ф1.1: лист точной ветки — код или партномер — не
+    должен утонуть в семантике). The result is sorted by the fused value
+    (descending); ties keep the first-seen order. The returned ``Fragment``
+    for a key is the original instance with the maximum *search* ``.score`` —
+    scores are never mutated or replaced by RRF values.
     """
     fused: dict[tuple[str, int], float] = {}
     best: dict[tuple[str, int], Fragment] = {}
+    boosted: set[tuple[str, int]] = set()
     for ranking in rankings:
         for rank, fragment in enumerate(ranking, start=1):
             key = (fragment.document, fragment.page)
             fused[key] = fused.get(key, 0.0) + 1.0 / (k + rank)
+            if boost_kinds and fragment.kind in boost_kinds:
+                boosted.add(key)
             current = best.get(key)
             if current is None or fragment.score > current.score:
                 best[key] = fragment
+    for key in boosted:
+        fused[key] += boost
     # dict iteration is insertion-ordered (first-seen) and sorted() is stable,
     # so equal fused scores keep the order in which the keys were first met.
     ordered = sorted(best, key=lambda key: -fused[key])
     return [best[key] for key in ordered]
+
+
+def fuse_hybrid(lexical: list[Fragment], vector: list[Fragment],
+                limit: int = 10) -> list[Fragment]:
+    """RRF-слияние лексического и векторного каналов до отсечения (Ф1.1).
+
+    Лексический список — ранги :func:`pdfgraph.query.search`, векторный —
+    :func:`pdfgraph.query.vector_search`; каждый канал отдаётся глубиной
+    не ниже ``FUSION_CHANNEL_DEPTH`` (выше топ-N). Слитая оценка = СУММА
+    1/(k + ранг) по каналам; ключи точной ветки (kind code/part) получают
+    буст; k = :func:`effective_fusion_k`, буст = :func:`effective_exact_boost`.
+    Скор фрагментов не перезаписывается. Отсечение топ-``limit`` — только
+    после слияния, поэтому лист встречается в топ-5, даже если он был
+    только в векторном канале.
+    """
+    if limit <= 0:
+        return []
+    fused = rrf_fuse([list(lexical), list(vector)],
+                     k=effective_fusion_k(), boost=effective_exact_boost(),
+                     boost_kinds=EXACT_KINDS)
+    return fused[:limit]
 
 
 def rag_search(store: Store, question: str, aircraft_type: str | None = None,
@@ -293,7 +376,10 @@ def rag_search(store: Store, question: str, aircraft_type: str | None = None,
     mode = search_mode if search_mode is not None else effective_search_mode()
     if mode != "lexical" and (mode == "hybrid_full" or any(rankings)):
         rankings.append(vector_search(store, question, limit=limit))
-    return rrf_fuse(rankings)[:limit]
+    # Единая политика слияния Ф1.1: k и буст точных веток из конфига.
+    return rrf_fuse(rankings, k=effective_fusion_k(),
+                    boost=effective_exact_boost(),
+                    boost_kinds=EXACT_KINDS)[:limit]
 
 
 _SYNTHESIS_SYSTEM_PROMPT = (

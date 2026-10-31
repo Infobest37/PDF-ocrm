@@ -246,6 +246,34 @@ def test_hybrid_fusion_adds_semantic_when_lexical_found(tmp_path):
         store.close()
 
 
+def test_fusion_puts_semantic_only_sheet_into_top5(tmp_path):
+    """Карточка Ф1.1: лист из семантики, которого нет в лексике, в топ-5.
+
+    Двенадцать лексических листов-«масломеров» запирают список; лист,
+    который находит только векторный канал, обязан оказаться в пятёрке
+    после RRF-слияния до отсечения (до правки он дописывался в хвост).
+    """
+    from unittest import mock
+
+    from pdfgraph import embedding, query
+
+    store = Store(str(tmp_path / "g.db"))
+    try:
+        for page in range(1, 13):
+            _add_page(store, "РЭ.pdf", page,
+                      f"Масломер механический указатель лист {page}")
+        _add_page(store, "РЭ.pdf", 41, "Расход масла фиксируется стрелкой")
+        _put_stub_embeddings(store, "РЭ.pdf", 41, [[0.1, 0.0, 0.9, 0.3]])
+        qvec = np.asarray([0.1, 0.0, 0.9, 0.3], dtype=np.float32)
+        with mock.patch.object(embedding, "query_vector", return_value=qvec):
+            hits = query.hybrid_search(store, "масломер", limit=10)
+        top5 = [(hit.document, hit.page) for hit in hits[:5]]
+        assert ("РЭ.pdf", 41) in top5
+        assert len(hits) <= 10
+    finally:
+        store.close()
+
+
 def test_refusal_invariant_with_vectors_present(tmp_path):
     """Владелец: вектор не превращает отказ в «примерный ответ»."""
     from unittest import mock

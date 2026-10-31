@@ -99,10 +99,12 @@ def build_answer(
 
     ``search_mode`` переопределяет режим гибридного поиска из
     ``PDFGRAPH_SEARCH_MODE`` (:func:`pdfgraph.query.effective_search_mode`):
-    в гибридных режимах семантические листы
-    (:func:`pdfgraph.query.vector_search`) дописываются после лексической
-    выдачи — лексические листы остаются лидерами, а пустая лексика в
-    режиме по умолчанию по-прежнему даёт отказ без вызова модели. Лист,
+    в гибридных режимах лексическая выдача и семантические листы
+    (:func:`pdfgraph.query.vector_search`) сливаются по рангам через
+    :func:`pdfgraph.rag_fusion.fuse_hybrid` (RRF; k и буст точных веток —
+    из конфига), и только после слияния отсекается топ-10; пустая
+    лексика в режиме по умолчанию по-прежнему даёт отказ без вызова
+    модели. Лист,
     помеченный «Продолжение табл.», расширяется предыдущим листом как
     дословным фрагментом ``kind="continuation"`` (источник цитирует
     «листы N–N+1», когда подтверждены оба листа).
@@ -114,18 +116,20 @@ def build_answer(
     else:
         # Лексический поиск остаётся патчабельным входом существующих
         # тестов (они подменяют answer_module.search); векторный канал
-        # подключается по режиму поверх его хитов (Ф1.0).
-        fragments = search(store, question, aircraft_type)
+        # подключается по режиму ВТОРЫМ каналом слияния (Ф1.1): RRF до
+        # отсечения, k и буст точных веток — из конфига rag_fusion,
+        # топ-10 ответа формируется только после слияния.
+        from pdfgraph.rag_fusion import FUSION_CHANNEL_DEPTH, fuse_hybrid
+
+        channel_depth = max(10, FUSION_CHANNEL_DEPTH)
+        fragments = search(store, question, aircraft_type, channel_depth)[:10]
         mode_now = (effective_search_mode()
                     if search_mode is None else search_mode)
         if mode_now != "lexical" and (mode_now == "hybrid_full" or fragments):
-            merged = list(fragments)
-            seen = {(hit.document, hit.page) for hit in merged}
-            for hit in vector_search(store, question):
-                if (hit.document, hit.page) not in seen:
-                    seen.add((hit.document, hit.page))
-                    merged.append(hit)
-            fragments = merged
+            vector_ranking = vector_search(store, question,
+                                           limit=channel_depth)
+            fragments = fuse_hybrid(fragments, vector_ranking,
+                                    limit=10)
     # Лист-продолжение таблицы расширяется предыдущим листом: дословный
     # кусок с kind="continuation" (Ф1.0). Вызывается после любой ветки
     # поиска — к отказу (пустой список) ничего не добавляет.

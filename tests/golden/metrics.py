@@ -18,6 +18,9 @@
 «n/a», правка 1):
 - ``hit_at_5`` — доля ready-вопросов с ожидаемыми листами, у которых
   хотя бы один ожидаемый лист входит в топ-5 фрагментов;
+- ``doc_hit_at_5`` — то же, но без привязки к листу: ожидаемый
+  документ (любой его лист) входит в топ-5 — индикатор №2 (Ф1.1,
+  помогает отделять промахи ранжирования от сдвига нумерации изданий);
 - ``citation_precision`` — ok-цитаты / все проверенные цитаты
   ready-вопросов;
 - ``refusal_recall`` — корректно отклонённые внекорпусные / все
@@ -263,6 +266,10 @@ def _row_for(question: GoldenQuestion, answer: Answer,
         hit = any(fragment.document == question.expected_doc
                   and fragment.page in question.expected_pages
                   for fragment in answer.fragments[:5])
+    doc_hit = None
+    if question.expect_answer:
+        doc_hit = any(fragment.document == question.expected_doc
+                      for fragment in answer.fragments[:5])
     return {
         "id": question.id, "mode": question.mode,
         "status": question.status, "question": question.question,
@@ -275,7 +282,7 @@ def _row_for(question: GoldenQuestion, answer: Answer,
         "verified": all_verified(checks) and not refusal,
         "latency_ms": round(latency_ms, 2),
         "top5": top5, "citations": citations,
-        "hit": hit,
+        "hit": hit, "doc_hit": doc_hit,
         "correct_refusal": refusal if question.expect_refusal else None,
         "wrong_refusal": refusal if question.expect_answer else None,
     }
@@ -298,6 +305,10 @@ def _bucket_metrics(subset: list[dict]) -> dict[str, dict]:
     return {
         "hit_at_5": {
             "value": _ratio(sum(1 for row in answerable if row["hit"]),
+                            len(answerable)), "n": len(answerable)},
+        "doc_hit_at_5": {
+            "value": _ratio(sum(1 for row in answerable
+                                if row.get("doc_hit")),
                             len(answerable)), "n": len(answerable)},
         "citation_precision": {
             "value": _ratio(ok_citations, total_citations),
@@ -371,17 +382,19 @@ def render_table(rows: list[dict], metrics: dict[str, dict]) -> str:
             f"{hit:<4} {cited:<5} {row['latency_ms']:>8.1f}")
     lines += ["", "Метрики: значение (n); n/a — пустой знаменатель, "
               "не единица."]
-    lines.append(f"{'mode':<10} {'hit_at_5':<18} "
-                 f"{'citation_prec':<18} {'refus_recall':<18} "
-                 f"{'refus_false':<18} {'median_лат':<18}")
+    lines.append(f"{'mode':<10} {'hit_at_5':<14} "
+                 f"{'doc_hit@5':<14} {'citation_prec':<14} "
+                 f"{'refus_recall':<14} {'refus_false':<14} "
+                 f"{'median_лат':<14}")
     for mode in (*MODES, "summary"):
         block = metrics[mode]
         lines.append(
-            f"{mode:<10} {_fmt_share(block['hit_at_5']):<18} "
-            f"{_fmt_share(block['citation_precision']):<18} "
-            f"{_fmt_share(block['refusal_recall']):<18} "
-            f"{_fmt_share(block['refusal_false']):<18} "
-            f"{_fmt_ms(block['latency_median_ms']):<18}")
+            f"{mode:<10} {_fmt_share(block['hit_at_5']):<14} "
+            f"{_fmt_share(block['doc_hit_at_5']):<14} "
+            f"{_fmt_share(block['citation_precision']):<14} "
+            f"{_fmt_share(block['refusal_recall']):<14} "
+            f"{_fmt_share(block['refusal_false']):<14} "
+            f"{_fmt_ms(block['latency_median_ms']):<14}")
     todos = [row for row in rows if row["status"] == "todo"]
     if todos:
         lines += ["", f"todo-вопросы ({len(todos)} шт.) — в метриках не "

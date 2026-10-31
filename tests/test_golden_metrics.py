@@ -32,9 +32,9 @@ QUESTIONS_PATH = REPO_ROOT / "tests" / "golden" / "questions.toml"
 STORE_SOURCE = REPO_ROOT / "graph.db"
 REPORT_PATH = REPO_ROOT / "reports" / "golden_run.json"
 
-#: Пять метрик карточки 0.1 (по каждой печатается n).
+#: Метрики карточки 0.1 + doc_hit_at_5 (Ф1.1); по каждой печатается n.
 PLANNED_METRICS = (
-    "hit_at_5", "citation_precision",
+    "hit_at_5", "doc_hit_at_5", "citation_precision",
     "refusal_recall", "refusal_false", "latency_median_ms",
 )
 

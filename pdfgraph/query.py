@@ -26,9 +26,10 @@ Three deterministic branches, tried in order:
    fragments whose snippets are verbatim chunk slices and whose scores are
    mapped into the exclusive band ``(0.9901, 1.0]``, so exact code/part hits
    (``score=1.0``) stay unbeaten while genuinely weak lexical hits can be
-   reinforced. :func:`hybrid_search` merges that channel behind the three
-   branches according to ``PDFGRAPH_SEARCH_MODE``
-   (:func:`effective_search_mode`).
+   reinforced. :func:`hybrid_search` fuses that channel with the lexical
+   ranking BY RANK (RRF; ``k`` and the exact-branch boost come from the
+   fusion config, Ф1.1) and cuts the top-N only after the fusion,
+   according to ``PDFGRAPH_SEARCH_MODE`` (:func:`effective_search_mode`).
 
 Snippet honesty (anti-goal "не искажать документ"): ``Fragment.snippet`` is
 always a verbatim slice of the ORIGINAL stored page text —
@@ -436,29 +437,36 @@ def vector_search(store: Store, question: str, limit: int = 10,
 
 def hybrid_search(store: Store, question: str,
                   aircraft_type: str | None = None, limit: int = 10,
-                  model_dir: str | None = None) -> list[Fragment]:
-    """Лексические ветки (:func:`search`) плюс векторный канал по режиму.
+                  model_dir: str | None = None,
+                  search_mode: str | None = None) -> list[Fragment]:
+    """Каналы: лексика (:func:`search`) и вектор (:func:`vector_search`).
 
-    ``lexical`` — только лексика; ``hybrid_gated`` (дефолт) — семантические
-    листы дописываются только после непустой лексики (пустая лексика
-    ведёт к ``[]`` без вызова модели — отказ-инвариант); ``hybrid_full``
-    — векторный лист добавляется и к пустой лексике. Порядок выдачи не
-    меняется: лексические листы остаются лидерами.
+    Слияние по рангам через :func:`pdfgraph.rag_fusion.fuse_hybrid`
+    (карточка Ф1.1: RRF, k и буст точных веток из конфига; отсечение
+    топ-``limit`` — только после слияния, поэтому лист, который нашла
+    только семантика, попадает в топ-5). ``lexical`` — только лексика,
+    без слияния (контроль A); ``hybrid_gated`` (дефолт) — векторный канал
+    вызывается только при непустой лексике (пустая лексика ведёт к ``[]``
+    без вызова модели — отказ-инвариант); ``hybrid_full`` — вектор
+    работает и на пустой лексике. Каждый канал отдаёт до
+    ``max(limit, FUSION_CHANNEL_DEPTH)`` листов, поэтому ранги глубже
+    топ-N участвуют в слиянии.
     """
-    fragments = search(store, question, aircraft_type, limit)
-    mode = effective_search_mode()
+    mode = (search_mode if search_mode in _SEARCH_MODES
+            else effective_search_mode())
     if mode == "lexical":
-        return fragments
-    if fragments or mode == "hybrid_full":
-        merged = list(fragments)
-        seen = {(fragment.document, fragment.page) for fragment in merged}
-        for hit in vector_search(store, question, limit=limit,
-                                 model_dir=model_dir):
-            if (hit.document, hit.page) not in seen:
-                seen.add((hit.document, hit.page))
-                merged.append(hit)
-        fragments = merged
-    return fragments
+        return search(store, question, aircraft_type, limit)
+    # Импорт по месту: rag_fusion импортирует query наверху, а чисто
+    # лексический путь не должен тянуть его на старте (замыкание цикла).
+    from pdfgraph.rag_fusion import FUSION_CHANNEL_DEPTH, fuse_hybrid
+
+    depth = max(limit, FUSION_CHANNEL_DEPTH)
+    lexical_ranking = search(store, question, aircraft_type, depth)
+    if not lexical_ranking and mode == "hybrid_gated":
+        return []  # гейт: векторный канал на пустой лексике не вызывается
+    vector_ranking = vector_search(store, question, limit=depth,
+                                   model_dir=model_dir)
+    return fuse_hybrid(lexical_ranking, vector_ranking, limit)
 
 
 def expand_continuations(store: Store,

@@ -776,6 +776,95 @@ def test_build_answer_rag_path_applies_min_score(fx_store, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Ф1.1: конфиг слияния каналов (k, буст точных веток) и fuse_hybrid
+# ---------------------------------------------------------------------------
+
+def test_effective_fusion_k_env_override_and_bad_values(monkeypatch):
+    """k слияния каналов: PDFGRAPH_FUSION_K старше дефолта 10;
+    мусор/отрицательное — дефолт; читается при каждом вызове."""
+    import pdfgraph.rag_fusion as rag_fusion
+
+    monkeypatch.delenv(rag_fusion.FUSION_K_ENV, raising=False)
+    assert rag_fusion.FUSION_K_ENV == "PDFGRAPH_FUSION_K"
+    assert rag_fusion.DEFAULT_FUSION_K == 10
+    assert rag_fusion.effective_fusion_k() == rag_fusion.DEFAULT_FUSION_K
+
+    monkeypatch.setenv(rag_fusion.FUSION_K_ENV, "3")
+    assert rag_fusion.effective_fusion_k() == 3.0
+    monkeypatch.setenv(rag_fusion.FUSION_K_ENV, "0")
+    assert rag_fusion.effective_fusion_k() == 0.0
+    for bad in ("abc", "-1", ""):
+        monkeypatch.setenv(rag_fusion.FUSION_K_ENV, bad)
+        assert rag_fusion.effective_fusion_k() == rag_fusion.DEFAULT_FUSION_K
+
+
+def test_effective_exact_boost_env_override_and_bad_values(monkeypatch):
+    """Буст точных веток: PDFGRAPH_EXACT_BOOST старше дефолта 0.05;
+    мусор/отрицательное — дефолт."""
+    import pdfgraph.rag_fusion as rag_fusion
+
+    monkeypatch.delenv(rag_fusion.EXACT_BOOST_ENV, raising=False)
+    assert rag_fusion.EXACT_BOOST_ENV == "PDFGRAPH_EXACT_BOOST"
+    assert rag_fusion.DEFAULT_EXACT_BOOST == 0.05
+    assert rag_fusion.effective_exact_boost() == rag_fusion.DEFAULT_EXACT_BOOST
+
+    monkeypatch.setenv(rag_fusion.EXACT_BOOST_ENV, "0.2")
+    assert rag_fusion.effective_exact_boost() == 0.2
+    monkeypatch.setenv(rag_fusion.EXACT_BOOST_ENV, "0")
+    assert rag_fusion.effective_exact_boost() == 0.0
+    for bad in ("abc", "-0.1", ""):
+        monkeypatch.setenv(rag_fusion.EXACT_BOOST_ENV, bad)
+        assert rag_fusion.effective_exact_boost() == rag_fusion.DEFAULT_EXACT_BOOST
+
+
+def test_rrf_fuse_exact_branch_boost_promotes_code_sheet():
+    """Лист точной ветки (kind='code') с бустом обгоняет ранг-1 лексики;
+    буст по умолчанию выключен и порядок не меняет; скоры не перезаписаны."""
+    from pdfgraph.query import Fragment
+
+    import pdfgraph.rag_fusion as rag_fusion
+
+    def code_frag(document: str, page: int) -> Fragment:
+        snippet = f"фрагмент {document} лист {page}"
+        return Fragment(document=document, page=page, system_code="075",
+                        subsystem_code="", snippet=snippet, char_start=0,
+                        char_end=len(snippet), score=1.0, kind="code")
+
+    plain = _frag("ДокА", 1, 0.9)
+    exact = code_frag("ДокБ", 2)
+    # Без буста: ДокА (1/11) впереди ДокБ (1/12) — прежнее поведение.
+    fused = rag_fusion.rrf_fuse([[plain], [exact]], k=10)
+    assert [(f.document, f.page) for f in fused] == [
+        ("ДокА", 1), ("ДокБ", 2)]
+    # С бустом: ДокБ (1/12 + 0.05) обгоняет ДокА (1/11).
+    fused = rag_fusion.rrf_fuse([[plain], [exact]], k=10,
+                                boost=0.05, boost_kinds=("code",))
+    assert [(f.document, f.page) for f in fused] == [
+        ("ДокБ", 2), ("ДокА", 1)]
+    # Экземпляр с максимальным исходным скором; RRF-значение не в score.
+    assert fused[0].score == 1.0 and fused[1].score == 0.9
+
+
+def test_fuse_hybrid_merges_before_cutoff():
+    """fuse_hybrid: семантический лист, которого нет в лексике, в топ-5;
+    итог отсечён до limit; скоры исходных фрагментов не тронуты."""
+    from pdfgraph.query import Fragment
+
+    import pdfgraph.rag_fusion as rag_fusion
+
+    lexical = [_frag("ДокА", page, 1.0) for page in range(1, 13)]
+    semantic_only = Fragment(
+        document="ДокБ", page=1, system_code="075", subsystem_code="",
+        snippet="семантический срез", char_start=0, char_end=18,
+        score=0.995, kind="semantic")
+    fused = rag_fusion.fuse_hybrid(lexical, [semantic_only], limit=10)
+    assert len(fused) == 10
+    assert [(f.document, f.page) for f in fused[:5]] is not None
+    assert semantic_only in fused[:5]
+    assert {f.kind for f in fused} == {"text", "semantic"}
+
+
+# ---------------------------------------------------------------------------
 # GUI checkbox
 # ---------------------------------------------------------------------------
 
