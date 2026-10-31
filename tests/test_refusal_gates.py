@@ -250,13 +250,15 @@ def test_default_build_answer_without_gates(store, monkeypatch):
 
 
 def test_enabled_gates_match_measured_polygon():
-    """Включённые гейты = замер полигона Ф1.3б (ноль задетых корпусных).
+    """Включённые гейты = замер + доподтверждение владельца (Ф1.3б.1).
 
     Замер 2026-10-31: numbers (3 негатива, 0 корпусных) и
-    aircraft_type (7 негативов, 0 корпусных); designators задевает
-    e04/e06, rare_term — 17 корпусных, потому оба не включены.
+    aircraft_type (7 негативов, 0 корпусных); designators замер дал
+    12 негативов при 2 задетых (e04/e06 — промахи ранжирования,
+    правильного листа в топ-5 нет), включён решением владельца после
+    приёмки; rare_term задевает 17 корпусных — не включён.
     Состав обновляется только новым замером и правкой ENABLED_GATES
     вместе с этим тестом.
     """
     assert tuple(sorted(gates.ENABLED_GATES)) == (
-        "aircraft_type", "numbers")
+        "aircraft_type", "designators", "numbers")

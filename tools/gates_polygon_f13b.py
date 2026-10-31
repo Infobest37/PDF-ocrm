@@ -9,9 +9,15 @@
 2) включение по карточке (только гейты с нулём задетых корпусных) —
    повторный прогон через :func:`pdfgraph.answer.build_answer` с
    включёнными гейтами: refusal_recall на негативах (требование
-   карточки ≥ 0.80) и refusal_false на корпусных (= 0.00). Отказ —
+   карточки ≥ 0.80), refusal_false на корпусных (= 0.00) и деление
+   отказа на «найденных» (:data:`refusal_false_on_found` — отказ при
+   правильном листе в топ-5) и «промахах» (:data:`refusal_on_miss` —
+   правильного листа в топ-5 не было, отказ обязателен). Отказ —
    конъюнкция включённых: провален хотя бы один — отказ с сообщением,
-   какой именно гейт.
+   какой именно гейт. Состав константы :data:`pdfgraph.gates.
+   ENABLED_GATES` шире замера, если владелец после приёмки добавил
+   гейт вручную (Ф1.3б.1: designators); это видно в meta
+   константного отчёта (``const_note``, ``const_matches_measurement``).
 
 Состав негативов полигона (20): 3 видимых внекорпусных золотого
 набора, 10 мутаций Ф1.3а (tools/refusal_signals.mutation_specs), 7
@@ -113,6 +119,8 @@ def assemble_polygon(extra_path: Path) -> tuple[list[dict], list[dict]]:
     corpus = [
         {"id": question.id, "question": question.question,
          "aircraft_type": question.aircraft_type, "ata": question.ata,
+         "expected_doc": question.expected_doc,
+         "expected_pages": list(question.expected_pages),
          "class": "corpus", "origin": "golden"}
         for question in questions
         if question.status == "ready" and question.expected_pages
@@ -194,18 +202,72 @@ def pass_gates_table(rows: list[dict], corpus: list[dict],
 
 def acceptance_pass(store: Store, corpus: list[dict],
                     negatives: list[dict]) -> list[dict]:
-    """Прогон приёмки на включённых гейтах (build_answer)."""
+    """Прогон приёмки на включённых гейтах (build_answer).
+
+    Для корпусных дополнительно: ``expected_found`` — правильный лист
+    (expected_doc + expected_pages) был в топ-5 выдачи; отказ на
+    «найденном» — ложный (refusal_false_on_found), отказ на «промахе» —
+    обязательный (refusal_on_miss). Негативы не имеют правильного листа
+    в принципе (found=False и в деление отказа не входят).
+    """
     rows: list[dict] = []
     for entry in [*corpus, *negatives]:
         answer = build_answer(store, entry["question"],
                               entry["aircraft_type"] or None)
-        rows.append({
+        row = {
             "id": entry["id"], "class": entry["class"],
             "question": entry["question"],
             "answer_refusal": bool(answer.refusal),
             "reason": answer.reason or "",
-        })
+            "found": expected_in_top5(answer, entry),
+        }
+        if entry["class"] == "corpus":
+            row["top5"] = [
+                f"{fragment.document}:{fragment.page}"
+                for fragment in answer.fragments[:5]]
+        rows.append(row)
     return rows
+
+
+def expected_in_top5(answer: object, entry: dict) -> bool:
+    """Правильный лист вопроса входит в топ-5 фрагментов?"""
+    expected_doc = entry.get("expected_doc") or ""
+    expected_pages = set(entry.get("expected_pages") or [])
+    if not expected_doc or not expected_pages:
+        return False
+    return any(fragment.document == expected_doc
+               and fragment.page in expected_pages
+               for fragment in answer.fragments[:5])
+
+
+def refusal_split(rows: list[dict]) -> dict:
+    """Деление отказных метрик: on_found (ложный) и on_miss (обязательный).
+
+    - ``refusal_false_on_found`` — отказ при правильном листе в топ-5;
+      требование карточки — 0.00;
+    - ``refusal_on_miss`` — отказ при отсутствии правильного листа в
+      топ-5 (отказ на промахе обязателен); доля выполненных.
+    """
+    found = [row for row in rows
+             if row["class"] == "corpus" and row["found"]]
+    missed = [row for row in rows
+              if row["class"] == "corpus" and not row["found"]]
+    false_on_found = [row for row in found if row["answer_refusal"]]
+    on_miss = [row for row in missed if row["answer_refusal"]]
+    answered_on_miss = [row for row in missed if not row["answer_refusal"]]
+
+    def ratio(numerator: int, denominator: int) -> float | None:
+        return numerator / denominator if denominator else None
+
+    return {
+        "found_corpus_n": len(found),
+        "miss_corpus_n": len(missed),
+        "refusal_false_on_found": ratio(len(false_on_found), len(found)),
+        "false_on_found_ids": [row["id"] for row in false_on_found],
+        "refusal_on_miss": ratio(len(on_miss), len(missed)),
+        "refused_on_miss_ids": [row["id"] for row in on_miss],
+        "answered_on_miss_ids": [row["id"] for row in answered_on_miss],
+    }
 
 
 def run_polygon() -> dict:
@@ -279,6 +341,7 @@ def run_polygon() -> dict:
             "missed_negatives_ids": sorted(
                 negative_ids - {row["id"] for row in refused_negatives}),
             "false_corpus_ids": [row["id"] for row in false_corpus],
+            "refusal_split": refusal_split(acceptance),
             "rows": acceptance,
         },
         "rows_measure": rows,
@@ -331,6 +394,10 @@ def run_acceptance_only() -> dict:
             "mode": "acceptance_only_prod_const",
             "enabled_gates_const": const_now,
             "enabled_by_measurement_prior": prior_decision,
+            "const_note": (
+                "константа шире замера, если designators добавлен "
+                "решением владельца (Ф1.3б.1); drift — ожидаемое "
+                "расхождение, замер не перебивался"),
             "const_matches_measurement": not drift,
             "search_mode": effective_search_mode(),
         },
@@ -344,6 +411,7 @@ def run_acceptance_only() -> dict:
                 {entry["id"] for entry in negatives}
                 - {row["id"] for row in refused_negatives}),
             "false_corpus_ids": [row["id"] for row in false_corpus],
+            "refusal_split": refusal_split(rows),
         },
         "rows_measure": rows,
     }
@@ -389,6 +457,22 @@ def render_md(payload: dict) -> str:
         f"(порог {acceptance.get('negative_recall_target', 0.80)})",
         f"refusal_false на корпусных: {acceptance['corpus_false']}",
     ]
+    split = acceptance.get("refusal_split") or {}
+    if split:
+        def _share(value) -> str:
+            return "n/a" if value is None else f"{value:.3f}"
+        lines += [
+            f"refusal_false_on_found (правильный лист был в топ-5, "
+            f"отказ ложный): {_share(split['refusal_false_on_found'])} "
+            f"(n={split['found_corpus_n']})",
+            f"refusal_on_miss (правильного листа в топ-5 не было, "
+            f"отказ обязателен): {_share(split['refusal_on_miss'])} "
+            f"(n={split['miss_corpus_n']})",
+            "Промахи с отказом: "
+            + (", ".join(split["refused_on_miss_ids"]) or "—"),
+            "Промахи с ответом (без отказа): "
+            + (", ".join(split["answered_on_miss_ids"]) or "—"),
+        ]
     if acceptance.get("missed_negatives_ids"):
         lines.append("Пропущенные негативы: "
                      + ", ".join(acceptance["missed_negatives_ids"]))
@@ -429,6 +513,12 @@ def main(argv: list[str] | None = None) -> int:
     acceptance = payload["acceptance"]
     print(f"negative_recall={acceptance['negative_recall']} "
           f"corpus_false={acceptance['corpus_false']}")
+    split = acceptance.get("refusal_split") or {}
+    if split:
+        print(f"refusal_false_on_found={split['refusal_false_on_found']} "
+              f"(n={split['found_corpus_n']}) "
+              f"refusal_on_miss={split['refusal_on_miss']} "
+              f"(n={split['miss_corpus_n']})")
     print(f"Гейты: {payload['meta'].get('enabled_gates_const', payload.get('measurement', {}).get('enabled_by_measurement'))}")  # noqa: E501
     print(f"Отчёты: {path} и {md_path}")
     return 0

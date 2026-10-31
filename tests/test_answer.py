@@ -101,6 +101,15 @@ def test_build_answer_fails_closed_on_classifier_refusal(fx_store, monkeypatch):
     from unittest.mock import Mock
 
     question = "расход топлива Боинг-747"
+    question = "расход топлива Боинг-747"
+    fragments = real_search(fx_store, "радиомаяк")[:1]
+    monkeypatch.setattr(answer_module, "search",
+                        lambda *_args, **_kwargs: fragments)
+    # Предмет теста — fail-closed контракт классификатора answerability.
+    # Гейты конкретики срабатывают раньше классификатора; включаем их
+    # после (состав ENABLED_GATES в этом тесте выключен), чтобы отказ
+    # доходил до классификатора, как до правки гейтов Ф1.3б.1.
+    monkeypatch.setattr("pdfgraph.gates.ENABLED_GATES", ())
     fragments = real_search(fx_store, "радиомаяк")[:1]
     monkeypatch.setattr(answer_module, "search",
                         lambda *_args, **_kwargs: fragments)
