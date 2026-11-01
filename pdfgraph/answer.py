@@ -119,7 +119,8 @@ def build_answer(
         # подключается по режиму ВТОРЫМ каналом слияния (Ф1.1): RRF до
         # отсечения, k и буст точных веток — из конфига rag_fusion,
         # топ-10 ответа формируется только после слияния.
-        from pdfgraph.rag_fusion import FUSION_CHANNEL_DEPTH, fuse_hybrid
+        from pdfgraph.rag_fusion import (FUSION_CHANNEL_DEPTH, fuse_hybrid,
+                                         make_specificity_fn)
 
         channel_depth = max(10, FUSION_CHANNEL_DEPTH)
         fragments = search(store, question, aircraft_type, channel_depth)[:10]
@@ -129,7 +130,9 @@ def build_answer(
             vector_ranking = vector_search(store, question,
                                            limit=channel_depth)
             fragments = fuse_hybrid(fragments, vector_ranking,
-                                    limit=10)
+                                    limit=10,
+                                    spec_fn=make_specificity_fn(
+                                        store, question))
     # Лист-продолжение таблицы расширяется предыдущим листом: дословный
     # кусок с kind="continuation" (Ф1.0). Вызывается после любой ветки
     # поиска — к отказу (пустой список) ничего не добавляет.

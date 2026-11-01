@@ -37,12 +37,19 @@ import os
 import re
 import time
 from typing import TYPE_CHECKING
+from collections.abc import Callable
 import urllib.request
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError
 
 from pdfprepare.codes import normalize_code
+from pdfgraph.gates import (
+    _designator_in_text,
+    _number_in_text,
+    question_designators,
+    question_significant_numbers,
+)
 from pdfgraph.query import (
     Fragment,
     effective_search_mode,
@@ -78,6 +85,24 @@ EXACT_KINDS = ("code", "part")
 #: Глубина выдачи КАЖДОГО канала до слияния: ранги глубже топ-N
 #: участвуют в слиянии; отсечение топ-N — только после него.
 FUSION_CHANNEL_DEPTH = 50
+#: Вес слагаемого конкретики (Ф1.5): слитая оценка листа пополняется
+#: на ``WEIGHT * specificity``, specificity = (найденные числа
+#: вопроса + найденные обозначения) / (все числа и обозначения
+#: вопроса); числа из обозначений техники исключаются тем же
+#: правилом гейтов. Дефолт 0.0 — выключено, выдача прежняя
+#: байт-в-байт; env старше дефолта, читается при каждом вызове.
+SPECIFICITY_WEIGHT_ENV = "PDFGRAPH_SPECIFICITY_WEIGHT"
+#: Значение выбрано замером сетки Ф1.5 (reports/weights_grid_f15.md):
+#: минимальный вес, дающий максимум hit_at_5 (0.6786 против 0.6429 при
+#: выключенном слагаемом), при false_on_found = 0.000 и уточнений на
+#: корпусе 0; веса 0.1 и 0.2 дают ту же метрику — берётся минимальный.
+DEFAULT_SPECIFICITY_WEIGHT = 0.05
+#: Ф1.5: слагаемое получают только верхние листы слияния (карточка:
+#: «для каждого листа топ-20»); ключи глубже не переранжируются.
+SPECIFICITY_TOP_N = 20
+#: Функция (document, page) -> доля конкретики вопроса на листе
+#: в [0.0..1.0]; вопрос без конкретики — None.
+SpecificityFn = Callable[[str, int], float]
 
 
 def _env_float(env_name: str, default: float) -> float:
@@ -108,6 +133,48 @@ def effective_exact_boost() -> float:
     """Буст точных веток: PDFGRAPH_EXACT_BOOST, иначе
     DEFAULT_EXACT_BOOST."""
     return _env_float(EXACT_BOOST_ENV, DEFAULT_EXACT_BOOST)
+
+
+def effective_specificity_weight() -> float:
+    """Вес слагаемого конкретики (Ф1.5): PDFGRAPH_SPECIFICITY_WEIGHT,
+    иначе DEFAULT_SPECIFICITY_WEIGHT."""
+    return _env_float(SPECIFICITY_WEIGHT_ENV, DEFAULT_SPECIFICITY_WEIGHT)
+
+
+def make_specificity_fn(store: Store,
+                        question: str) -> SpecificityFn | None:
+    """Функция (document, page) -> доля конкретики вопроса на листе.
+
+    Конкретика вопроса: значимые числа (вне обозначений техники —
+    то же правило, что в гейтах,
+    :func:`pdfgraph.gates.question_significant_numbers`) и
+    обозначения (:func:`pdfgraph.gates.question_designators`).
+    Доля = (найденные числа + найденные обозначения) / (все числа
+    и обозначения); вхождение проверяется правилами гейтов
+    (:func:`pdfgraph.gates._number_in_text`,
+    :func:`pdfgraph.gates._designator_in_text`) по полному тексту
+    листа. Вопрос без конкретики — ``None``: слагаемое
+    неприменимо, порядок слияния не меняется.
+    """
+    numbers = question_significant_numbers(question)
+    designators = question_designators(question)
+    total = len(numbers) + len(designators)
+    if not total:
+        return None
+
+    def specificity(document: str, page: int) -> float:
+        """Доля конкретики вопроса, найденной на листе."""
+        text = store.page_text(document, page)
+        if not text:
+            return 0.0
+        found = sum(1 for number in numbers
+                    if _number_in_text(text, number))
+        found += sum(1 for designator in designators
+                     if _designator_in_text(text, designator))
+        return found / total
+
+    return specificity
+
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +355,9 @@ def generate_queries(question: str, n: int = 3,
 
 def rrf_fuse(rankings: list[list[Fragment]], k: int = RRF_K,
              boost: float = 0.0,
-             boost_kinds: tuple[str, ...] = ()) -> list[Fragment]:
+             boost_kinds: tuple[str, ...] = (),
+             spec_weight: float = 0.0,
+             spec_fn: SpecificityFn | None = None) -> list[Fragment]:
     """Reciprocal Rank Fusion over ``(document, page)`` keys, ranks from 1.
 
     Each key accumulates ``1 / (k + rank)`` from every ranking it appears in;
@@ -313,6 +382,14 @@ def rrf_fuse(rankings: list[list[Fragment]], k: int = RRF_K,
                 best[key] = fragment
     for key in boosted:
         fused[key] += boost
+    # Ф1.5: слагаемое конкретики — только верхним SPECIFICITY_TOP_N
+    # ключам слияния; при весе 0 (или без spec_fn) блок пропускается:
+    # тексты листов не читаются и порядок прежний байт-в-байт.
+    if spec_weight > 0.0 and spec_fn is not None:
+        top = sorted(best, key=lambda key: -fused[key])[
+            :SPECIFICITY_TOP_N]
+        for key in top:
+            fused[key] += spec_weight * spec_fn(*key)
     # dict iteration is insertion-ordered (first-seen) and sorted() is stable,
     # so equal fused scores keep the order in which the keys were first met.
     ordered = sorted(best, key=lambda key: -fused[key])
@@ -320,7 +397,8 @@ def rrf_fuse(rankings: list[list[Fragment]], k: int = RRF_K,
 
 
 def fuse_hybrid(lexical: list[Fragment], vector: list[Fragment],
-                limit: int = 10) -> list[Fragment]:
+                limit: int = 10,
+                spec_fn: SpecificityFn | None = None) -> list[Fragment]:
     """RRF-слияние лексического и векторного каналов до отсечения (Ф1.1).
 
     Лексический список — ранги :func:`pdfgraph.query.search`, векторный —
@@ -336,7 +414,9 @@ def fuse_hybrid(lexical: list[Fragment], vector: list[Fragment],
         return []
     fused = rrf_fuse([list(lexical), list(vector)],
                      k=effective_fusion_k(), boost=effective_exact_boost(),
-                     boost_kinds=EXACT_KINDS)
+                     boost_kinds=EXACT_KINDS,
+                     spec_weight=effective_specificity_weight(),
+                     spec_fn=spec_fn)
     return fused[:limit]
 
 
@@ -376,10 +456,14 @@ def rag_search(store: Store, question: str, aircraft_type: str | None = None,
     mode = search_mode if search_mode is not None else effective_search_mode()
     if mode != "lexical" and (mode == "hybrid_full" or any(rankings)):
         rankings.append(vector_search(store, question, limit=limit))
-    # Единая политика слияния Ф1.1: k и буст точных веток из конфига.
+    # Единая политика слияния Ф1.1: k и буст точных веток из конфига;
+    # Ф1.5 — слагаемое конкретики на топ-20 слитого списка.
     return rrf_fuse(rankings, k=effective_fusion_k(),
                     boost=effective_exact_boost(),
-                    boost_kinds=EXACT_KINDS)[:limit]
+                    boost_kinds=EXACT_KINDS,
+                    spec_weight=effective_specificity_weight(),
+                    spec_fn=make_specificity_fn(store,
+                                                question))[:limit]
 
 
 _SYNTHESIS_SYSTEM_PROMPT = (

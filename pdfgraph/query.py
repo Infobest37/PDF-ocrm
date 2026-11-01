@@ -458,7 +458,8 @@ def hybrid_search(store: Store, question: str,
         return search(store, question, aircraft_type, limit)
     # Импорт по месту: rag_fusion импортирует query наверху, а чисто
     # лексический путь не должен тянуть его на старте (замыкание цикла).
-    from pdfgraph.rag_fusion import FUSION_CHANNEL_DEPTH, fuse_hybrid
+    from pdfgraph.rag_fusion import (FUSION_CHANNEL_DEPTH, fuse_hybrid,
+                                     make_specificity_fn)
 
     depth = max(limit, FUSION_CHANNEL_DEPTH)
     lexical_ranking = search(store, question, aircraft_type, depth)
@@ -466,7 +467,8 @@ def hybrid_search(store: Store, question: str,
         return []  # гейт: векторный канал на пустой лексике не вызывается
     vector_ranking = vector_search(store, question, limit=depth,
                                    model_dir=model_dir)
-    return fuse_hybrid(lexical_ranking, vector_ranking, limit)
+    return fuse_hybrid(lexical_ranking, vector_ranking, limit,
+                       spec_fn=make_specificity_fn(store, question))
 
 
 def expand_continuations(store: Store,
