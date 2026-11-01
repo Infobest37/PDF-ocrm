@@ -292,6 +292,82 @@ def test_question_overview_markers_frozen():
     assert gates.question_overview("список регламентов")
     # «как» не цепляет «какие»/«какое» (границы слов)
     assert not gates.question_overview("какое давление масла при прогреве?")
+# --- Ф1.5.1: отказ при отсутствии обозначения нигде в корпусе --------------
+
+
+def test_designator_absent_from_corpus_refuses(store):
+    """Обозначения нет нигде в корпусе — отказ, а не переспрос (Ф1.5.1).
+
+    «КАУ-115АМ» не встречается ни на одном листе фикстурного Store:
+    переспрос предлагал бы разделы, где запрошенного агрегата нет.
+    Решение владельца Ф1.5: обозначение не встречается нигде в корпусе —
+    отказ; встречается не на листе-лидере — прежний переспрос.
+    """
+    fragments = [
+        make_fragment(),
+        make_fragment(document="АТО.pdf", page=3, snippet="Замена масла",
+                      score=0.9),
+        make_fragment(document="ДВР.pdf", page=2, snippet="Регламент",
+                      score=0.8),
+    ]
+    outcome = decide_outcome(
+        store, "какой комод КАУ-115АМ применяется и в чём его место?",
+        fragments)
+    assert outcome.decision == "refuse"
+    assert outcome.options == []
+    assert outcome.clarify_question == ""
+    assert "КАУ-115АМ" in outcome.reason
+    assert "в документации не встречается" in outcome.reason
+    # Гейт обозначений назван первым сообщением — конъюнкция не потеряна.
+    assert "designators" in outcome.reason
+
+
+def test_designator_corpus_present_not_on_leader_stays_clarify(store):
+    """«ВР-14» в корпусе есть (РЭ:11), на листе-лидере нет — переспрос.
+
+    Правило различает «нет нигде» (отказ) и «есть в корпусе, но не
+    рядом с лидером» (переспрос): второе загрублять нельзя (Ф1.5.1).
+    Лидер — АТО:4 (окно АТО:3), в обоих нет ВР-14; ВР-14 живёт на
+    РЭ:11 — далеко от лидера, но внутри корпуса.
+    """
+    fragments = [
+        make_fragment(document="АТО.pdf", page=4, system="032.00.00",
+                      subsystem="032.10.00", snippet="Заправка шасси",
+                      score=0.95),
+        make_fragment(document="АТО.pdf", page=3, snippet="Замена масла",
+                      score=0.9),
+        make_fragment(document="ДВР.pdf", page=2, snippet="Регламент",
+                      score=0.8),
+    ]
+    # корпусная проверка: ВР-14 действительно в корпусе
+    assert gates.designator_in_corpus(store, "ВР-14") is True
+    outcome = decide_outcome(
+        store,
+        "неисправности коробки приводов ВР-14 и как их устранить?",
+        fragments)
+    assert outcome.decision == "clarify"
+    assert outcome.options
+    assert "не встречаются" not in outcome.reason
+    # Провал гейта остаётся в сообщении: рядом с лидером АТО:4 ВР-14 нет.
+    assert "ВР-14" in outcome.reason
+
+
+def test_designator_corpus_presence_predicate(store):
+    """designator_in_corpus: то же признание вхождения, что у гейта.
+
+    Дословное вхождение на листе («ВР-14» на РЭ:11, «ТВ3-117» на РЭ:10)
+    — «встречается»; отсутствующие «КАУ-115АМ» и «БВК-777» — нет.
+    """
+    assert gates.designator_in_corpus(store, "ВР-14") is True
+    assert gates.designator_in_corpus(store, "ТВ3-117") is True
+    assert gates.designator_in_corpus(store, "КАУ-115АМ") is False
+    assert gates.designator_in_corpus(store, "БВК-777") is False
+    assert gates.corpus_absent_designators(
+        store, "комод КАУ-115АМ рядом с ВР-14") == ["КАУ-115АМ"]
+    assert gates.corpus_absent_designators(
+        store, "неисправности коробки приводов ВР-14") == []
+
+
 # --- Варианты уточнения: разбиение и ярлыки --------------------------------
 
 

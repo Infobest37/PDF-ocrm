@@ -36,6 +36,13 @@
 отличают полный вопрос от неполного; уточнение по смыслу — задача слоя
 с моделью, а не детерминированных правил (раздел 11 .clinerules).
 
+Ф1.5.1 (решение владельца): на провале гейтов конкретики, когда
+обозначение из вопроса не встречается ни на одном листе корпуса
+(:func:`designator_in_corpus`), исход — отказ («обозначение …
+в документации не встречается»), а не уточнение; обозначение, которое
+в корпусе есть, но не рядом с листом-лидером, остаётся уточнением.
+Числа правила не затрагивают.
+
 Замер по полигону карточки Ф1.3б (23 видимых корпусных + 20 негативов)
 — ``tools/gates_polygon_f13b.py``. Порогов на скорости текста нет:
 гейты только о конкретике, без ``if score < X``.
@@ -262,6 +269,64 @@ def document_frequency(store: Store, term: str) -> int:
     return cache[term]
 
 
+# --- Корпусная проверка обозначений (Ф1.5.1) ------------------------------
+
+#: Кэш «обозначение встречается в корпусе» в рамках одного Store.
+_CORPUS_PRESENCE_CACHE: dict[int, dict[str, bool]] = {}
+#: Потолок листов-кандидатов на одну форму trigram-поиска: уникальные
+#: листы сортированы по документу и номеру, встречающееся обозначение
+#: находится в первых кандидатах; потолок — защита от патологически
+#: частого слипшегося шума OCR, а не рабочий фильтр.
+CORPUS_CANDIDATE_LIMIT = 200
+
+
+def designator_in_corpus(store: Store, designator: str) -> bool:
+    """Встречается ли обозначение хоть на одном листе корпуса (Ф1.5.1).
+
+    «Встречается» — тем же признанием вхождения, каким гейт designators
+    проверяет лист: :func:`_designator_in_text` (дословно, слипше или
+    через нормализацию поиска). Кандидатов даёт trigram-индекс
+    (:meth:`pdfgraph.store.Store.search_trigrams`) по трём формам
+    обозначения (слипшая, с разделителями, с пробелами); текст
+    кандидата читается :meth:`pdfgraph.store.Store.page_text`.
+    Фильтра по типу ВС нет: обозначение может стоять в чужом по теме
+    листе (сравнение, реестр, таблица взаимозаменяемости). Ошибка
+    FTS не глушится: как в :func:`gate_rare_term`, она означает
+    невалидную среду, а не «не встречается». Результат кэшируется в
+    рамках одного Store.
+    """
+    cache = _CORPUS_PRESENCE_CACHE.setdefault(id(store), {})
+    if designator not in cache:
+        cache[designator] = _scan_corpus_for_designator(store, designator)
+    return cache[designator]
+
+
+def _scan_corpus_for_designator(store: Store, designator: str) -> bool:
+    """Пройти кандидатов trigram-индекса и найти вхождение обозначения."""
+    lowered = designator.lower()
+    parts = [part for part in re.split(r"[-\.\s]+", lowered) if part]
+    variants = {"".join(parts), lowered, " ".join(parts)} - {""}
+    seen: set[tuple[str, int]] = set()
+    for variant in sorted(variants):
+        rows = store.search_trigrams(f"%{variant}%")[:CORPUS_CANDIDATE_LIMIT]
+        for row in rows:
+            key = (str(row[0]), int(row[1]))
+            if key in seen:
+                continue
+            seen.add(key)
+            if _designator_in_text(store.page_text(*key), designator):
+                return True
+    return False
+
+
+def corpus_absent_designators(store: Store, question: str) -> list[str]:
+    """Обозначения вопроса, которых нет ни на одном листе корпуса (Ф1.5.1).
+
+    Порядок — как в вопросе, без повторов (переносит порядок
+    :func:`question_designators`).
+    """
+    return [designator for designator in question_designators(question)
+            if not designator_in_corpus(store, designator)]
 # --- Данные листа-лидера -------------------------------------------------
 
 def leader_page_text(store: Store, leader: object) -> str:
@@ -611,9 +676,13 @@ def decide_outcome(store: Store, question: str, fragments: list) -> Outcome:
     Порядок решений детерминированный, без модели:
       1. пустая выдача — прежний отказ «нет подтверждений в документах»;
       2. чужая западная техника в вопросе — отказ «чужая техника (...»;
-      3. провал гейтов конкретики (:func:`decide_refusal`) — уточнение,
-         если групп в выдаче хотя бы :data:`CLARIFY_MIN_OPTIONS` и вопрос
-         не обзорный (:func:`question_overview`), иначе прежний отказ;
+      3. провал гейтов конкретики (:func:`decide_refusal`) —
+         3а. если обозначение из вопроса не встречается нигде в корпусе
+             (:func:`corpus_absent_designators`) — прежний отказ
+             с причиной «обозначение … в документации не встречается»;
+         3б. иначе уточнение, если групп в выдаче хотя бы
+             :data:`CLARIFY_MIN_OPTIONS` и вопрос не обзорный
+             (:func:`question_overview`), иначе прежний отказ;
       4. в вопросе нет ни одного слота конкретики — гейты конкретики
          не применимы (нечего проверять на листе), исход — обычный ответ.
          Ф1.4.1 (решение владельца): уточнение по форме вопроса убрано —
@@ -639,6 +708,18 @@ def decide_outcome(store: Store, question: str, fragments: list) -> Outcome:
         f"{failure['gate']} ({failure['detail']})"
         for failure in gate_failures)
     if gate_failures:
+        absent = corpus_absent_designators(store, question)
+        if absent:
+            if len(absent) == 1:
+                corpus_note = (
+                    f"обозначение {absent[0]} в документации не встречается")
+            else:
+                corpus_note = (f"обозначения {', '.join(absent)} "
+                               "в документации не встречаются")
+            return Outcome(
+                "refuse",
+                gate_summary + "; " + corpus_note,
+                fragments=top)
         if len(options) < CLARIFY_MIN_OPTIONS:
             return Outcome(
                 "refuse",
@@ -668,6 +749,8 @@ __all__ = [
     "OVERVIEW_QUESTION_RE",
     "Outcome", "Slot", "question_foreign_aircraft", "question_slots",
     "question_overview",
+    "CORPUS_CANDIDATE_LIMIT", "designator_in_corpus",
+    "corpus_absent_designators",
     "clarify_options", "decide_outcome",
 ]
 def window_texts(store: Store, leader: object) -> list[str]:
