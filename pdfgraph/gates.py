@@ -43,6 +43,16 @@
 в корпусе есть, но не рядом с листом-лидером, остаётся уточнением.
 Числа правила не затрагивают.
 
+Ф1.5.2 (решение владельца): тип ВС в вопросе проверяется по метке
+листа, а не по вхождению строки: если в базе нет ни одного листа,
+где названный тип — основной меткой aircraft_type
+(:func:`aircraft_types_without_primary`, :func:`primary_aircraft_type_keys`),
+исход — отказ «документации по типу … в базе нет». Упоминание типа в
+тексте чужого документа (примечание, сравнение) не основание ни
+отказа, ни уточнения — типы исключены из строковой проверки
+:func:`corpus_absent_designators`. Правило обозначений агрегатов
+(Ф1.5.1) сохранено.
+
 Замер по полигону карточки Ф1.3б (23 видимых корпусных + 20 негативов)
 — ``tools/gates_polygon_f13b.py``. Порогов на скорости текста нет:
 гейты только о конкретике, без ``if score < X``.
@@ -323,10 +333,104 @@ def corpus_absent_designators(store: Store, question: str) -> list[str]:
     """Обозначения вопроса, которых нет ни на одном листе корпуса (Ф1.5.1).
 
     Порядок — как в вопросе, без повторов (переносит порядок
-    :func:`question_designators`).
+    :func:`question_designators`). Типы ВС строково не проверяются:
+    упоминание типа в тексте чужого документа (примечание, сравнение)
+    в правиле корпуса не участвует (Ф1.5.2) — их проверяет
+    :func:`aircraft_types_without_primary` по метке листа.
     """
+    type_keys = {key for _, key in _question_aircraft_entries(question)}
     return [designator for designator in question_designators(question)
-            if not designator_in_corpus(store, designator)]
+            if _aircraft_type_key(designator) not in type_keys
+            and not designator_in_corpus(store, designator)]
+
+
+# --- Проверка типа ВС по метке листа (Ф1.5.2) ------------------------------
+
+#: Кэш «основные типы корпуса» в рамках одного Store; None — метки
+#: недоступны (тестовый дублер), исход не меняется.
+_CORPUS_TYPE_CACHE: dict[int, frozenset[str] | None] = {}
+
+
+def _question_aircraft_entries(
+        question: str) -> list[tuple[str, tuple[str, str]]]:
+    """Типы ВС вопроса с дословной формой: «Ми-26» → («Ми-26», («ми», «26»)).
+
+    Дословная форма нужна для сообщения отказа; ключ — тот же, каким
+    гейт aircraft_type сравнивает листы (:func:`_aircraft_type_key`).
+    Порядок — как в вопросе, без повторов ключа.
+    """
+    entries: list[tuple[str, tuple[str, str]]] = []
+    seen: set[tuple[str, str]] = set()
+    for match in _AIRCRAFT_TYPE_RE.finditer(question):
+        key = (match.group(1).lower(), match.group(2))
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append((match.group(0), key))
+    return entries
+
+
+def _fetch_primary_type_keys(connection) -> frozenset[str] | None:
+    """Ключи типов из меток листов (SELECT DISTINCT aircraft_type).
+
+    None — соединение не отвечает на запрос (тестовый дублер): проверка
+    типа «na», исход не меняется, как у :func:`leader_aircraft_type`.
+    Ошибка sqlite не глушится: отсутствие таблицы меток в настоящей
+    БД — невалидная среда.
+    """
+    try:
+        rows = connection.execute(
+            "SELECT DISTINCT aircraft_type FROM pages").fetchall()
+    except (AttributeError, TypeError) as error:
+        logger.warning(
+            "gates: метки типов листов недоступны — проверка типа «na»: %s",
+            error)
+        return None
+    keys: set[str] = set()
+    for row in rows:
+        key = _aircraft_type_key(str(row[0] or ""))
+        if key is not None:
+            keys.add(key)
+    return frozenset(keys)
+
+
+def primary_aircraft_type_keys(store: Store) -> frozenset[str] | None:
+    """Ключи типов ВС, встречающихся как метка листа (Ф1.5.2).
+
+    «Основной» тип листа — его метка aircraft_type, записанная при
+    build; упоминание типа в тексте листа меткой не является.
+    None — метки недоступны (Store без таблицы, тестовый дублер).
+    Результат кэшируется в рамках одного Store.
+    """
+    if id(store) not in _CORPUS_TYPE_CACHE:
+        connection = getattr(store, "_connection", None)
+        if connection is None:
+            logger.debug("gates: store без таблицы страниц — метки «na»")
+            _CORPUS_TYPE_CACHE[id(store)] = None
+        else:
+            _CORPUS_TYPE_CACHE[id(store)] = _fetch_primary_type_keys(
+                connection)
+    return _CORPUS_TYPE_CACHE[id(store)]
+
+
+def aircraft_types_without_primary(
+        store: Store, question: str) -> list[str]:
+    """Названные в вопросе типы ВС без единого листа-основного (Ф1.5.2).
+
+    Тип проверяется по метке aircraft_type страниц, а не по вхождению
+    строки в тексты: «Ми-26» в примечании документа Ми-8 — упоминание,
+    но метки «Ми-26» в базе нет, значит документации по типу в базе
+    нет. Обозначения агрегатов это не затрагивает — их продолжает
+    проверять :func:`corpus_absent_designators`. Метки неизвестны
+    (Store без таблицы) — проверка «na», пустой список.
+    """
+    entries = _question_aircraft_entries(question)
+    if not entries:
+        return []
+    keys = primary_aircraft_type_keys(store)
+    if keys is None:
+        return []
+    return [display for display, key in entries if key not in keys]
 # --- Данные листа-лидера -------------------------------------------------
 
 def leader_page_text(store: Store, leader: object) -> str:
@@ -677,10 +781,15 @@ def decide_outcome(store: Store, question: str, fragments: list) -> Outcome:
       1. пустая выдача — прежний отказ «нет подтверждений в документах»;
       2. чужая западная техника в вопросе — отказ «чужая техника (...»;
       3. провал гейтов конкретики (:func:`decide_refusal`) —
-         3а. если обозначение из вопроса не встречается нигде в корпусе
-             (:func:`corpus_absent_designators`) — прежний отказ
+         3а. названный в вопросе тип ВС, у которого в базе нет ни одного
+             листа с этим типом как меткой (метка aircraft_type,
+             :func:`aircraft_types_without_primary`) — отказ «документации
+             по типу … в базе нет»; упоминание типа в тексте чужого
+             документа не считается ни отказом, ни уточнением (Ф1.5.2);
+         3б. если обозначение (не тип) из вопроса не встречается нигде в
+             корпусе (:func:`corpus_absent_designators`) — прежний отказ
              с причиной «обозначение … в документации не встречается»;
-         3б. иначе уточнение, если групп в выдаче хотя бы
+         3в. иначе уточнение, если групп в выдаче хотя бы
              :data:`CLARIFY_MIN_OPTIONS` и вопрос не обзорный
              (:func:`question_overview`), иначе прежний отказ;
       4. в вопросе нет ни одного слота конкретики — гейты конкретики
@@ -708,6 +817,16 @@ def decide_outcome(store: Store, question: str, fragments: list) -> Outcome:
         f"{failure['gate']} ({failure['detail']})"
         for failure in gate_failures)
     if gate_failures:
+        missing_types = aircraft_types_without_primary(store, question)
+        if missing_types:
+            if len(missing_types) == 1:
+                type_note = (
+                    f"документации по типу {missing_types[0]} в базе нет")
+            else:
+                type_note = (f"документации по типам "
+                             f"{', '.join(missing_types)} в базе нет")
+            return Outcome(
+                "refuse", gate_summary + "; " + type_note, fragments=top)
         absent = corpus_absent_designators(store, question)
         if absent:
             if len(absent) == 1:
@@ -750,7 +869,8 @@ __all__ = [
     "Outcome", "Slot", "question_foreign_aircraft", "question_slots",
     "question_overview",
     "CORPUS_CANDIDATE_LIMIT", "designator_in_corpus",
-    "corpus_absent_designators",
+    "corpus_absent_designators", "primary_aircraft_type_keys",
+    "aircraft_types_without_primary",
     "clarify_options", "decide_outcome",
 ]
 def window_texts(store: Store, leader: object) -> list[str]:

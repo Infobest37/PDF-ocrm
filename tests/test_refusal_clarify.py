@@ -368,6 +368,107 @@ def test_designator_corpus_presence_predicate(store):
         store, "неисправности коробки приводов ВР-14") == []
 
 
+# --- Ф1.5.2: тип ВС в вопросе — по метке листа, а не по строке ---------------
+
+
+def test_primary_aircraft_type_keys_reads_page_labels(store):
+    """«Основные» типы — метки листов: у фикстуры единственный «Ми-8МТВ»."""
+    assert gates.primary_aircraft_type_keys(store) == frozenset({("ми", "8")})
+
+
+def test_aircraft_types_excluded_from_corpus_string_check(store):
+    """Типы ВС строки корпуса не проверяют («корпус-правило» не для типов).
+
+    «Ту-154» — тип: упоминание его в тексте листа на правило корпуса
+    не влияет (решение владельца Ф1.5.2); «Д-30» — агрегат, строковая
+    проверка Ф1.5.1 остаётся. Список типов без листов-основных —
+    дословные формы вопроса.
+    """
+    assert gates.aircraft_types_without_primary(
+        store, "ресурс лопастей несущего винта вертолёта Ми-26") == ["Ми-26"]
+    assert gates.aircraft_types_without_primary(
+        store, "не убирается шасси Ми-8МТВ при рулении") == []
+    assert gates.aircraft_types_without_primary(store, "давление масла?") == []
+    assert gates.corpus_absent_designators(
+        store, "давление в двигателе Д-30 вертолёта Ту-154") == ["Д-30"]
+
+
+def test_aircraft_type_mention_without_primary_sheet_refuses(store):
+    """Тип упомянут в чужом документе — отказ «документации по типу нет».
+
+    Лист-примечание помечен «Ми-8МТВ», но содержит слово «Ми 26» —
+    это упоминание в тексте: для типа оно не основание ни отказа,
+    ни уточнения (Ф1.5.2). Тип проверяется меткой aircraft_type:
+    листа с основной меткой «Ми-26» в базе нет — отказ вместо
+    прежнего уточнения.
+    """
+    mention = "Примечание. Дополнения к руководству вертолёта Ми 26."
+    store.upsert_page(
+        "Доп.pdf", 368, "Ми-8МТВ", "065.00.00", "",
+        mention, normalize_for_search(mention))
+    fragments = [
+        make_fragment(score=0.95),
+        make_fragment(document="АТО.pdf", page=3, snippet="Замена масла",
+                      score=0.9),
+        make_fragment(document="ДВР.pdf", page=2, snippet="Регламент",
+                      score=0.8),
+    ]
+    # упоминание в тексте корпусом признаётся — исход от него не зависит
+    assert gates.designator_in_corpus(store, "Ми-26") is True
+    outcome = decide_outcome(
+        store, "ресурс лопастей несущего винта вертолёта Ми-26", fragments)
+    assert outcome.decision == "refuse"
+    assert outcome.options == []
+    assert "aircraft_type" in outcome.reason
+    assert "документации по типу Ми-26 в базе нет" in outcome.reason
+    assert "не встречается" not in outcome.reason
+    assert "Уточните" not in outcome.clarify_question
+
+
+def test_aircraft_type_with_primary_sheet_uses_gate_path(store):
+    """Свой тип «Ми-8МТВ» (метки есть) идёт прежним путём, без отказа.
+
+    Тип строково не проверяется вовсе: рядом с лидером «Ми-8МТВ» нет
+    и в корпусе-тексте его нет, но листы с меткой есть — отказ по типу
+    невозможен (Ф1.5.2). «ВР-14» в корпусе есть — уточнение (Ф1.5.1).
+    """
+    fragments = [
+        make_fragment(score=0.95),
+        make_fragment(document="АТО.pdf", page=3, snippet="Замена масла",
+                      score=0.9),
+        make_fragment(document="ДВР.pdf", page=2, snippet="Регламент",
+                      score=0.8),
+    ]
+    outcome = decide_outcome(
+        store, "неисправности коробки приводов ВР-14 вертолёта Ми-8МТВ?",
+        fragments)
+    assert outcome.decision == "clarify"
+    assert outcome.options
+    assert "документации по типу" not in outcome.reason
+    assert "Ми-8МТВ" in outcome.reason      # провал гейта остаётся в тексте
+    assert "не встречаются" not in outcome.reason
+
+
+def test_aircraft_type_refusal_dominates_corpus_refusal(store):
+    """Тип без листов-основных отвечает отказом, строка корпуса не участвует.
+
+    Смешанный вопрос: «Ми-26» — тип без основной метки, «БВК-777» —
+    агрегат, отсутствующий и строково. Отказ отвечает типом (Ф1.5.2),
+    а не строковым «не встречается», и уточнение не предлагает.
+    """
+    fragments = [
+        make_fragment(score=0.95),
+        make_fragment(document="АТО.pdf", page=3, snippet="Замена масла",
+                      score=0.9),
+    ]
+    outcome = decide_outcome(
+        store, "ресурс несущего винта и агрегата БВК-777 вертолёта Ми-26?",
+        fragments)
+    assert outcome.decision == "refuse"
+    assert "документации по типу Ми-26 в базе нет" in outcome.reason
+    assert "не встречается" not in outcome.reason
+
+
 # --- Варианты уточнения: разбиение и ярлыки --------------------------------
 
 
