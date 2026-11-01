@@ -13,7 +13,7 @@ Subcommands
     (``registry = {}``); with ``--registry`` but a missing file, a warning
     goes to stderr and the registry stays empty.
 
-``ask "<вопрос>" --store <path> [--type <ВС>] [--json] [--search-mode <режим>]``
+``ask "<вопрос>" --store <path> [--type <ВС>] [--json] [--search-mode <режим>] [--context <id>]
     Answers through :func:`pdfgraph.answer.build_answer` and **always** reports
     the :func:`pdfgraph.verify.verify_citations` result: one line per citation
     (document, sheet or sheet range, system code) plus a verdict — how many
@@ -22,6 +22,14 @@ Subcommands
     ``--search-mode`` переопределяет режим гибридного поиска
     (``lexical | hybrid_gated | hybrid_full``); по умолчанию берётся
     ``PDFGRAPH_SEARCH_MODE``, иначе ``hybrid_gated``.
+    Ф1.4: размытый вопрос с непроверенной конкретикой даёт уточняющий
+    вопрос вместо отказа (текст: «Требуется уточнение» и нумерованные
+    варианты; ``--json``: поле ``clarify``) — код 3. ``--context <id>``
+    включает память диалога (:mod:`pdfgraph.session`): реплика сливается
+    с темой последнего уточнения, диалог хранится в ``dialog-<id>.json``
+    рядом с графом (максимум три последние реплики); третье уточнение
+    подряд превращается в детерминированный отказ о «лимите уточнений»
+    (код 1). Без ``--context`` поведение прежнее одиночное.
 
 ``emb-index <store_path> [--chunk-size N] [--rebuild]``
     Ф1.0: пересчитывает флаги «продолжение таблицы» и строит постраничный
@@ -36,8 +44,10 @@ citations):
     1 — refusal, or at least one citation failed verification
         (in ``--json`` mode the same fact is the ``verified`` field);
     2 — usage/environment error (no JSON to build from, unreadable JSON,
-        store file missing or not a database; a missing registry file is
-        only a warning).
+        store file missing or not a database, invalid ``--context`` id;
+        a missing registry file is only a warning);
+    3 — a clarifying question is issued instead of the answer (Ф1.4); in
+        ``--json`` the same fact is the ``clarify`` field.
 """
 
 import argparse
@@ -59,6 +69,7 @@ from pdfgraph.build import (
     mark_flags_auto,
 )
 from pdfgraph.paths import resolve_store_path
+from pdfgraph.session import Session, load_context, save_context
 from pdfgraph.store import Store
 from pdfgraph.verify import CitationCheck, all_verified, verify_citations
 from pdfprepare.output import read_result
@@ -206,6 +217,14 @@ def _print_json(answer: Answer, rows: list[dict], verified: bool) -> None:
         "fragments": [dataclasses.asdict(fragment)
                       for fragment in answer.fragments],
     }
+    # Ф1.4: уточняющий вопрос вместо отказа — поле clarify; при отказе
+    # и при обычном ответе ключ не появляется.
+    if answer.clarification and not answer.refusal:
+        payload["clarify"] = {
+            "question": str(answer.clarification.get("question", "")),
+            "options": [dict(option) for option
+                        in answer.clarification.get("options", [])],
+        }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -232,6 +251,12 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
     печатается диапазоном «листы 7–8»; без ``store`` вывод прежний.
     """
     print(f"Вопрос: {answer.question}")
+    if answer.clarification and not answer.refusal:
+        # Ф1.4: уточняющий вопрос вместо отказа — нумерованные варианты.
+        print("Требуется уточнение")
+        for option in answer.clarification.get("options", []):
+            print(f"  {option.get('id', '?')} — {option.get('label', '')}")
+        return
     if answer.claims:
         print("Ответ:")
         for claim in answer.claims:
@@ -264,8 +289,28 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
         print("Вердикт: все цитаты подтверждены")
 
 
+def _record_session(session: Session, answer: Answer) -> None:
+    """Дописать реплику диалога в сессию и сохранить файл (Ф1.4)."""
+    if answer.refusal:
+        session.record(answer.question, "refuse", reason=answer.reason)
+    elif answer.clarification:
+        session.record(
+            answer.question, "clarify",
+            reason=str(answer.clarification.get("reason", "")),
+            options=list(answer.clarification.get("options", [])))
+    else:
+        session.record(answer.question, "answer")
+    save_context(session)
+
+
 def _cmd_ask(args: argparse.Namespace) -> int:
-    """Answer a question and always report citation verification."""
+    """Ответить на вопрос и напечатать вердикт проверки цитат.
+
+    Ф1.4: с ``--context`` работает память диалога — реплики ведутся в
+    файле сессии рядом с графом; уточняющий вопрос (поле
+    ``clarification`` ответа) завершает команду кодом 3, а третье
+    уточнение подряд — детерминированный отказ без обращения к поиску.
+    """
     if args.debug:
         logging.basicConfig(
             level=logging.DEBUG, stream=sys.stderr,
@@ -283,8 +328,43 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     store = _open_store(store_path)
     if store is None:
         return 2
+
+    session = None
+    answer: Answer | None = None
+    verified = False
     try:
-        answer = build_answer(store, args.question, args.aircraft_type,
+        if getattr(args, "context", None):
+            try:
+                session = load_context(str(store_path), args.context)
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            # Ф1.4: третье уточнение подряд — отказ без поиска; реплика
+            # отказa дописывается в сессию здесь, общий блок ниже её
+            # не дублирует.
+            if session.clarify_limit_reached():
+                merged = session.refine(args.question)
+                answer = Answer(
+                    question=merged,
+                    claims=[],
+                    fragments=[],
+                    refusal=True,
+                    reason="лимит уточнений: исчерпаны два уточнения "
+                           "подряд — задайте вопрос целиком, ответ по "
+                           "номеру варианта невозможен",
+                )
+                session.record(merged, "refuse", reason=answer.reason)
+                save_context(session)
+                verified = False
+                if args.as_json:
+                    _print_json(answer, [], False)
+                else:
+                    _print_text(answer, [], False)
+                return 1  # finally закроет store
+            question = session.refine(args.question)
+        else:
+            question = args.question
+        answer = build_answer(store, question, args.aircraft_type,
                               search_mode=args.search_mode)
         checks = verify_citations(answer, store)
         # Печать идёт до закрытия store: текстовый рендер проверяет
@@ -297,8 +377,13 @@ def _cmd_ask(args: argparse.Namespace) -> int:
             _print_json(answer, rows, verified)
         else:
             _print_text(answer, rows, verified, store)
+        if session is not None:
+            _record_session(session, answer)
     finally:
         store.close()
+    if (answer is not None and answer.clarification
+            and not answer.refusal):
+        return 3
     return 0 if verified else 1
 
 
@@ -645,6 +730,12 @@ def main(argv: list[str]) -> int:
         choices=("lexical", "hybrid_gated", "hybrid_full"),
         help="Override the hybrid search mode for this run "
              "(default: PDFGRAPH_SEARCH_MODE, else hybrid_gated).")
+    ask_parser.add_argument(
+        "--context", default=None, metavar="ID",
+        help="Dialog id (1..64 chars [A-Za-z0-9_-], Ф1.4): the reply is "
+             "merged with the topic of the last clarification and the "
+             "dialogue is kept in dialog-ID.json next to the store; "
+             "without the flag the run is single-shot.")
     ask_parser.set_defaults(handler=_cmd_ask)
 
     mark_parser = commands.add_parser(

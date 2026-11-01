@@ -156,23 +156,35 @@ def build_answer(
             reason="нет подтверждений в документах",
         )
 
-    # Ф1.3б: гейты отказа по конкретике — конъюнкция включённых гейтов
-    # (ENABLED_GATES); провал хотя бы одного — отказ с указанием гейта.
-    # Лидер — первый фрагмент выдачи; поиск, слияние и verify_citations
-    # не затрагиваются (verify вызывается дальше по-прежнему).
-    from pdfgraph.gates import decide_refusal
-    gate_failures = decide_refusal(store, question, fragments)
-    if gate_failures:
-        reason = "гейты конкретики: " + "; ".join(
-            f"{failure['gate']} ({failure['detail']})"
-            for failure in gate_failures)
-        logger.debug("question=%r -> refusal (gates): %s", question, reason)
+    # Ф1.3б + Ф1.4: гейты отказа по конкретике и третий исход — уточняющий
+    # вопрос. Отказ остаётся для чужой техники, провала aircraft_type и
+    # гейт-провала на однородной выдаче (уточнять нечем); поиск, слияние
+    # и verify_citations не затрагиваются (verify вызывается дальше).
+    from pdfgraph.gates import decide_outcome
+    outcome = decide_outcome(store, question, fragments)
+    if outcome.decision == "refuse":
+        logger.debug("question=%r -> refusal (gates): %s", question,
+                     outcome.reason)
         return Answer(
             question=question,
             claims=[],
             fragments=fragments,
             refusal=True,
-            reason=reason,
+            reason=outcome.reason,
+        )
+    if outcome.decision == "clarify":
+        logger.debug("question=%r -> clarify (%s)", question, outcome.reason)
+        return Answer(
+            question=question,
+            claims=[],
+            fragments=outcome.fragments,
+            reason=outcome.reason,
+            clarification={
+                "decision": outcome.decision,
+                "question": outcome.clarify_question,
+                "reason": outcome.reason,
+                "options": list(outcome.options),
+            },
         )
 
     if synthesis_enabled:

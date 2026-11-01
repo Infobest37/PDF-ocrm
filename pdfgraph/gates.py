@@ -28,6 +28,14 @@
 проверку цитат (:func:`pdfgraph.verify.verify_citations` работает как
 раньше); решение принимается после того, как выдача собрана.
 
+Ф1.4 добавляет третий исход — ``clarify`` (:func:`decide_outcome`): на
+провале гейтов конкретики, если тема найдена (вариантов не меньше
+:data:`CLARIFY_MIN_OPTIONS`) и вопрос не обзорный. Правка Ф1.4.1
+(решение владельца): уточнение по форме вопроса убрано — замер полигона
+Ф1.4 показал, что маркеры формы («как», «почему», «сколько»...) не
+отличают полный вопрос от неполного; уточнение по смыслу — задача слоя
+с моделью, а не детерминированных правил (раздел 11 .clinerules).
+
 Замер по полигону карточки Ф1.3б (23 видимых корпусных + 20 негативов)
 — ``tools/gates_polygon_f13b.py``. Порогов на скорости текста нет:
 гейты только о конкретике, без ``if score < X``.
@@ -37,6 +45,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass, field
 
 from pdfprepare.normalize import normalize_for_search
 from pdfgraph.store import Store
@@ -416,6 +425,236 @@ def decide_refusal(
     return failures
 
 
+# --- Ф1.4: третий исход — уточняющий вопрос ---------------------------------
+
+#: Сколько верхних фрагментов выдачи уходит в clarify-ответ (лимит Ф1.4).
+CLARIFY_TOP_FRAGMENTS = 10
+#: Максимум вариантов уточнения (карточка Ф1.4).
+CLARIFY_MAX_OPTIONS = 3
+#: Минимум вариантов: меньше — тема однородна, уточнять нечем.
+CLARIFY_MIN_OPTIONS = 2
+#: Шаблон текста уточняющего вопроса.
+CLARIFY_QUESTION = "Уточните, какой вариант имеется в виду."
+
+#: Замороженная группа маркеров обзорных формулировок (решение владельца
+#: Ф1.4, пин-тест tests/test_refusal_clarify.py
+#: ::test_question_overview_markers_frozen) — менять только явным
+#: решением владельца. Обзорные формулировки («перечислить состав»)
+#: не уточняются НИКОГДА: даже при провале гейта конкретики исход —
+#: отказ «уточнение невозможно — обзорная формулировка», а не переспрос;
+#: маркеры: «какие», «из чего состоит/состоят», «что входит»,
+#: «что включает», «перечисли», «список».
+#:
+#: Ф1.4.1 (решение владельца): уточнение по форме вопроса убрано —
+#: замер полигона Ф1.4 показал, что маркеры формы «как», «почему»,
+#: «сколько»... не отличают полный вопрос от неполного (7 корпусных
+#: вопрос-действий уточнялись как неполные; формы и слотless-профили
+#: полигонных и корпусных вопросов неразличимы). Уточнение по смыслу —
+#: задача слоя с моделью, а не детерминированных правил (раздел 11
+#: .clinerules).
+OVERVIEW_QUESTION_RE = re.compile(
+    r"(?i)\b(?:какие|из\s+чего\s+состоит|из\s+чего\s+состоят"
+    r"|что\s+входит|что\s+включает|перечисли|список)\b")
+
+#: Словарь чужой западной техники — заморожен пин-тестом Ф1.4
+#: (tests/test_refusal_clarify.py): транслитерация и латиница, без
+#: хвостового ограничения (вопрос перед поиском приводится к нижнему
+#: регистру, поэтому флаг IGNORECASE не нужен).
+FOREIGN_AIRCRAFT_RE = re.compile(
+    "(?<![а-яёa-z])(боинг|аэробус|эйрбас|сессна|эмбраер|фоккер|локхид|"
+    "дуглас|boeing|airbus|cessna|embraer|fokker|lockheed|douglas)")
+
+
+def question_foreign_aircraft(question: str) -> list[str]:
+    """Названия чужой западной техники из вопроса, нижний регистр (Ф1.4)."""
+    return [match.group(0)
+            for match in FOREIGN_AIRCRAFT_RE.finditer(question.lower())]
+
+
+def question_overview(question: str) -> bool:
+    """Обзорная формулировка («перечислить состав»)? (Ф1.4, решение владельца).
+
+    Обзорные вопросы никогда не уточняются: при найденной теме исход —
+    обычный ответ (перечень по листу), при ненайденной — прежний отказ.
+    """
+    return bool(OVERVIEW_QUESTION_RE.search(question))
+
+
+@dataclass
+class Outcome:
+    """Итог классификатора исхода: ответ, отказ или уточняющий вопрос.
+
+    ``decision`` — ``"answer"`` | ``"clarify"`` | ``"refuse"``; для
+    ``clarify`` заполнены текст вопроса и варианты; ``fragments`` —
+    верхняя часть выдачи (лимит :data:`CLARIFY_TOP_FRAGMENTS`).
+    """
+
+    decision: str
+    reason: str = ""
+    clarify_question: str = ""
+    options: list[dict] = field(default_factory=list)
+    fragments: list = field(default_factory=list)
+
+
+@dataclass
+class Slot:
+    """Слот конкретики: строка вопроса, обязательная на листе-лидере."""
+
+    kind: str
+    token: str
+    designator: bool = False
+
+
+def question_slots(question: str) -> list[Slot]:
+    """Слоты конкретики вопроса: обозначения, коды и значимые числа (Ф1.4).
+
+    Переиспользует разбор гейтов Ф1.3б: обозначения и числовые коды
+    разделов (``designator=True``) и значимые числа-ограничения
+    (``designator=False``); порядок — как в вопросе.
+    """
+    slots: list[Slot] = []
+    seen: set[str] = set()
+    for token in question_designators(question):
+        key = f"designator:{token}"
+        if key not in seen:
+            slots.append(Slot("designator", token, True))
+            seen.add(key)
+    for number in question_significant_numbers(question):
+        key = f"number:{number}"
+        if key not in seen:
+            slots.append(Slot("number", number, False))
+            seen.add(key)
+    return slots
+
+
+def _group_label(store: Store, fragments: list) -> str:
+    """Ярлык группы вариантов: имя документа и раздел (Ф1.4).
+
+    Раздел берётся по коду первого фрагмента группы (подсистема
+    предпочитается системе); узла в ``nodes`` нет — «код <ключ>»;
+    кода нет вовсе — только имя файла без расширения.
+    """
+    document = str(getattr(fragments[0], "document", "") or "(без документа)")
+    basename = document.rsplit(".", 1)[0] if "." in document else document
+    code = ""
+    for fragment in fragments:
+        candidate = str(getattr(fragment, "subsystem_code", "") or "")
+        if not candidate:
+            candidate = str(getattr(fragment, "system_code", "") or "")
+        if candidate:
+            code = candidate
+            break
+    if not code:
+        return basename
+    key = code.casefold()
+    row = store._connection.execute(
+        """
+        SELECT label FROM nodes
+        WHERE key = ? AND kind = 'subsystem'
+        """,
+        (key,),
+    ).fetchone()
+    if row is None or not str(row[0]).strip():
+        row = store._connection.execute(
+            "SELECT label FROM nodes WHERE key = ? AND kind = 'system'",
+            (key,),
+        ).fetchone()
+    label = str(row[0]).strip() if row is not None else ""
+    if not label:
+        label = f"код {code}"
+    return f"{basename} — {label}"
+
+
+def clarify_options(store: Store, fragments: list) -> tuple[list, list[dict]]:
+    """Разбить выдачу на группы-разделы и построить варианты (Ф1.4).
+
+    Возвращает ``(top, options)``: верхние :data:`CLARIFY_TOP_FRAGMENTS`
+    фрагментов и варианты — до :data:`CLARIFY_MAX_OPTIONS`, группы
+    (документ, код раздела) в порядке убывания суммарного веса выдачи;
+    у варианта ``id`` («1», «2», …), ярлык группы, исходные индексы
+    фрагментов и ``query_terms`` (код раздела, «072.10.00»).
+    """
+    top = list(fragments)[:CLARIFY_TOP_FRAGMENTS]
+    groups: dict[tuple[str, str], dict] = {}
+    order: list[tuple[str, str]] = []
+    for index, fragment in enumerate(top):
+        code = (str(getattr(fragment, "subsystem_code", "") or "")
+                or str(getattr(fragment, "system_code", "") or ""))
+        key = (str(getattr(fragment, "document", "(без документа)")), code)
+        if key not in groups:
+            groups[key] = {"fragments": [], "ids": [], "score": 0.0}
+            order.append(key)
+        entry = groups[key]
+        entry["fragments"].append(fragment)
+        entry["ids"].append(index)
+        entry["score"] += float(getattr(fragment, "score", 0.0) or 0.0)
+    ranked = sorted(
+        enumerate(order), key=lambda item: (-groups[item[1]]["score"],
+                                            item[0]))
+    options: list[dict] = []
+    for position, (_, key) in enumerate(
+            ranked[:CLARIFY_MAX_OPTIONS], start=1):
+        entry = groups[key]
+        code = key[1]
+        options.append({
+            "id": str(position),
+            "label": _group_label(store, entry["fragments"]),
+            "fragment_ids": list(entry["ids"]),
+            "query_terms": [code] if code else [],
+        })
+    return top, options
+
+
+def decide_outcome(store: Store, question: str, fragments: list) -> Outcome:
+    """Классификатор исхода: обычный ответ / отказ / уточняющий вопрос (Ф1.4).
+
+    Порядок решений детерминированный, без модели:
+      1. пустая выдача — прежний отказ «нет подтверждений в документах»;
+      2. чужая западная техника в вопросе — отказ «чужая техника (...»;
+      3. провал гейтов конкретики (:func:`decide_refusal`) — уточнение,
+         если групп в выдаче хотя бы :data:`CLARIFY_MIN_OPTIONS` и вопрос
+         не обзорный (:func:`question_overview`), иначе прежний отказ;
+      4. в вопросе нет ни одного слота конкретики — гейты конкретики
+         не применимы (нечего проверять на листе), исход — обычный ответ.
+         Ф1.4.1 (решение владельца): уточнение по форме вопроса убрано —
+         замер полигона Ф1.4 показал, что форма не отличает полный
+         вопрос от неполного (раздел 11 .clinerules).
+
+    Отказ по чужой технике стоит раньше гейтов: вопрос про другой тип
+    ВС не требует проверки листа. Гейты не влияют на поиск и проверку
+    цитат — решение принимается на собранной выдаче.
+    """
+    if not fragments:
+        return Outcome("refuse", "нет подтверждений в документах")
+    foreign = question_foreign_aircraft(question)
+    if foreign:
+        return Outcome(
+            "refuse",
+            "чужая техника (" + ", ".join(foreign)
+            + ") — в документах ответа нет",
+            fragments=list(fragments))
+    top, options = clarify_options(store, fragments)
+    gate_failures = decide_refusal(store, question, fragments)
+    gate_summary = "гейты конкретики: " + "; ".join(
+        f"{failure['gate']} ({failure['detail']})"
+        for failure in gate_failures)
+    if gate_failures:
+        if len(options) < CLARIFY_MIN_OPTIONS:
+            return Outcome(
+                "refuse",
+                gate_summary + "; уточнение невозможно — выдача однородна",
+                fragments=top)
+        if question_overview(question):
+            return Outcome(
+                "refuse",
+                gate_summary
+                + "; уточнение невозможно — обзорная формулировка",
+                fragments=top)
+        return Outcome("clarify", gate_summary, CLARIFY_QUESTION,
+                       options, top)
+    return Outcome("answer", "", fragments=list(fragments))
+
+
 __all__ = [
     "GATE_NAMES", "ENABLED_GATES", "RARE_DF_THRESHOLD", "MIN_TERM_LEN",
     "VERDICT_FAIL", "VERDICT_PASS", "VERDICT_NA", "GateVerdict",
@@ -424,6 +663,12 @@ __all__ = [
     "leader_page_text", "leader_aircraft_type", "window_texts",
     "gate_numbers", "gate_designators", "gate_aircraft_type",
     "gate_rare_term", "run_all_gates", "decide_refusal",
+    "CLARIFY_TOP_FRAGMENTS", "CLARIFY_MAX_OPTIONS",
+    "CLARIFY_MIN_OPTIONS", "CLARIFY_QUESTION", "FOREIGN_AIRCRAFT_RE",
+    "OVERVIEW_QUESTION_RE",
+    "Outcome", "Slot", "question_foreign_aircraft", "question_slots",
+    "question_overview",
+    "clarify_options", "decide_outcome",
 ]
 def window_texts(store: Store, leader: object) -> list[str]:
     """Тексты соседних листов того же документа (лидер.page ± 1)."""
