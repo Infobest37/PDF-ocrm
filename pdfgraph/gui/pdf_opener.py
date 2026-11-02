@@ -26,7 +26,8 @@ from pathlib import Path
 from urllib.parse import quote
 
 #: Folder of the prepared source PDFs (the 49-document ``PDFprog\\pdfs`` set).
-DEFAULT_PDF_DIR = Path(r"C:\Users\user\Desktop\pythonCODE\PDFprog\pdfs")
+DEFAULT_PDF_DIR = Path("pdfs")
+
 
 #: Graph page indices are 0-based; viewer pages are 1-based.
 PAGE_OFFSET = 1
