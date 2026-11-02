@@ -1,0 +1,196 @@
+/* Ф2.1: утверждённый макет — цвета, геометрия, типографика. */
+
+:root {
+  --bg: #f2f4f6;
+  --panel: #ffffff;
+  --text: #11161c;
+  --text-2: #3d4854;
+  --text-3: #6b7784;
+  --line: #d7dde4;
+  --line-2: #e8edf2;
+  --accent: #1f6f8b;
+  --accent-bg: #e3f0f4;
+  --ok: #1f7a4d;
+  --warn: #a8620a;
+  --fail: #a33126;
+  --clarify-bg: #fbf0dd;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 "Segoe UI", sans-serif;
+}
+
+.screen {
+  display: grid;
+  grid-template-columns: 212px 1fr 380px;
+  gap: 16px;
+  padding: 16px;
+  min-height: 100vh;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  padding: 14px;
+}
+
+.panel-title {
+  margin: 0 0 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-3);
+}
+
+/* Типы ВС (левая колонка). */
+.type-switch { display: grid; gap: 6px; }
+
+.type-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.type-option:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.type-option input { accent-color: var(--accent); }
+
+/* Лента чата (центр). */
+.chat-panel { display: flex; flex-direction: column; }
+
+.feed { flex: 1; overflow-y: auto; display: grid; gap: 18px; align-content: start; }
+
+.message { border-top: 1px solid var(--line-2); padding-top: 12px; }
+.message:first-child { border-top: none; padding-top: 0; }
+
+.message .question { color: var(--text-2); margin: 0 0 8px; }
+
+.message .answer-text { margin: 0 0 10px; white-space: pre-wrap; }
+
+.citation {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-bg);
+  border-radius: 0 6px 6px 0;
+  padding: 10px 12px;
+  margin: 10px 0;
+}
+
+.citation .doc-line { color: var(--text-2); font-size: 14px; }
+
+.citation .sheet-ref,
+.citation .code {
+  font-family: "Cascadia Mono", Consolas, monospace;
+}
+
+.citation .doc-meta { color: var(--text-3); font-size: 13px; }
+
+.citation a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.citation a:hover { text-decoration: underline; }
+
+.chip {
+  display: inline-block;
+  border-radius: 100px;
+  padding: 1px 10px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chip.ok { color: var(--ok); background: #e6f2ea; }
+.chip.fail { color: var(--fail); background: #f7e6e4; }
+
+.status-plate.ok { color: var(--ok); }
+.status-plate.fail { color: var(--fail); }
+.status-plate.warn { color: var(--warn); }
+
+.message.refusal .reason {
+  color: var(--fail);
+  margin: 0;
+}
+
+.clarify {
+  background: var(--clarify-bg);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.clarify .options { display: grid; gap: 8px; margin-top: 10px; }
+
+.clarify .option {
+  text-align: left;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  border-radius: 6px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.clarify .option:hover { border-color: var(--accent); }
+
+.clarify .option .option-doc {
+  display: block;
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+.applicability-warning {
+  color: var(--warn);
+  font-size: 14px;
+  margin: 6px 0 0;
+}
+
+.neighbors {
+  color: var(--text-3);
+  font-size: 13px;
+  margin: 8px 0 0;
+}
+
+/* Форма вопроса. */
+.ask-form { display: flex; gap: 8px; margin-top: 14px; }
+
+.ask-input {
+  flex: 1;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font: inherit;
+  color: var(--text);
+}
+
+.ask-input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+.ask-send {
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #ffffff;
+  font: inherit;
+  font-weight: 600;
+  padding: 10px 18px;
+  cursor: pointer;
+}
+
+.ask-send:hover { filter: brightness(1.08); }
+
+/* Просмотр (правая колонка). */
+.viewer { width: 100%; height: calc(100vh - 96px); border: 1px solid var(--line); border-radius: 6px; }
+
+.viewer-hint { color: var(--text-3); }

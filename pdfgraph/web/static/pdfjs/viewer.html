@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Просмотр листа — PDF.js (локально)</title>
+<style>
+  body { margin: 0; background: #525659; }
+  canvas { display: block; margin: 0 auto; }
+</style>
+</head>
+<body>
+<canvas id="page"></canvas>
+<script src="/static/pdfjs/pdf.min.js"></script>
+<script>
+"use strict";
+/* Ф2.1: минимальный локальный вьюер. worker обязан лежать рядом
+   (/static/pdfjs/pdf.worker.min.js), иначе страница молча не отрисуется.
+   Никаких обращений к CDN. Параметры: ?file=<URL>&page=<физический лист>. */
+if (window.pdfjsLib) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "/static/pdfjs/pdf.worker.min.js";
+  const params = new URLSearchParams(location.search);
+  const file = params.get("file");
+  const page = Math.max(1, parseInt(params.get("page") || "1", 10));
+  if (file) {
+    pdfjsLib.getDocument(file).promise.then((pdf) => {
+      return pdf.getPage(Math.min(page, pdf.numPages));
+    }).then((pdfPage) => {
+      const canvas = document.getElementById("page");
+      const context = canvas.getContext("2d");
+      const viewport = pdfPage.getViewport({ scale: 1.5 });
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      return pdfPage.render({ canvasContext: context, viewport: viewport })
+        .promise;
+    }).catch((error) => {
+      document.body.textContent = "Не удалось открыть PDF: " + error;
+    });
+  } else {
+    document.body.textContent = "Не указан параметр file";
+  }
+} else {
+  document.body.textContent = "PDF.js не загружен (static/pdfjs)";
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pdfgraph — ИИ-инженер</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="screen">
+  <aside class="col col-types panel">
+    <h2 class="panel-title">Тип ВС</h2>
+    <div id="type-switch" class="type-switch" role="radiogroup" aria-label="Тип ВС">
+      {% for type in aircraft_types %}
+      <label class="type-option">
+        <input type="radio" name="aircraft_type" value="{{ type }}"
+               {% if loop.first %}checked{% endif %}>
+        <span>{{ type }}</span>
+      </label>
+      {% endfor %}
+    </div>
+  </aside>
+
+  <main class="col col-chat">
+    <section class="panel chat-panel">
+      <h2 class="panel-title">Вопрос — ответ</h2>
+      <div id="feed" class="feed" aria-live="polite"></div>
+      <form id="ask-form" class="ask-form" autocomplete="off">
+        <input id="ask-input" class="ask-input" name="question"
+               placeholder="Спросите по документации…" autofocus>
+        <button type="submit" class="ask-send">Спросить</button>
+      </form>
+    </section>
+  </main>
+
+  <aside class="col col-viewer panel">
+    <h2 class="panel-title">Просмотр</h2>
+    <p class="viewer-hint" id="viewer-hint">
+      Откройте цитату — PDF появится здесь.</p>
+    <iframe id="viewer" class="viewer" title="Просмотр листа" hidden></iframe>
+  </aside>
+</div>
+
+<script src="/static/pdfjs/pdf.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

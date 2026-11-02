@@ -1,0 +1,149 @@
+/* Ф2.1: логика чата — отправка вопроса, три вида сообщений, открытие листа.
+   Никаких обращений к CDN: PDF.js лежит в /static/pdfjs/. */
+"use strict";
+
+const feed = document.getElementById("feed");
+const form = document.getElementById("ask-form");
+const input = document.getElementById("ask-input");
+const viewer = document.getElementById("viewer");
+const viewerHint = document.getElementById("viewer-hint");
+
+const LAYER_RU = {
+  "base": "базовый",
+  "supplement": "дополнение",
+  "change": "изменение",
+  "unknown": "слой не определён",
+};
+
+const SCOPE_RU = {
+  "all": "все борта типа",
+  "serials": "",
+  "equipment": "опция оборудования",
+};
+
+function applicabilityRu(value) {
+  if (!value) return "—";
+  if (value.startsWith("serials:")) {
+    return "борта " + value.slice("serials:".length).trim();
+  }
+  return SCOPE_RU[value] || value;
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function citationNode(citation) {
+  const box = el("div", "citation");
+  const docLine = el("div", "doc-line");
+  docLine.append(el("span", "sheet-ref",
+    `${citation.document} лист ${citation.page}`));
+  if (citation.system_code) {
+    docLine.append(el("span", "code", ` · код ${citation.system_code}`));
+  }
+  docLine.append(" ");
+  docLine.append(el("span", "chip " + (citation.ok ? "ok" : "fail"),
+    citation.ok ? "подтверждено" : "не подтверждено"));
+  box.append(docLine);
+
+  const metaParts = [`слой: ${LAYER_RU[citation.doc_layer] || citation.doc_layer || "—"}`,
+    `применимость: ${applicabilityRu(citation.doc_applicability)}`];
+  if (citation.doc_revision) metaParts.push(`ревизия: ${citation.doc_revision}`);
+  box.append(el("div", "doc-meta", metaParts.join(" · ")));
+
+  const link = el("a", null, "открыть лист →");
+  link.href = citation.viewer_url || citation.link;
+  link.target = "_blank";
+  link.addEventListener("click", (event) => {
+    event.preventDefault();
+    viewerHint.hidden = true;
+    viewer.hidden = false;
+    viewer.src = link.href;
+  });
+  box.append(link);
+  return box;
+}
+
+function neighborsNode(neighbors) {
+  if (!neighbors || !neighbors.length) return null;
+  const names = neighbors.map((n) => `${n.document} лист ${n.page} — ${n.label}`);
+  return el("p", "neighbors", "Соседние листы (может быть продолжение): "
+    + names.join("; "));
+}
+
+function renderAnswer(message, payload) {
+  for (const claim of payload.claims) {
+    message.append(el("p", "answer-text", claim.text));
+  }
+  for (const citation of payload.citations) {
+    message.append(citationNode(citation));
+  }
+  const warning = payload.applicability_warning;
+  if (warning) message.append(el("p", "applicability-warning", warning));
+  const neighbors = neighborsNode(payload.neighbors);
+  if (neighbors) message.append(neighbors);
+}
+
+function renderRefusal(message, payload) {
+  const plate = el("p", "reason status-plate fail",
+    "Отказ: " + (payload.reason || "нет подтверждений в документах"));
+  message.append(plate);
+}
+
+function renderClarify(message, payload) {
+  const box = el("div", "clarify");
+  box.append(el("p", null, "Требуется уточнение"));
+  const options = el("div", "options");
+  for (const option of payload.options || []) {
+    const button = el("button", "option");
+    button.append(el("span", null, `${option.id} — ${option.label}`));
+    const doc = el("span", "option-doc",
+      `${option.document || "—"} · раздел ${option.page ?? "—"}`);
+    button.append(doc);
+    button.addEventListener("click", () => ask(option.label));
+    options.append(button);
+  }
+  box.append(options);
+  message.append(box);
+}
+
+function renderQuestion(text) {
+  const message = el("div", "message");
+  message.append(el("p", "question", text));
+  feed.append(message);
+  return feed.lastElementChild;
+}
+
+async function ask(question) {
+  const text = (question ?? input.value).trim();
+  if (!text) return;
+  if (!question) input.value = "";
+  const message = renderQuestion(text);
+  const pending = el("p", "answer-text", "Ищу в документах…");
+  message.append(pending);
+  try {
+    const response = await fetch("/api/ask", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: text }),
+    });
+    const payload = await response.json();
+    pending.remove();
+    if (payload.status === "answer") renderAnswer(message, payload);
+    else if (payload.status === "refusal") renderRefusal(message, payload);
+    else renderClarify(message, payload);
+  } catch (error) {
+    pending.remove();
+    message.append(el("p", "reason status-plate fail",
+      "Ошибка среды: сервер недоступен"));
+  }
+  feed.scrollTop = feed.scrollHeight;
+}
+
+form.addEventListener("submit", (event) => {
+  event.preventDefault();
+  ask();
+});
