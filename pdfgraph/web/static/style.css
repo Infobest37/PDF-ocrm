@@ -27,7 +27,8 @@ body {
 
 .screen {
   display: grid;
-  grid-template-columns: 212px 1fr 380px;
+  /* Ф2.2: правая колонка сужена до 270px — ленте просторнее. */
+  grid-template-columns: 212px 1fr 270px;
   gap: 16px;
   padding: 16px;
   min-height: 100vh;

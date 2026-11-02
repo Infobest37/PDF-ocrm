@@ -93,6 +93,7 @@ def _citation_rows(answer: Answer, store: Store) -> list[dict]:
             "doc_applicability": row["doc_applicability"],
             "doc_revision": row["doc_revision"],
             "link": link,
+            "full_url": link + "?view=full",
             "viewer_url": viewer,
         })
     return citations
@@ -169,7 +170,8 @@ def create_app(store_path: str, pdf_dir: str | None = None,
         return payload
 
     @app.get("/doc/{document:path}/page/{page:int}")
-    def doc_page(document: str, page: int):
+    def doc_page(request: Request, document: str, page: int,
+                 view: str = ""):
         folder = resolved_pdf_dir
         if folder is None or not Path(folder).is_dir():
             raise HTTPException(
@@ -179,6 +181,15 @@ def create_app(store_path: str, pdf_dir: str | None = None,
         if pdf_file is None:
             raise HTTPException(status_code=404,
                                 detail=f"PDF-файл не найден: {document}")
+        # Ф2.2: view=full — полноэкранный вьюер (масштаб/прокрутка/поиск/
+        # поворот); граф-лист → физическая страница через PAGE_OFFSET
+        # (лист 38 базы = страница 39 вьюера). Без параметра — сырой PDF.
+        if view == "full":
+            raw_url = f"/doc/{quote(document)}/page/{page}"
+            return templates.TemplateResponse(
+                request, "full_view.html",
+                {"file_url": raw_url, "page": page + PAGE_OFFSET,
+                 "document": document, "graph_page": page})
         return FileResponse(pdf_file, media_type="application/pdf",
                             filename=Path(pdf_file).name)
 

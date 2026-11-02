@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Просмотр: {{ document }} лист {{ graph_page }}</title>
+<style>
+  body { margin: 0; background: #525659; font: 14px/1.5 "Segoe UI", sans-serif; }
+  .toolbar {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; gap: 8px; align-items: center;
+    background: #323639; color: #f2f4f6;
+    padding: 6px 10px;
+  }
+  .toolbar button, .toolbar input {
+    font: inherit; background: #585d61; color: #f2f4f6;
+    border: 1px solid #6b7784; border-radius: 6px; padding: 4px 10px;
+  }
+  .toolbar button { cursor: pointer; }
+  .toolbar .back { background: #1f6f8b; border-color: #1f6f8b;
+    color: #ffffff; text-decoration: none; }
+  .toolbar .pos { color: #d7dde4; min-width: 110px; }
+  .toolbar .found { color: #e3f0f4; }
+  #pages { overflow-y: auto; height: calc(100vh - 42px); text-align: center; }
+  #pages canvas { margin: 8px auto; box-shadow: 0 0 6px #00000080;
+    background: #ffffff; display: block; }
+  .page-label { color: #d7dde4; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <button class="back" id="back">← Назад к ответу</button>
+  <button id="zoom-out" title="Уменьшить">−</button>
+  <button id="zoom-in" title="Увеличить">+</button>
+  <span class="pos" id="pos"></span>
+  <input id="search" placeholder="Поиск по тексту…" size="24">
+  <span class="found" id="found"></span>
+  <button id="rotate" title="Повернуть на 90°">↻</button>
+</div>
+<div id="pages"></div>
+<script src="/static/pdfjs/pdf.min.js"></script>
+<script>
+"use strict";
+/* Ф2.2: полноэкранный вьюер на API pdf.js 3.11.174 (локально, без CDN).
+   Прокрутка всех листов, масштаб, поворот, поиск по тексту с переходом
+   на страницы-совпадения. worker лежит рядом
+   (/static/pdfjs/pdf.worker.min.js). Смещение нумерации учтено на
+   сервере: PAGE = физическая страница вьюера (граф-лист + 1). */
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  "/static/pdfjs/pdf.worker.min.js";
+
+const FILE_URL = {{ file_url | tojson }};
+const PAGE = {{ page }};
+
+let pdf = null;
+let scale = 1.4;
+let rotation = 0;
+const rendered = new Set();
+const container = document.getElementById("pages");
+
+/* «Назад к ответу»: возврат в чат с тем же вопросом — история браузера,
+   а без истории (вьюер открыт первой страницей вкладки) — на чат. */
+document.getElementById("back").addEventListener("click", () => {
+  if (history.length > 1) history.back();
+  else location.href = "/";
+});
+
+function canvasFor(number) {
+  let canvas = container.querySelector(`canvas[data-page="${number}"]`);
+  if (!canvas) {
+    canvas = document.createElement("canvas");
+    canvas.dataset.page = String(number);
+    const label = document.createElement("div");
+    label.className = "page-label";
+    label.textContent = `лист ${number}`;
+    container.append(canvas, label);
+  }
+  return canvas;
+}
+
+async function renderPage(number) {
+  if (rendered.has(number + ":" + scale + ":" + rotation)) return;
+  rendered.add(number + ":" + scale + ":" + rotation);
+  const page = await pdf.getPage(number);
+  const canvas = canvasFor(number);
+  const viewport = page.getViewport({ scale, rotation });
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  await page.render({
+    canvasContext: canvas.getContext("2d"), viewport,
+  }).promise;
+}
+
+function clearPages() {
+  container.replaceChildren();
+}
+
+async function renderWindow(center) {
+  const from = Math.max(1, center - 2);
+  const to = Math.min(pdf.numPages, center + 3);
+  for (let number = from; number <= to; number += 1) {
+    await renderPage(number);
+  }
+}
+
+function updatePosition() {
+  const center = Math.max(1, Math.round(container.scrollTop / 1200) + 1);
+  document.getElementById("pos").textContent =
+    `лист ${center} из ${pdf.numPages}`;
+  renderWindow(center);
+}
+
+async function jumpTo(number) {
+  const height = 1200 * scale / 1.4;
+  container.scrollTop = (number - 1) * height;
+  updatePosition();
+}
+
+document.getElementById("zoom-in").addEventListener("click",
+  () => { scale = Math.min(4, scale * 1.25); clearPages(); rendered.clear();
+    renderWindow(Math.round(container.scrollTop / 1200) + 1); });
+document.getElementById("zoom-out").addEventListener("click",
+  () => { scale = Math.max(0.5, scale / 1.25); clearPages(); rendered.clear();
+    renderWindow(Math.round(container.scrollTop / 1200) + 1); });
+document.getElementById("rotate").addEventListener("click", () => {
+  rotation = (rotation + 90) % 360;
+  clearPages(); rendered.clear();
+  renderWindow(Math.round(container.scrollTop / 1200) + 1);
+});
+container.addEventListener("scroll", updatePosition);
+
+const searchInput = document.getElementById("search");
+const foundLabel = document.getElementById("found");
+searchInput.addEventListener("keydown", async (event) => {
+  if (event.key !== "Enter" || !searchInput.value.trim()) return;
+  const needle = searchInput.value.trim().toLowerCase();
+  const matches = [];
+  for (let number = 1; number <= pdf.numPages; number += 1) {
+    const page = await pdf.getPage(number);
+    const content = await page.getTextContent();
+    const text = content.items.map((item) => item.str)
+      .join(" ").toLowerCase();
+    if (text.includes(needle)) matches.push(number);
+  }
+  foundLabel.textContent = matches.length
+    ? `найдено на листах: ${matches.slice(0, 12).join(", ")}` +
+      (matches.length > 12 ? "…" : "")
+    : "не найдено";
+  if (matches.length) await jumpTo(matches[0]);
+});
+
+if (!FILE_URL) {
+  document.body.textContent = "Не указан файл PDF";
+} else {
+  pdfjsLib.getDocument(FILE_URL).promise.then(async (document_) => {
+    pdf = document_;
+    await renderWindow(PAGE);
+    await jumpTo(PAGE);
+  }).catch((error) => {
+    document.body.textContent = "Не удалось открыть PDF: " + error;
+  });
+}
+</script>
+</body>
+</html>

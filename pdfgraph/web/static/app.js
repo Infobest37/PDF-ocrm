@@ -55,16 +55,54 @@ function citationNode(citation) {
   box.append(el("div", "doc-meta", metaParts.join(" · ")));
 
   const link = el("a", null, "открыть лист →");
-  link.href = citation.viewer_url || citation.link;
+  /* Ф2.2: полный просмотр в новой вкладке (масштаб/прокрутка/поиск/
+     поворот); клик по номеру листа ведёт туда же. */
+  link.href = citation.full_url || citation.viewer_url || citation.link;
   link.target = "_blank";
   link.addEventListener("click", (event) => {
     event.preventDefault();
-    viewerHint.hidden = true;
-    viewer.hidden = false;
-    viewer.src = link.href;
+    renderThumb(citation);
+    window.open(link.href, "_blank");
   });
+  const sheetRef = box.querySelector(".sheet-ref");
+  if (sheetRef) {
+    sheetRef.style.cursor = "pointer";
+    sheetRef.title = "Открыть лист на весь экран";
+    sheetRef.addEventListener("click", () => {
+      renderThumb(citation);
+      window.open(link.href, "_blank");
+    });
+  }
   box.append(link);
   return box;
+}
+
+/* Ф2.2: миниатюра листа в правой панели (270px) — рендер через
+   локальный pdf.js; смещение нумерации то же, что и у вьюера. */
+async function renderThumb(citation) {
+  viewerHint.hidden = true;
+  viewer.hidden = false;
+  try {
+    const task = pdfjsLib.getDocument(citation.link);
+    const pdf = await task.promise;
+    const page = await pdf.getPage(
+      Math.min(citation.page + 1, pdf.numPages));
+    const viewport = page.getViewport({ scale: 0.4 });
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    await page.render({
+      canvasContext: canvas.getContext("2d"), viewport,
+    }).promise;
+    viewer.replaceChildren(canvas);
+    const full = el("button", null, "Открыть на весь экран");
+    full.addEventListener("click", () =>
+      window.open(citation.full_url || citation.viewer_url, "_blank"));
+    viewer.append(full);
+  } catch (error) {
+    viewer.replaceChildren(el("p", null,
+      "Просмотр недоступен: файл PDF не найден"));
+  }
 }
 
 function neighborsNode(neighbors) {
@@ -117,6 +155,15 @@ function renderQuestion(text) {
   return feed.lastElementChild;
 }
 
+const SESSION_KEY = "pdfgraph-last-conversation";
+
+function saveConversation(question, payload) {
+  try {
+    sessionStorage.setItem(SESSION_KEY,
+      JSON.stringify({ question, payload }));
+  } catch (error) { /* приватный режим — просто не восстанавливаем */ }
+}
+
 async function ask(question) {
   const text = (question ?? input.value).trim();
   if (!text) return;
@@ -135,6 +182,7 @@ async function ask(question) {
     if (payload.status === "answer") renderAnswer(message, payload);
     else if (payload.status === "refusal") renderRefusal(message, payload);
     else renderClarify(message, payload);
+    saveConversation(text, payload);
   } catch (error) {
     pending.remove();
     message.append(el("p", "reason status-plate fail",
@@ -147,3 +195,19 @@ form.addEventListener("submit", (event) => {
   event.preventDefault();
   ask();
 });
+
+/* Ф2.2: «Назад к ответу» возвращает в чат с тем же вопросом —
+   последняя переписка хранится в sessionStorage и восстанавливается
+   при загрузке страницы (в т.ч. после history.back() из вьюера). */
+(function restoreConversation() {
+  try {
+    const saved = sessionStorage.getItem(SESSION_KEY);
+    if (!saved) return;
+    const { question, payload } = JSON.parse(saved);
+    const message = renderQuestion(question);
+    if (payload.status === "answer") renderAnswer(message, payload);
+    else if (payload.status === "refusal")
+      renderRefusal(message, payload);
+    else renderClarify(message, payload);
+  } catch (error) { /* повреждённая запись — начинаем с пустой ленты */ }
+})();
