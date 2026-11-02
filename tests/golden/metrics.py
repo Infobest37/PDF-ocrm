@@ -276,6 +276,14 @@ def _row_for(question: GoldenQuestion, answer: Answer,
     if question.expect_answer:
         doc_hit = any(fragment.document == question.expected_doc
                       for fragment in answer.fragments[:5])
+    # Ф1.7: окно соседних листов — отдельная метрика, hit_at_5 не меняет:
+    # попадание — любой ожидаемый лист в топ-5 ИЛИ среди соседей ответа.
+    hit_neighbors = None
+    if question.expect_answer:
+        hit_neighbors = hit or any(
+            item.get("document") == question.expected_doc
+            and item.get("page") in question.expected_pages
+            for item in (getattr(answer, "neighbors", None) or []))
     return {
         "id": question.id, "mode": question.mode,
         "status": question.status, "question": question.question,
@@ -289,6 +297,8 @@ def _row_for(question: GoldenQuestion, answer: Answer,
         "latency_ms": round(latency_ms, 2),
         "top5": top5, "citations": citations,
         "hit": hit, "doc_hit": doc_hit,
+        "hit_at_5_with_neighbors": hit_neighbors,
+        "neighbors": list(getattr(answer, "neighbors", None) or []),
         "correct_refusal": refusal if question.expect_refusal else None,
         "wrong_refusal": refusal if question.expect_answer else None,
     }
@@ -319,6 +329,11 @@ def _bucket_metrics(subset: list[dict]) -> dict[str, dict]:
         "doc_hit_at_5": {
             "value": _ratio(sum(1 for row in answerable
                                 if row.get("doc_hit")),
+                            len(answerable)), "n": len(answerable)},
+        # Ф1.7: рядом с hit_at_5, отдельно от неё; hit_at_5 не переопределяется.
+        "hit_at_5_with_neighbors": {
+            "value": _ratio(sum(1 for row in answerable
+                                if row.get("hit_at_5_with_neighbors")),
                             len(answerable)), "n": len(answerable)},
         "citation_precision": {
             "value": _ratio(ok_citations, total_citations),
@@ -403,6 +418,7 @@ def render_table(rows: list[dict], metrics: dict[str, dict]) -> str:
     lines += ["", "Метрики: значение (n); n/a — пустой знаменатель, "
               "не единица."]
     lines.append(f"{'mode':<10} {'hit_at_5':<14} "
+                 f"{'h5+соседи':<16} "
                  f"{'doc_hit@5':<14} {'citation_prec':<14} "
                  f"{'refus_recall':<14} {'false_found':<14} "
                  f"{'on_miss':<14} {'refus_false(свод)':<18} "
@@ -411,6 +427,7 @@ def render_table(rows: list[dict], metrics: dict[str, dict]) -> str:
         block = metrics[mode]
         lines.append(
             f"{mode:<10} {_fmt_share(block['hit_at_5']):<14} "
+            f"{_fmt_share(block['hit_at_5_with_neighbors']):<16} "
             f"{_fmt_share(block['doc_hit_at_5']):<14} "
             f"{_fmt_share(block['citation_precision']):<14} "
             f"{_fmt_share(block['refusal_recall']):<14} "

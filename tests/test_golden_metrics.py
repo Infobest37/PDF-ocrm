@@ -35,8 +35,11 @@ REPORT_PATH = REPO_ROOT / "reports" / "golden_run.json"
 #: Метрики карточки 0.1 + doc_hit_at_5 (Ф1.1) + деление отказа
 #: (refusal_false_on_found/refusal_on_miss, Ф1.3б.1); по каждой печатается n.
 #: ``refusal_false`` остаётся сводным (смесь ложных и обязательных отказов).
+#: Ф1.7: hit_at_5_with_neighbors — окно соседних листов, рядом с hit_at_5,
+#: hit_at_5 не переопределяется.
 PLANNED_METRICS = (
-    "hit_at_5", "doc_hit_at_5", "citation_precision",
+    "hit_at_5", "hit_at_5_with_neighbors", "doc_hit_at_5",
+    "citation_precision",
     "refusal_recall", "refusal_false", "refusal_false_on_found",
     "refusal_on_miss", "latency_median_ms",
 )

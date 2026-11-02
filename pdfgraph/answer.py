@@ -6,7 +6,8 @@ is shown to a user.
 """
 
 import logging
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from pdfgraph.query import (
@@ -41,7 +42,12 @@ class Claim:
 
 @dataclass
 class Answer:
-    """A response, its claims, and the fragments offered as evidence."""
+    """A response, its claims, and the fragments offered as evidence.
+
+    ``neighbors`` (Ф1.7) — окно соседних листов к топ-5: отдельный список
+    ссылок ``{"document", "page", "label"}`` WITHOUT цитат; в ранжирование,
+    claims и проверку цитат не попадает.
+    """
 
     question: str
     claims: list[Claim]
@@ -49,6 +55,7 @@ class Answer:
     refusal: bool = False
     reason: str = ""
     clarification: dict | None = None
+    neighbors: list[dict] = field(default_factory=list)
 
 
 class Answerer(Protocol):
@@ -73,7 +80,79 @@ class ExtractiveAnswerer:
         return Answer(question=question, claims=claims, fragments=fragments)
 
 
-def build_answer(
+# --- Ф1.7: окно соседних листов ---------------------------------------------
+
+#: Флаг окна соседних листов; читается при каждом вызове (без кэша),
+#: как SPECIFICITY_WEIGHT_ENV в rag_fusion. Значения «0»/«false» отключают.
+NEIGHBORS_ENV = "PDFGRAPH_NEIGHBORS"
+#: Метка соседа «лист −1».
+NEIGHBOR_LABEL_PREV = "предыдущий лист"
+#: Метка соседа «лист +1»: продолжение не гарантируется.
+NEIGHBOR_LABEL_NEXT = "следующий лист, возможно продолжение"
+
+
+def neighbors_enabled() -> bool:
+    """Окно соседей включено: PDFGRAPH_NEIGHBORS не равен 0/false."""
+    return os.environ.get(NEIGHBORS_ENV, "").strip().lower() not in {
+        "0", "false"}
+
+
+def _page_exists(store: Store, document: str, page: int) -> bool:
+    """Лист существует в документе (границы документа не переходить)."""
+    row = store._connection.execute(
+        "SELECT 1 FROM pages WHERE document = ? AND page = ?",
+        (str(document), int(page))).fetchone()
+    return row is not None
+
+
+def _page_flagged(store: Store, document: str, page: int) -> bool:
+    """Лист помечен needs_rescan или is_service — в соседи не брать."""
+    row = store._connection.execute(
+        "SELECT needs_rescan, is_service FROM pages "
+        "WHERE document = ? AND page = ?",
+        (str(document), int(page))).fetchone()
+    if row is None:
+        return True
+    return bool(row[0]) or bool(row[1])
+
+
+def collect_neighbors(store: Store, fragments: list[Fragment]) -> list[dict]:
+    """Соседи листов топ-5: −1 и +1 того же документа, без цитат.
+
+    Правила карточки Ф1.7: не больше двух на фрагмент; дубликаты не
+    повторяются (в том числе листы самой выдачи); needs_rescan и
+    is_service не берутся; за границы документа не переходить. Порядок
+    основной выдачи не меняется — соседи живут отдельным списком.
+    """
+    if not fragments or not neighbors_enabled():
+        return []
+    # Дедупликация — против топ-5 (карточка Ф1.7: соседи строятся ОТ
+    # топ-5; лист глубже топ-5, соседний к нему, остаётся соседом —
+    # кейс e18 золотого набора) и против уже добавленных соседей.
+    seen: set[tuple[str, int]] = {
+        (fragment.document, fragment.page) for fragment in fragments[:5]}
+    neighbors: list[dict] = []
+    for fragment in fragments[:5]:
+        document, page = fragment.document, fragment.page
+        for offset, label in ((-1, NEIGHBOR_LABEL_PREV),
+                              (1, NEIGHBOR_LABEL_NEXT)):
+            candidate = page + offset
+            if candidate < 1:
+                continue
+            key = (document, candidate)
+            if key in seen:
+                continue
+            if not _page_exists(store, document, candidate):
+                continue
+            if _page_flagged(store, document, candidate):
+                continue
+            seen.add(key)
+            neighbors.append({"document": document, "page": candidate,
+                              "label": label})
+    return neighbors
+
+
+def _build_answer_core(
     store: Store,
     question: str,
     aircraft_type: str | None = None,
@@ -302,4 +381,30 @@ def build_answer(
     answer = selected_answerer.answer(question, fragments)
     logger.debug("question=%r -> answer with %d claims",
                  question, len(answer.claims))
+    return answer
+
+
+def build_answer(
+    store: Store,
+    question: str,
+    aircraft_type: str | None = None,
+    answerer: Answerer | None = None,
+    min_score: float = 0.35,
+    use_rag_fusion: bool = False,
+    use_synthesis: bool = False,
+    llm_settings=None,
+    search_mode: str | None = None,
+) -> Answer:
+    """Retrieve evidence and construct an answer, refusing unsupported queries.
+
+    Контракт и все параметры прежние (см. :func:`_build_answer_core`).
+    Ф1.7: ответ дополняется окном соседних листов ``neighbors`` к топ-5
+    (отдельный список ссылок с подписью «может быть продолжение»,
+    без цитат); выдача и порядок топ-5 не меняются. Флаг
+    ``PDFGRAPH_NEIGHBORS=0`` отключает окно — ответ идентичен прежнему.
+    """
+    answer = _build_answer_core(
+        store, question, aircraft_type, answerer, min_score,
+        use_rag_fusion, use_synthesis, llm_settings, search_mode)
+    answer.neighbors = collect_neighbors(store, answer.fragments)
     return answer

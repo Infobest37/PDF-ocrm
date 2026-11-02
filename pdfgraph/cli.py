@@ -225,6 +225,13 @@ def _print_json(answer: Answer, rows: list[dict], verified: bool) -> None:
             "options": [dict(option) for option
                         in answer.clarification.get("options", [])],
         }
+    # Ф1.7: окно соседних листов — отдельный список ссылок с подписью;
+    # цитатами они не являются, в claims/citations не попадают.
+    if getattr(answer, "neighbors", None) and not answer.refusal:
+        payload["neighbors"] = [
+            {"document": item["document"], "page": item["page"],
+             "label": item["label"]}
+            for item in answer.neighbors]
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -277,6 +284,13 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
             if not row["ok"] and row["reason"]:
                 line += f" — {row['reason']}"
             print(line)
+    # Ф1.7: окно соседних листов — ссылка и подпись, не цитаты; при отказе
+    # ответа нет, блок не печатается.
+    if getattr(answer, "neighbors", None) and not answer.refusal:
+        print("Соседние листы (может быть продолжение):")
+        for item in answer.neighbors:
+            print(f"  {item['document'] or '?'} лист {item['page']}"
+                  f" — {item['label']}")
     # Результат verify_citations печатается всегда: количество цитат и вердикт.
     ok = sum(1 for row in rows if row["ok"])
     print(f"Подтверждено {ok} из {len(rows)}")
