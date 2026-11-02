@@ -172,20 +172,64 @@ def _cmd_build(args: argparse.Namespace) -> int:
     return 0
 
 
+def _base_aircraft_type(store: Store) -> str | None:
+    """Единственный непустой тип листов базы (Ф0.3в, дефолт --type);
+    типов нет или несколько — None (фильтр не ставится)."""
+    rows = store._connection.execute(
+        "SELECT DISTINCT aircraft_type FROM pages "
+        "WHERE TRIM(COALESCE(aircraft_type, '')) <> ''").fetchall()
+    return rows[0][0] if len(rows) == 1 else None
+
+
+def _documents_meta(store: Store) -> dict[str, tuple[str, str, str]]:
+    """{документ: (слой, применимость, ревизия)} для пометок цитат (Ф0.3в).
+
+    Таблицы нет (старая база) — пустой словарь, отсутствие не глушится
+    молча: пишется в лог.
+    """
+    try:
+        rows = store._connection.execute(
+            "SELECT document, layer, applicability_scope, "
+            "applicability_serials, revision_no, revision_date "
+            "FROM documents").fetchall()
+    except (sqlite3.OperationalError, TypeError, AttributeError) as error:
+        # Подделки store в тестах (Mock-connection) тоже означают «нет
+        # данных»: пометки не добавляются, отсутствие не глушится молча.
+        logging.warning("documents table unavailable: %s", error)
+        return {}
+    meta: dict[str, tuple[str, str, str]] = {}
+    for document, layer, scope, serials, revision_no, revision_date in rows:
+        if scope == "serials" and serials:
+            applicability = f"serials: {serials}"
+        else:
+            applicability = scope
+        if revision_no is not None and revision_date:
+            revision = f"изм. {revision_no} от {revision_date}"
+        else:
+            revision = revision_date or ""
+        meta[document] = (layer or "", applicability, revision)
+    return meta
+
+
 def _evidence_rows(answer: Answer, checks: list[CitationCheck],
                    store: Store | None = None) -> list[dict]:
     """One row per citation: where it points, the sheet's code and the verdict.
 
-    ``store`` здесь не используется: строки остаются взаимно-однозначными с
-    цитатами (счётчик «Подтверждено N из N» неизменен). Текстовый рендер
-    принимает store отдельно, чтобы лист-продолжение печатался диапазоном
-    «листы 7–8» (:func:`_print_text`); json-контракт не меняется.
+    Ф0.3в: каждая строка дополняется полями документа из таблицы
+    documents — ``doc_layer``, ``doc_applicability``, ``doc_revision``
+    (пусто, если строки нет или таблица недоступна); текстовый рендер
+    печатает их строкой, json-контракт расширяется аддитивно.
+    Текстовый рендер принимает store отдельно, чтобы лист-продолжение
+    печатался диапазоном «листы 7–8» (:func:`_print_text`).
     """
     by_sheet = {(fragment.document, fragment.page): fragment
                 for fragment in answer.fragments}
+    meta = _documents_meta(store) if store is not None else {}
     rows = []
     for check in checks:
         fragment = by_sheet.get((check.document, check.page))
+        doc_layer, doc_applicability, doc_revision = meta.get(
+            check.document, ("", "", ""))
         rows.append({
             "claim_index": check.claim_index,
             "document": check.document,
@@ -194,6 +238,9 @@ def _evidence_rows(answer: Answer, checks: list[CitationCheck],
             "subsystem_code": fragment.subsystem_code if fragment else "",
             "ok": check.ok,
             "reason": check.reason,
+            "doc_layer": doc_layer,
+            "doc_applicability": doc_applicability,
+            "doc_revision": doc_revision,
         })
     return rows
 
@@ -232,6 +279,10 @@ def _print_json(answer: Answer, rows: list[dict], verified: bool) -> None:
             {"document": item["document"], "page": item["page"],
              "label": item["label"]}
             for item in answer.neighbors]
+    # Ф0.3в: предупреждение о применимости документа-лидера к борту из
+    # вопроса (ответ при этом выдаётся как раньше).
+    if getattr(answer, "applicability_warning", ""):
+        payload["applicability_warning"] = answer.applicability_warning
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -281,6 +332,12 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
             code = row["system_code"] or row["subsystem_code"] or "без кода"
             mark = "ok" if row["ok"] else "НЕ ПОДТВЕРЖДЕНА"
             line = f"  [{mark}] {sheet} код {code}"
+            # Ф0.3в: слой и применимость документа цитаты.
+            if row.get("doc_layer"):
+                line += (f" — слой {row['doc_layer']}, применимость "
+                         f"{row['doc_applicability']}")
+                if row.get("doc_revision"):
+                    line += f", ревизия {row['doc_revision']}"
             if not row["ok"] and row["reason"]:
                 line += f" — {row['reason']}"
             print(line)
@@ -342,6 +399,16 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     store = _open_store(store_path)
     if store is None:
         return 2
+
+    # Ф0.3в: --type/--aircraft-type без значения — текущий тип базы
+    # (единственный непустой тип листов); определить не удалось —
+    # фильтр не ставится. Решение печатается только в текстовом режиме:
+    # stdout в --json остаётся чистым JSON.
+    if not getattr(args, "aircraft_type", None):
+        args.aircraft_type = _base_aircraft_type(store)
+        if args.aircraft_type and not args.as_json:
+            print(f"Фильтр по типу ВС: {args.aircraft_type} "
+                  f"(тип базы по умолчанию)")
 
     session = None
     answer: Answer | None = None
@@ -819,8 +886,10 @@ def main(argv: list[str]) -> int:
         "--store", dest="store_path", required=True, metavar="PATH",
         help="SQLite graph file produced by 'build'.")
     ask_parser.add_argument(
-        "--type", dest="aircraft_type", default=None, metavar="ВС",
-        help="Restrict answers to sheets of this aircraft type.")
+        "--type", "--aircraft-type", dest="aircraft_type", default=None,
+        metavar="ВС",
+        help="Restrict answers to sheets of this aircraft type "
+             "(Ф0.3в: default — the base's single aircraft type).")
     ask_parser.add_argument(
         "--json", dest="as_json", action="store_true",
         help="Print the answer as JSON (verified citations are the "

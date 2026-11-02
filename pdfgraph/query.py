@@ -393,7 +393,8 @@ def _page_codes(store: Store, document: str, page: int) -> tuple[str, str]:
 
 
 def vector_search(store: Store, question: str, limit: int = 10,
-                  model_dir: str | None = None) -> list[Fragment]:
+                  model_dir: str | None = None,
+                  aircraft_type: str | None = None) -> list[Fragment]:
     """Семантические фрагменты «вопрос — лист» поверх чанк-векторов.
 
     Каждый хит — дословный срез текста одного листа (границы даёт
@@ -401,6 +402,11 @@ def vector_search(store: Store, question: str, limit: int = 10,
     ``(SEMANTIC_BASE_LOW, SEMANTIC_BASE_HIGH]``, чтобы точные ветки
     (код, номер листа) оставались впереди. Хранилище без индекса даёт
     ``[]`` без вызова модели: канал вспомогательный и отказ не поднимает.
+
+    Ф0.3в: с заданным ``aircraft_type`` листы других типов не попадают
+    в канал вовсе (та же семантика, что у лексических ветвей); пустая
+    метка при заданном фильтре тоже отсекается (замер Ф0.3в: пустых
+    меток 0 из 13 700).
     """
     from pdfgraph import embedding
 
@@ -409,6 +415,11 @@ def vector_search(store: Store, question: str, limit: int = 10,
     if not hits:
         return []
     allowed = set(store.searchable_pages())
+    if aircraft_type is not None:
+        typed = {(row[0], row[1]) for row in store._connection.execute(
+            "SELECT document, page FROM pages WHERE aircraft_type = ?",
+            (aircraft_type,))}
+        allowed &= typed
     fragments: list[Fragment] = []
     seen: set[tuple[str, int]] = set()
     for (document, page, chunk_ix), cosine in hits:
@@ -466,7 +477,8 @@ def hybrid_search(store: Store, question: str,
     if not lexical_ranking and mode == "hybrid_gated":
         return []  # гейт: векторный канал на пустой лексике не вызывается
     vector_ranking = vector_search(store, question, limit=depth,
-                                   model_dir=model_dir)
+                                   model_dir=model_dir,
+                                   aircraft_type=aircraft_type)
     return fuse_hybrid(lexical_ranking, vector_ranking, limit,
                        spec_fn=make_specificity_fn(store, question))
 

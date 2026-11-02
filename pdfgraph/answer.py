@@ -7,6 +7,8 @@ is shown to a user.
 
 import logging
 import os
+import re
+import sqlite3
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -45,8 +47,11 @@ class Answer:
     """A response, its claims, and the fragments offered as evidence.
 
     ``neighbors`` (Ф1.7) — окно соседних листов к топ-5: отдельный список
-    ссылок ``{"document", "page", "label"}`` WITHOUT цитат; в ранжирование,
+    ссылок ``{"document", "page", "label"}`` без цитат; в ранжирование,
     claims и проверку цитат не попадает.
+    ``applicability_warning`` (Ф0.3в) — пометка «документ применим к
+    бортам …; ваш борт не указан», когда борт из вопроса не входит в
+    применимость документа-лидера; ответ при этом выдаётся как раньше.
     """
 
     question: str
@@ -56,6 +61,7 @@ class Answer:
     reason: str = ""
     clarification: dict | None = None
     neighbors: list[dict] = field(default_factory=list)
+    applicability_warning: str = ""
 
 
 class Answerer(Protocol):
@@ -152,6 +158,71 @@ def collect_neighbors(store: Store, fragments: list[Fragment]) -> list[dict]:
     return neighbors
 
 
+# --- Ф0.3в: применимость документов ------------------------------------------
+
+#: Бортовой номер в вопросе — копия правила Ф0.3а
+#: (pdfgraph/documents._SERIAL_RE; documents.py не импортируется).
+_APPLICABILITY_SERIAL_RE = re.compile(
+    r"(?<![0-9-])(?:2\d-\d{3}|2\d\d{3,4})(?![0-9-])")
+
+
+def _documents_rows(store: Store) -> dict[str, dict] | None:
+    """Строки documents {документ: {layer, scope, serials, …}} или None.
+
+    None — таблицы нет (старые базы/фикстуры): поведение прежнее,
+    отсутствие таблицы не глушится молча — пишется в лог.
+    """
+    try:
+        rows = store._connection.execute(
+            "SELECT document, layer, applicability_scope, "
+            "applicability_serials, revision_no, revision_date "
+            "FROM documents").fetchall()
+        return {
+            row[0]: {"layer": row[1], "scope": row[2], "serials": row[3],
+                     "revision_no": row[4], "revision_date": row[5]}
+            for row in rows}
+    except (sqlite3.OperationalError, TypeError, AttributeError) as error:
+        # Подделки store в тестах (Mock-connection) тоже означают «нет
+        # данных»: поведение прежнее, отсутствие не глушится молча.
+        logger.warning("documents table unavailable: %s", error)
+        return None
+
+
+def applicability_verdict(store: Store, question: str, fragments: list
+                          ) -> tuple[str | None, str]:
+    """Ф0.3в: (причина отказа | None, предупреждение) по борту вопроса.
+
+    Отказ (п. 4 карточки): борт в вопросе есть, но в documents нет ни
+    одного документа scope=all и ни одного scope=serials с этим бортом —
+    «документации по борту N в базе нет». Предупреждение (п. 3): борт
+    есть, лидер — документ scope=serials без этого борта, но отказ не
+    сработал (есть базовые или подходящие serials) — ответ выдаётся с
+    пометкой. Без борта в вопросе или без таблицы — (None, "").
+    """
+    rows = _documents_rows(store)
+    if rows is None:
+        return None, ""
+    serials_q = sorted(set(_APPLICABILITY_SERIAL_RE.findall(question)))
+    if not serials_q:
+        return None, ""
+    serial = serials_q[0]
+    has_base = any(row["scope"] == "all" for row in rows.values())
+    has_serial = any(
+        row["scope"] == "serials" and serial in {
+            part.strip() for part in (row["serials"] or "").split(",")}
+        for row in rows.values())
+    if not has_base and not has_serial:
+        return f"документации по борту {serial} в базе нет", ""
+    leader = fragments[0] if fragments else None
+    leader_row = rows.get(leader.document) if leader else None
+    if (leader_row and leader_row["scope"] == "serials"
+            and serial not in {part.strip() for part in
+                               (leader_row["serials"] or "").split(",")}):
+        return None, (f"документ применим к бортам "
+                      f"{leader_row['serials']}; ваш борт не указан")
+    return None, ""
+
+
 def _build_answer_core(
     store: Store,
     question: str,
@@ -207,7 +278,8 @@ def _build_answer_core(
                     if search_mode is None else search_mode)
         if mode_now != "lexical" and (mode_now == "hybrid_full" or fragments):
             vector_ranking = vector_search(store, question,
-                                           limit=channel_depth)
+                                           limit=channel_depth,
+                                           aircraft_type=aircraft_type)
             fragments = fuse_hybrid(fragments, vector_ranking,
                                     limit=10,
                                     spec_fn=make_specificity_fn(
@@ -402,9 +474,19 @@ def build_answer(
     (отдельный список ссылок с подписью «может быть продолжение»,
     без цитат); выдача и порядок топ-5 не меняются. Флаг
     ``PDFGRAPH_NEIGHBORS=0`` отключает окно — ответ идентичен прежнему.
+    Ф0.3в: применимость по борту вопроса — честный отказ «документации
+    по борту N в базе нет» (п. 4) и пометка на ответе, если лидер —
+    дополнение к чужим бортам (п. 3); цитаты и verify не затронуты.
     """
     answer = _build_answer_core(
         store, question, aircraft_type, answerer, min_score,
         use_rag_fusion, use_synthesis, llm_settings, search_mode)
+    reason, warning = applicability_verdict(store, question,
+                                            answer.fragments)
+    if reason and not answer.refusal:
+        answer = Answer(question=question, claims=[],
+                        fragments=answer.fragments, refusal=True,
+                        reason=reason)
     answer.neighbors = collect_neighbors(store, answer.fragments)
+    answer.applicability_warning = warning
     return answer
