@@ -489,4 +489,13 @@ def build_answer(
                         reason=reason)
     answer.neighbors = collect_neighbors(store, answer.fragments)
     answer.applicability_warning = warning
+    # Ф2.3: человеческое начало ответа — Claim.answer_text; Claim.text
+    # (дословный сниппет-цитата) и verify не меняются.
+    if not answer.refusal and answer.claims:
+        from pdfgraph.humanize import lead_paragraph
+
+        leader = answer.fragments[0] if answer.fragments else None
+        if leader is not None and answer.claims[0].answer_text is None:
+            paragraph, _fallback = lead_paragraph(store, question, leader)
+            answer.claims[0].answer_text = paragraph or None
     return answer

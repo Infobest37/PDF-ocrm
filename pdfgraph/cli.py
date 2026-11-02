@@ -250,6 +250,8 @@ def _print_json(answer: Answer, rows: list[dict], verified: bool) -> None:
     claims = [
         {
             "text": claim.text,
+            # Ф2.3: человеческий абзац аддитивно; text остаётся дословным.
+            "answer_text": claim.answer_text,
             "evidence": list(claim.evidence),
             "citations": [row for row in rows if row["claim_index"] == index],
         }
@@ -317,8 +319,15 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
         return
     if answer.claims:
         print("Ответ:")
+        # Ф2.3: человеческий абзац (answer_text) — над цитатой; сам
+        # claim.text остаётся дословным сниппетом и проверяется verify.
+        printed_paragraph = False
         for claim in answer.claims:
-            print(f"  - {claim.text}")
+            if claim.answer_text and not printed_paragraph:
+                _safe_print(f"  {claim.answer_text}")
+                printed_paragraph = True
+            else:
+                print(f"  - {claim.text}")
     if rows:
         by_sheet = {(fragment.document, fragment.page): fragment
                     for fragment in answer.fragments}
