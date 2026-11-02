@@ -39,3 +39,7 @@ __pycache__/
 *.pyc
 /*.txt
 __pycache__/
+pdfs/
+prepared/
+models/
+*.db.backup*
