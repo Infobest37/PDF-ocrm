@@ -76,7 +76,8 @@ def test_schema_wal_and_stats_include_sheet_and_pending_nodes(tmp_path):
 
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
-        assert connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "5"
+        # Ф0.3б: актуальная схема — v6.
+        assert connection.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "6"
         indexes = {
             row[0]
             for row in connection.execute(
@@ -146,7 +147,7 @@ def test_old_database_migrates_schema_version_on_open(tmp_path):
         reopened.close()
     with sqlite3.connect(database) as connection:
         assert connection.execute(
-            "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "5"
+            "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0] == "6"
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'defects'"
         ).fetchone() == (1,)

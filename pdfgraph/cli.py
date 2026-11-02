@@ -416,6 +416,15 @@ def _log_duplicate(
         handle.write(line)
 
 
+def _log_documents(store_path: str, action: str, document: str,
+                   detail: str) -> None:
+    """Append one audit line to documents.log next to the graph (Ф0.3б)."""
+    log_path = pathlib.Path(store_path).with_name("documents.log")
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{stamp} {action} document={document} {detail}\n")
+
+
 def _log_garbage(store_path: str, action: str, document: str,
                  page: int, reason: str, changed: bool) -> None:
     """Append one audit line to garbage.log next to the graph file (0.2)."""
@@ -574,6 +583,86 @@ def _cmd_unmark_flag(args: argparse.Namespace, flag: str) -> int:
     else:
         _safe_print(f"unmark-{flag}: «{args.document}» лист {args.page} "
                     "не был помечен; причина «manual: снято» не записана")
+    return 0
+
+
+def _cmd_docs_list(args: argparse.Namespace) -> int:
+    """CLI-handler: docs-list (Ф0.3б) — таблица документов с полями."""
+    from pdfgraph.documents import get_row
+
+    store = Store(args.store_path)
+    try:
+        rows = store._connection.execute(
+            "SELECT document, family, aircraft_type, layer, target, "
+            "applicability_serials, applicability_scope, "
+            "applicability_source, revision_no, revision_date, "
+            "supersedes, review_status, notes FROM documents "
+            "ORDER BY document").fetchall()
+    finally:
+        store.close()
+    print(f"Документов: {len(rows)}")
+    for row in rows:
+        _safe_print(
+            f"- {row[0]}\n"
+            f"    family={row[1]} тип={row[2]} слой={row[3]} "
+            f"цель={row[4] or '—'}\n"
+            f"    применимость: scope={row[6]} борта=[{row[5] or '—'}] "
+            f"источник={row[7]}\n"
+            f"    ревизия: №{row[8] if row[8] is not None else '—'} "
+            f"{row[9] or '—'}; supersedes={row[10] or '—'}\n"
+            f"    статус={row[11]} заметки={row[12] or '—'}")
+    return 0
+
+
+def _cmd_docs_fill(args: argparse.Namespace) -> int:
+    """CLI-handler: docs-fill (Ф0.3б) — идемпотентное заполнение."""
+    from pdfgraph.documents import fill_missing
+
+    store = Store(args.store_path)
+    try:
+        stats = fill_missing(store)
+    finally:
+        store.close()
+    _log_documents(args.store_path, "fill", "*",
+                   " ".join(f"{key}={value}"
+                            for key, value in stats.items()))
+    print(" ".join(f"{key}={value}" for key, value in stats.items()))
+    return 0
+
+
+def _cmd_docs_set(args: argparse.Namespace) -> int:
+    """CLI-handler: docs-set (Ф0.3б) — ручная правка, аудит в лог."""
+    from pdfgraph.documents import set_fields
+
+    store = Store(args.store_path)
+    try:
+        updated = set_fields(
+            store, args.document, layer=args.layer, serials=args.serials,
+            scope=args.scope, target=args.target, notes=args.notes)
+    finally:
+        store.close()
+    detail = (f"layer={updated['layer']} serials="
+              f"[{updated['applicability_serials']}] scope="
+              f"{updated['applicability_scope']} source=manual")
+    _log_documents(args.store_path, "set", args.document, detail)
+    print(f"Обновлено: {args.document}; {detail}")
+    return 0
+
+
+def _cmd_docs_unset(args: argparse.Namespace) -> int:
+    """CLI-handler: docs-unset (Ф0.3б) — откат к авто-значениям."""
+    from pdfgraph.documents import unset_document
+
+    store = Store(args.store_path)
+    try:
+        restored = unset_document(store, args.document)
+    finally:
+        store.close()
+    _log_documents(args.store_path, "unset", args.document,
+                   f"layer={restored['layer']} scope="
+                   f"{restored['applicability_scope']} source="
+                   f"{restored['applicability_source']}")
+    print(f"Откат к авто-значениям: {args.document}")
     return 0
 
 
@@ -847,6 +936,51 @@ def main(argv: list[str]) -> int:
         help="Re-run 0.2 auto flagging over an existing store (idempotent).")
     flags_auto_parser.add_argument("store_path", help="SQLite graph file.")
     flags_auto_parser.set_defaults(handler=_cmd_mark_flags_auto)
+
+    # Ф0.3б: слои и применимость документов (таблица documents, v6).
+    docs_list_parser = commands.add_parser(
+        "docs-list",
+        help="List documents with layer/applicability fields (Ф0.3б).")
+    docs_list_parser.add_argument("store_path", help="SQLite graph file.")
+    docs_list_parser.set_defaults(handler=_cmd_docs_list)
+
+    docs_fill_parser = commands.add_parser(
+        "docs-fill",
+        help="Idempotently fill missing rows of documents (Ф0.3б).")
+    docs_fill_parser.add_argument("store_path", help="SQLite graph file.")
+    docs_fill_parser.set_defaults(handler=_cmd_docs_fill)
+
+    docs_set_parser = commands.add_parser(
+        "docs-set",
+        help="Manual edit of a documents row (audited, Ф0.3б).")
+    docs_set_parser.add_argument("store_path", help="SQLite graph file.")
+    docs_set_parser.add_argument(
+        "--document", required=True, metavar="ИМЯ",
+        help="Exact document name (as stored in pages).")
+    docs_set_parser.add_argument(
+        "--layer", choices=("base", "supplement", "change", "unknown"),
+        default=None, help="Document layer.")
+    docs_set_parser.add_argument(
+        "--serials", default=None, metavar="СПИСОК",
+        help="Applicable serials, comma-separated ('' = all).")
+    docs_set_parser.add_argument(
+        "--scope", choices=("all", "serials", "equipment"), default=None,
+        help="Applicability scope.")
+    docs_set_parser.add_argument(
+        "--target", default=None, metavar="ЦЕЛЬ",
+        help="What this supplement targets (РТЭ/РО/комплект).")
+    docs_set_parser.add_argument(
+        "--notes", default=None, help="Free-form note (audited).")
+    docs_set_parser.set_defaults(handler=_cmd_docs_set)
+
+    docs_unset_parser = commands.add_parser(
+        "docs-unset",
+        help="Revert a documents row to auto-computed values (Ф0.3б).")
+    docs_unset_parser.add_argument("store_path", help="SQLite graph file.")
+    docs_unset_parser.add_argument(
+        "--document", required=True, metavar="ИМЯ",
+        help="Exact document name.")
+    docs_unset_parser.set_defaults(handler=_cmd_docs_unset)
 
     # Ф1.0: эмбеддинг-индекс готовой базы (офлайн, после
     # scripts\fetch_models.ps1).

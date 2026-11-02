@@ -15,7 +15,11 @@ logger = logging.getLogger(__name__)
 #: v4 (card 0.2, 29.10.2026): pages gains needs_rescan/is_service triplets.
 #: v5 (карточка Ф1.0, 30.10.2026): таблица page_embeddings (векторный
 #: канал) и флаг is_continuation на pages (продолжение таблицы/фразы).
-SCHEMA_VERSION = 5
+#: v6 (карточка Ф0.3б, 02.11.2026): таблица documents — слои
+#: (base/supplement/change) и применимость (scope/serials/source);
+#: аддитивная, существующие таблицы не меняются; заполнение —
+#: pdfgraph/documents.fill_missing, правки — CLI docs-set/docs-unset.
+SCHEMA_VERSION = 6
 
 
 @dataclasses.dataclass(frozen=True)
@@ -86,6 +90,31 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS idx_document_aliases_status
                 ON document_aliases (status);
+
+            -- Ф0.3б (02.11.2026): слои и применимость документов.
+            -- document — точное имя файла, как в pages.document (PK);
+            -- layer: base / supplement / change / unknown;
+            -- applicability_scope: all (все борта типа) / serials
+            -- (только перечисленные) / equipment (бортам с опцией,
+            -- список проставляет человек); applicability_source:
+            -- name / text / manual; review_status: ok / needs_human.
+            -- Заполнение — pdfgraph/documents.py (идемпотентное,
+            -- существующие строки не перезаписывает).
+            CREATE TABLE IF NOT EXISTS documents (
+                document TEXT PRIMARY KEY,
+                family TEXT NOT NULL DEFAULT '',
+                aircraft_type TEXT NOT NULL DEFAULT '',
+                layer TEXT NOT NULL DEFAULT 'unknown',
+                target TEXT NOT NULL DEFAULT '',
+                applicability_serials TEXT NOT NULL DEFAULT '',
+                applicability_scope TEXT NOT NULL DEFAULT 'all',
+                applicability_source TEXT NOT NULL DEFAULT 'manual',
+                revision_no INTEGER,
+                revision_date TEXT NOT NULL DEFAULT '',
+                supersedes TEXT NOT NULL DEFAULT '',
+                review_status TEXT NOT NULL DEFAULT 'ok',
+                notes TEXT NOT NULL DEFAULT ''
+            );
 
             CREATE TABLE IF NOT EXISTS pages (
                 document TEXT NOT NULL,

@@ -57,8 +57,9 @@ def test_schema_v5_has_page_embeddings_columns(tmp_path):
 
     store = Store(str(tmp_path / "g.db"))
     try:
-        assert SCHEMA_VERSION == 5
-        assert store.get_meta("schema_version") == "5"
+        # Ф0.3б: актуальная схема — v6; колонки v5 сохраняются.
+        assert SCHEMA_VERSION == 6
+        assert store.get_meta("schema_version") == "6"
         columns = {row[1] for row in store._connection.execute(
             "PRAGMA table_info(page_embeddings)")}
         assert {"document", "page", "chunk_ix", "dim", "model", "vec",
