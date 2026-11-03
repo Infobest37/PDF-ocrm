@@ -315,6 +315,52 @@ def test_answer_reglament_only_carries_missing(tmp_path):
         store.close()
 
 
+def test_gate_card_suffix_homoglyphs():
+    """Ф1.9в: двойники суффикса карты приравнены в _designator_in_text;
+    агрегатные обозначения, числа и границы не задеты."""
+    from pdfgraph.gates import _card_suffix_in_text, _designator_in_text
+
+    cyrillic = "035.10.00е замена кислородного баллона"
+    latin = "035.10.00e проверка герметичности системы"
+    assert _designator_in_text(cyrillic, "035.10.00e")
+    assert _designator_in_text(latin, "035.10.00е")
+    assert _card_suffix_in_text(cyrillic, "035.10.00e")
+    # Обратный суффикс-двойник: вопрос «…в», текст «…в» латиницей —
+    # приравнивается через таблицу двойников.
+    assert _card_suffix_in_text("035.10.00b демонтаж", "035.10.00в")
+    # Суффикс не продолжается в слово: карточная форма «035.10.00
+    # кислородное» — не карта «…к» (слипшая форма гейта — прежнее
+    # поведение, Ф1.9в её не меняет).
+    assert not _card_suffix_in_text("035.10.00 кислородное оборудование",
+                                    "035.10.00к")
+    # Перед базой цифра — часть более длинного номера.
+    assert not _card_suffix_in_text("1035.10.00e монтаж", "035.10.00e")
+    # Суффикса нет в таблице двойников — приравнивания нет.
+    assert not _card_suffix_in_text(cyrillic, "035.10.00z")
+    # Агрегатные обозначения карточной формой не проверяются вовсе.
+    assert not _card_suffix_in_text("редуктор вр-14е", "ВР-14Е")
+
+
+def test_answer_with_cyrillic_suffix_on_sheet(tmp_path):
+    """Ф1.9в: лист с «035.10.00е» (кириллица), вопрос с латинской «e» —
+    ответ, не уточнение; карты «035.10.00z» в базе нет — не ответ
+    (правило корпусного отсутствия Ф1.5.1 даёт отказ)."""
+    from pdfgraph.answer import build_answer
+
+    store = Store(str(tmp_path / "f19v.db"))
+    text = "035.10.00е Замена кислородного баллона, порядок работ."
+    store.upsert_page("РТЭ Ми-8МТВ-1 кн. 7.pdf", 648, "Ми-8МТВ", "", "",
+                      text, normalize_for_search(text))
+    try:
+        answer = build_answer(store, "карта 035.10.00e")
+        assert not answer.refusal and not answer.clarification
+        assert answer.claims
+        missing = build_answer(store, "карта 035.10.00z")
+        assert missing.refusal
+    finally:
+        store.close()
+
+
 def test_cli_prints_roles_and_section_more(capsys):
     """CLI: подпись роли в доказательствах и строка «Ещё N карт раздела»."""
     from pdfgraph.answer import Answer

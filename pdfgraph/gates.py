@@ -229,12 +229,48 @@ def _number_in_text(text: str, number: str) -> bool:
     return False
 
 
+# --- Ф1.9в: двойники суффикса номера карты ----------------------------------
+
+#: Номер карты с суффиксом в обозначении: NNN[.\s]?NN[.\s]?NN + одна буква.
+_TECHCARD_DESIGNATOR_RE = re.compile(
+    r"^(\d{3})[.\s]?(\d{2})[.\s]?(\d{2})\s*([a-zа-яё])$", re.IGNORECASE)
+#: Кириллические двойники букв суффикса карты (Ф1.9в). Применяются ТОЛЬКО
+#: в проверке суффикса карты: агрегатные обозначения (ВР-14, Д-1638) и
+#: числа гейта numbers не затронуты.
+_SUFFIX_HOMOGLYPHS = {"а": "a", "е": "e", "о": "o", "р": "p", "с": "c",
+                      "х": "x", "у": "y", "к": "k", "м": "m", "т": "t",
+                      "в": "b", "н": "h"}
+
+
+def _card_suffix_in_text(lowered: str, designator: str) -> bool:
+    """Суффикс карты приравнен к двойникам (Ф1.9в).
+
+    Только для обозначений-номеров карт «NNN.NN.NN + буква»: база в тексте,
+    суффикс — латинская буква или любой её кириллический двойник. Границы:
+    перед базой не цифра/буква/точка («1035.10.00e» не совпадает), суффикс
+    не продолжается в слово («035.10.00 кислородное» — не карта «…к»).
+    """
+    match = _TECHCARD_DESIGNATOR_RE.fullmatch(designator.strip())
+    if match is None:
+        return False
+    d1, d2, d3, suffix = match.groups()
+    suffix = suffix.lower()
+    canonical = _SUFFIX_HOMOGLYPHS.get(suffix, suffix)
+    variants = {canonical} | {key for key, value in _SUFFIX_HOMOGLYPHS.items()
+                              if value == canonical}
+    chars = "".join(sorted(variants))
+    pattern = (rf"(?<![\da-zа-яё.]){d1}[.\s]*{d2}[.\s]*{d3}[.\s]*"
+               rf"[{chars}](?![a-zа-яё])")
+    return re.search(pattern, lowered) is not None
+
+
 def _designator_in_text(text: str, designator: str) -> bool:
     """Обозначение или его нормализованная форма в тексте.
 
-    Три формы на всякую запись листа: дословно без учёта регистра
-    («ТВ3-117ПМ» содержит «ТВ3-117»), с вычищенными разделителями и
-    через нормализацию поиска.
+    Формы на всякую запись листа: дословно без учёта регистра
+    («ТВ3-117ПМ» содержит «ТВ3-117»), с вычищенными разделителями,
+    через нормализацию поиска и — только для номеров карт с суффиксом —
+    с приравниванием кириллических двойников суффикса (Ф1.9в).
     """
     if not text or not designator:
         return False
@@ -245,6 +281,8 @@ def _designator_in_text(text: str, designator: str) -> bool:
     squeezed_text = re.sub(r"[-./\s]", "", lowered)
     squeezed_key = re.sub(r"[-./\s]", "", key)
     if squeezed_key and squeezed_key in squeezed_text:
+        return True
+    if _card_suffix_in_text(lowered, designator):
         return True
     return normalize_for_search(designator) in normalize_for_search(text)
 
@@ -316,6 +354,14 @@ def _scan_corpus_for_designator(store: Store, designator: str) -> bool:
     lowered = designator.lower()
     parts = [part for part in re.split(r"[-\.\s]+", lowered) if part]
     variants = {"".join(parts), lowered, " ".join(parts)} - {""}
+    # Ф1.9в: суффиксная часть номера карты («00e», «00а») короче четырёх
+    # символов и не даёт trigram-кандидатов, а двойники суффикса в тексте
+    # не совпадают дословно — ищем и по базе номера; вхождение по-прежнему
+    # признаёт _designator_in_text, в том числе карточную форму с двойниками.
+    card = _TECHCARD_DESIGNATOR_RE.fullmatch(lowered)
+    if card is not None:
+        d1, d2, d3, _suffix = card.groups()
+        variants |= {f"{d1}.{d2}.{d3}", f"{d1}{d2}{d3}", f"{d1} {d2} {d3}"}
     seen: set[tuple[str, int]] = set()
     for variant in sorted(variants):
         rows = store.search_trigrams(f"%{variant}%")[:CORPUS_CANDIDATE_LIMIT]
