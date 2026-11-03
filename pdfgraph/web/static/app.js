@@ -121,7 +121,38 @@ function techcardMissingNode(items) {
     + items.map((key) => `карта ${key}`).join("; "));
 }
 
+function techcardNode(card) {
+  /* Ф2.5: карточка карты — крупный номер, название, трудоёмкость, листы. */
+  const box = el("div", "techcard");
+  box.append(el("p", "techcard-number", `Карта ${card.number}`));
+  if (card.title) {
+    box.append(el("p", "techcard-title", card.title));
+  }
+  if (card.labor) {
+    box.append(el("p", "techcard-labor", `Трудоёмкость: ${card.labor}`));
+  }
+  for (const sheet of card.sheets) {
+    const line = el("p", "techcard-sheet",
+      `${sheet.document} лист ${sheet.page} — ${sheet.role}`);
+    const open = el("a", "techcard-open", "Открыть лист");
+    open.href = `/doc/${encodeURIComponent(sheet.document)}/page/${sheet.page}?view=full`;
+    open.target = "_blank";
+    line.append(" ");
+    line.append(open);
+    box.append(line);
+  }
+  return box;
+}
+
 function renderAnswer(message, payload) {
+  if (payload.techcard && payload.techcard.length) {
+    /* Ф2.5: карточный ответ вместо нарезки цитат; цитаты проверяются
+       и остаются в «Доказательствах». */
+    for (const card of payload.techcard) {
+      message.append(techcardNode(card));
+    }
+    return;
+  }
   for (const claim of payload.claims) {
     message.append(el("p", "answer-text", claim.text));
   }

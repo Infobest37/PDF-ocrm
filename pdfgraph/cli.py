@@ -293,6 +293,10 @@ def _print_json(answer: Answer, rows: list[dict], verified: bool) -> None:
     # Ф1.9б: карты раздела сверх лимита десяти.
     if getattr(answer, "techcard_more", 0):
         payload["techcard_more"] = answer.techcard_more
+    # Ф2.5: карточки карт для отображения (аддитивно; не цитаты).
+    if getattr(answer, "techcard", None):
+        payload["techcard"] = [dataclasses.asdict(card)
+                               for card in answer.techcard]
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -325,7 +329,18 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
         for option in answer.clarification.get("options", []):
             print(f"  {option.get('id', '?')} — {option.get('label', '')}")
         return
-    if answer.claims:
+    if answer.techcard:
+        # Ф2.5: карточный ответ — блок карты без сырых сниппетов; цитаты
+        # проверяются дальше (блок «Доказательства»).
+        for card in answer.techcard:
+            print(f"Карта {card.number}")
+            if card.title:
+                print(f"  Наименование работы: {card.title}")
+            if card.labor:
+                print(f"  Трудоёмкость: {card.labor}")
+            for sheet in card.sheets:
+                print(f"  - {sheet.document} лист {sheet.page} — {sheet.role}")
+    elif answer.claims:
         print("Ответ:")
         # Ф2.3: человеческий абзац (answer_text) — над цитатой; сам
         # claim.text остаётся дословным сниппетом и проверяется verify.

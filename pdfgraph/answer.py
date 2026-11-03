@@ -23,6 +23,7 @@ from pdfgraph.query import (
     techcard_section_more,
     vector_search,
 )
+from pdfgraph.techcard_card import TechCard, collect_techcards
 from pdfgraph.store import Store
 
 #: Stage-2 diagnostics: the question→branch→SQL→count chain is logged in
@@ -71,6 +72,9 @@ class Answer:
     neighbors: list[dict] = field(default_factory=list)
     techcard_missing: list[str] = field(default_factory=list)
     techcard_more: int = 0
+    #: Ф2.5: карточки карт для отображения (по одной на запрошенный
+    #: суффикс); в ранжирование, claims и проверку цитат не попадает.
+    techcard: list[TechCard] = field(default_factory=list)
     applicability_warning: str = ""
 
 
@@ -511,9 +515,13 @@ def build_answer(
         store, question, aircraft_type)
     answer.techcard_more = techcard_section_more(
         store, question, aircraft_type)
-    # Ф2.3: человеческое начало ответа — Claim.answer_text; Claim.text
+    # Ф2.5: карточки карт вместо человеческого абзаца; Claim.text
     # (дословный сниппет-цитата) и verify не меняются.
-    if not answer.refusal and answer.claims:
+    answer.techcard = collect_techcards(store, question, answer.fragments)
+    # Ф2.3: человеческое начало ответа — Claim.answer_text; Claim.text
+    # (дословный сниппет-цитата) и verify не меняются. Для карточных
+    # ответов абзац не собирается (Ф2.5).
+    if not answer.refusal and answer.claims and not answer.techcard:
         from pdfgraph.humanize import lead_paragraph
 
         leader = answer.fragments[0] if answer.fragments else None

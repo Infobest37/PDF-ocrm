@@ -164,6 +164,28 @@ body {
   margin: 8px 0 0;
 }
 
+/* Ф2.5: карточка технологической карты. */
+.techcard {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 8px 0 0;
+}
+
+.techcard-number {
+  font-size: 18px;
+  font-weight: 700;
+  margin: 0 0 4px;
+}
+
+.techcard-title { margin: 0 0 2px; }
+
+.techcard-labor { color: var(--text-2); margin: 0 0 6px; }
+
+.techcard-sheet { margin: 2px 0 0; }
+
+.techcard-open { margin-left: 6px; }
+
 /* Форма вопроса. */
 .ask-form { display: flex; gap: 8px; margin-top: 14px; }
 

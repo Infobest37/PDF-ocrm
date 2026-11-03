@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from datetime import datetime
@@ -171,6 +172,9 @@ def create_app(store_path: str, pdf_dir: str | None = None,
                 "techcard_missing": list(getattr(
                     answer, "techcard_missing", [])),
                 "techcard_more": int(getattr(answer, "techcard_more", 0)),
+                # Ф2.5: карточки карт для отображения (не цитаты).
+                "techcard": [dataclasses.asdict(card)
+                             for card in getattr(answer, "techcard", [])],
                 "applicability_warning": answer.applicability_warning,
                 "options": options,
             }
