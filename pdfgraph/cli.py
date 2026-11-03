@@ -285,6 +285,10 @@ def _print_json(answer: Answer, rows: list[dict], verified: bool) -> None:
     # вопроса (ответ при этом выдаётся как раньше).
     if getattr(answer, "applicability_warning", ""):
         payload["applicability_warning"] = answer.applicability_warning
+    # Ф1.9: запрошенные карты, которых нет в базе; строкой, не цитатой —
+    # в claims/citations не попадает (печатается и при отказе).
+    if getattr(answer, "techcard_missing", None):
+        payload["techcard_missing"] = list(answer.techcard_missing)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -357,6 +361,11 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
         for item in answer.neighbors:
             print(f"  {item['document'] or '?'} лист {item['page']}"
                   f" — {item['label']}")
+    # Ф1.9: запрошенные карты, которых нет в базе; печатается и при отказе —
+    # инженер, запросивший три карты и получивший две без пояснения, решит,
+    # что комплект полный.
+    for key in getattr(answer, "techcard_missing", None) or []:
+        print(f"Карта {key} в базе не найдена")
     # Результат verify_citations печатается всегда: количество цитат и вердикт.
     ok = sum(1 for row in rows if row["ok"])
     print(f"Подтверждено {ok} из {len(rows)}")

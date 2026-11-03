@@ -89,8 +89,10 @@ def test_techcard_queries_return_document_pair_and_number_search_results(
         for query in ("023.21.00b", "023.21.00 b"):
             hits = search(store, query)
             assert len(hits) == 2
-            assert "Регламент" in hits[0].document
-            assert "РТЭ" in hits[1].document
+            # Ф1.9: все листы карты, порядок — SQL (документ, лист);
+            # бинарная сортировка ставит «РТЭ…» раньше «Регламента…».
+            assert "РТЭ" in hits[0].document
+            assert "Регламент" in hits[1].document
             assert all(hit.kind == "techcard" for hit in hits)
 
         number_hits = search(store, "№ 814")

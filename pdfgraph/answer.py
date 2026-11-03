@@ -18,6 +18,8 @@ from pdfgraph.query import (
     effective_search_mode,
     expand_continuations,
     search,
+    techcard_exact_query,
+    techcard_missing_suffixes,
     vector_search,
 )
 from pdfgraph.store import Store
@@ -49,6 +51,9 @@ class Answer:
     ``neighbors`` (Ф1.7) — окно соседних листов к топ-5: отдельный список
     ссылок ``{"document", "page", "label"}`` без цитат; в ранжирование,
     claims и проверку цитат не попадает.
+    ``techcard_missing`` (Ф1.9) — запрошенные карты (номер с суффиксом),
+    которых нет в базе: отдельный список строк «035.10.00e» без цитат;
+    в ранжирование, claims и проверку цитат не попадает.
     ``applicability_warning`` (Ф0.3в) — пометка «документ применим к
     бортам …; ваш борт не указан», когда борт из вопроса не входит в
     применимость документа-лидера; ответ при этом выдаётся как раньше.
@@ -61,6 +66,7 @@ class Answer:
     reason: str = ""
     clarification: dict | None = None
     neighbors: list[dict] = field(default_factory=list)
+    techcard_missing: list[str] = field(default_factory=list)
     applicability_warning: str = ""
 
 
@@ -276,7 +282,12 @@ def _build_answer_core(
         fragments = search(store, question, aircraft_type, channel_depth)[:10]
         mode_now = (effective_search_mode()
                     if search_mode is None else search_mode)
-        if mode_now != "lexical" and (mode_now == "hybrid_full" or fragments):
+        # Ф1.9: точный номер карты с суффиксами — без слияния с семантикой
+        # (та же причина, что в query.hybrid_search: шум и зависимость
+        # специфичности от написания номера).
+        if techcard_exact_query(question):
+            pass
+        elif mode_now != "lexical" and (mode_now == "hybrid_full" or fragments):
             vector_ranking = vector_search(store, question,
                                            limit=channel_depth,
                                            aircraft_type=aircraft_type)
@@ -489,6 +500,11 @@ def build_answer(
                         reason=reason)
     answer.neighbors = collect_neighbors(store, answer.fragments)
     answer.applicability_warning = warning
+    # Ф1.9: карты из списка суффиксов, которых нет в базе; строкой, не
+    # цитатой. Заполняется и при отказе — инженеру полезно знать, какие
+    # именно карты не нашлись, даже когда ответа нет.
+    answer.techcard_missing = techcard_missing_suffixes(
+        store, question, aircraft_type)
     # Ф2.3: человеческое начало ответа — Claim.answer_text; Claim.text
     # (дословный сниппет-цитата) и verify не меняются.
     if not answer.refusal and answer.claims:

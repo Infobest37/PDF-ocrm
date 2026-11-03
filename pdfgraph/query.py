@@ -69,6 +69,25 @@ _TECHCARD_QUERY_RE = re.compile(
     r"^(?:\d{2,3}\.\d{2}\.\d{2}\s*[a-zа-я]?|№?\s*\d{2,4})$",
     re.IGNORECASE,
 )
+
+# --- Ф1.9: поиск по номерам технологических карт ----------------------------
+
+#: Кириллические двойники букв суффикса (поиск не переписывает документы:
+#: приведение к латинице — только ключ запроса, не поле документа).
+_TECHCARD_HOMOGLYPHS = {"а": "a", "с": "c", "е": "e", "о": "o", "р": "p",
+                        "х": "x", "у": "y"}
+#: Запрос карты: необязательное слово «(технологическая) карта(-ы)», номер
+#: NNN.NN.NN (пробелы и точки-разделители не значимы: 035.10.00e,
+#: 035.10.00 e и 0351000e — один номер), суффиксы через запятую.
+#: «035.10е.00» (буква внутри номера) картой не считается.
+_TECHCARD_EXPR_RE = re.compile(
+    r"(?:(?:технологическая\s+)?карт[аы]\s+)?"
+    r"(\d{3})[\s.]*(\d{2})[\s.]*(\d{2})\s*"
+    r"([a-zа-яё](?:\s*,\s*[a-zа-яё])*)?",
+    re.IGNORECASE,
+)
+#: Вхождение карты в нормализованный текст листа; кэш по базе номера.
+_TECHCARD_TEXT_RES: dict[tuple[str, str, str], re.Pattern[str]] = {}
 _TECHCARD_CODE_WITH_SUFFIX_RE = re.compile(
     r"^\d{2,3}\.\d{2}\.\d{2}\s*[a-zа-я]$", re.IGNORECASE,
 )
@@ -213,12 +232,21 @@ def search(
     (all tokens, AND), a tolerant OR retry, an all-token prefix retry, and
     finally a trigram-indexed substring fallback. Text-branch scores are
     normalised to the best hit of the branch (see :func:`_by_fts`).
+    Ф1.9: запрос карты — номер NNN.NN.NN с суффиксами (:func:`parse_techcard_query`)
+    — обрабатывается раньше прочих веток (:func:`_search_techcard`).
     ``aircraft_type`` restricts hits to pages of that type. A topic absent
     from the index returns ``[]``.
     """
     stripped = query.strip()
     if not stripped:
         return []
+
+    # Ф1.9: запрос карты — номер (и суффиксы) плюс необязательное слово
+    # «карта»; обработка раньше прочих веток.
+    techcard = parse_techcard_query(stripped)
+    if techcard is not None:
+        base, suffixes = techcard
+        return _search_techcard(store, base, suffixes, aircraft_type, limit)
 
     if _TECHCARD_QUERY_RE.fullmatch(stripped):
         number_query = _TECHCARD_NUMBER_RE.fullmatch(stripped) is not None
@@ -261,6 +289,159 @@ def search(
         return techcards
 
     return _search_ordinary(store, stripped, aircraft_type, limit)
+
+
+def parse_techcard_query(query: str) -> tuple[str, list[str]] | None:
+    """Ф1.9: разобрать запрос карты → (база «NNN.NN.NN», суффиксы) | None.
+
+    Пробелы и точки внутри номера не значимы, суффикс — одна буква, список
+    суффиксов — через запятую («035.10.00а,b,e»); кириллические двойники
+    приводятся к латинице. Буква внутри номера («035.10е.00») картой не
+    считается — возвращается None. Без суффиксов суффикс-список пуст.
+    """
+    match = _TECHCARD_EXPR_RE.fullmatch(query.strip())
+    if match is None:
+        return None
+    d1, d2, d3, raw_suffixes = match.groups()
+    suffixes: list[str] = []
+    if raw_suffixes:
+        for chunk in raw_suffixes.split(","):
+            letter = chunk.strip().lower()
+            letter = _TECHCARD_HOMOGLYPHS.get(letter, letter)
+            if letter and letter not in suffixes:
+                suffixes.append(letter)
+    return f"{d1}.{d2}.{d3}", suffixes
+
+
+def _techcard_text_re(d1: str, d2: str, d3: str) -> re.Pattern[str]:
+    """Regex вхождения карты NNN.NN.NN+буква в нормализованный текст.
+
+    Разделители цифр — пробелы и точки (не значимы); суффикс — одна буква,
+    не продолжающаяся в слово (иначе «035.10.00 кислородное» считалось бы
+    картой «035.10.00к»).
+    """
+    key = (d1, d2, d3)
+    pattern = _TECHCARD_TEXT_RES.get(key)
+    if pattern is None:
+        sep = r"[\s.]*"
+        pattern = re.compile(
+            rf"(?<![\da-zа-яё.]){d1}{sep}{d2}{sep}{d3}{sep}"
+            rf"([a-zа-яё])(?![a-zа-яё])",
+            re.IGNORECASE,
+        )
+        _TECHCARD_TEXT_RES[key] = pattern
+    return pattern
+
+
+def _techcard_matches(store: Store, base: str, aircraft_type: str | None
+                      ) -> list[tuple[str, int, str, str, str]]:
+    """Карты базы ``base`` в корпусе: (документ, лист, коды, суффикс).
+
+    Кандидаты — листы, чей нормализованный текст содержит номер в любой из
+    форм (с точками, пробелами, слитно); точную проверку суффикса делает
+    :func:`_techcard_text_re`. Дубликаты (суффикс, лист) убираются; мусор
+    и документы-дубли скрыты штатными фильтрами хранилища.
+    """
+    d1, d2, d3 = base.split(".")
+    pattern = _techcard_text_re(d1, d2, d3)
+    sql = (
+        "SELECT pg.document, pg.page, pg.system_code, pg.subsystem_code, "
+        "fts.body FROM pages_fts AS fts "
+        "JOIN pages AS pg ON pg.document = fts.document "
+        "AND pg.page = CAST(fts.page AS INTEGER) "
+        "WHERE (fts.body LIKE ? OR fts.body LIKE ? OR fts.body LIKE ?)"
+    )
+    args: list[object] = [f"%{d1}.{d2}.{d3}%", f"%{d1} {d2} {d3}%",
+                          f"%{d1}{d2}{d3}%"]
+    if aircraft_type is not None:
+        sql += " AND pg.aircraft_type = ?"
+        args.append(aircraft_type)
+    sql += store._dup_filter("pg.document")
+    sql += store._garbage_filter("pg.")
+    sql += " ORDER BY pg.document, pg.page"
+    matches: list[tuple[str, int, str, str, str]] = []
+    seen: set[tuple[str, int, str]] = set()
+    for document, page, system_code, subsystem_code, body \
+            in store._connection.execute(sql, args):
+        for found in pattern.finditer(body or ""):
+            letter = found.group(1).lower()
+            letter = _TECHCARD_HOMOGLYPHS.get(letter, letter)
+            key = (document, page, letter)
+            if key in seen:
+                continue
+            seen.add(key)
+            matches.append((document, page, system_code, subsystem_code,
+                            letter))
+    return matches
+
+
+def _search_techcard(store: Store, base: str, suffixes: list[str],
+                     aircraft_type: str | None, limit: int
+                     ) -> list[Fragment]:
+    """Ф1.9: выдача по номеру карты.
+
+    С суффиксами — каждая запрошенная карта отдельным результатом
+    (kind="techcard", score=1.0), ВСЕ листы карты, в порядке суффиксов
+    запроса; карта, которой нет в базе, просто не возвращается (её честно
+    перечисляет ``Answer.techcard_missing``, Ф1.9). Без суффиксов — раздел:
+    прежняя code-ветка плюс перечисление найденных в нём карт в хвосте
+    (контракт Fragment не меняется).
+    """
+    matches = _techcard_matches(store, base, aircraft_type)
+    by_suffix: dict[str, list[tuple[str, int, str, str, str]]] = {}
+    for row in matches:
+        by_suffix.setdefault(row[4], []).append(row)
+    if suffixes:
+        fragments: list[Fragment] = []
+        for suffix in suffixes:
+            for document, page, system_code, subsystem_code, _suffix \
+                    in by_suffix.get(suffix, []):
+                fragments.append(_fragment(
+                    store, document, page, system_code, subsystem_code,
+                    1.0, "techcard", base))
+        return fragments[:max(limit, 0)]
+    section = _search_ordinary(store, base, aircraft_type, limit)
+    # Номер мог попасть в партномерную/текстовую ветку — карты перечисляем
+    # только при раздел-выдаче (code-ветка) или пустой выдаче.
+    if section and not any(f.kind == "code" for f in section):
+        return section
+    seen = {(f.document, f.page) for f in section}
+    for document, page, system_code, subsystem_code, _suffix in matches:
+        if (document, page) in seen:
+            continue
+        seen.add((document, page))
+        section.append(_fragment(store, document, page, system_code,
+                                 subsystem_code, 1.0, "techcard", base))
+    return section
+
+
+def techcard_exact_query(question: str) -> bool:
+    """Ф1.9: вопрос — точный номер карты с суффиксами?
+
+    Такие запросы идут только по лексической ветке (см.
+    :func:`hybrid_search` и слияние в ``answer._build_answer_core``).
+    """
+    parsed = parse_techcard_query(question)
+    return parsed is not None and bool(parsed[1])
+
+
+def techcard_missing_suffixes(store: Store, question: str,
+                              aircraft_type: str | None = None
+                              ) -> list[str]:
+    """Ф1.9: запрошенные карты, которых нет в базе («035.10.00e»).
+
+    Пустой список — вопрос не про карты, суффиксов нет или весь комплект
+    найден. Заполняется в :func:`pdfgraph.answer.build_answer` в
+    ``Answer.techcard_missing``; verify и цитаты не затрагивает.
+    """
+    parsed = parse_techcard_query(question)
+    if parsed is None:
+        return []
+    base, suffixes = parsed
+    if not suffixes:
+        return []
+    found = {row[4] for row in _techcard_matches(store, base, aircraft_type)}
+    return [f"{base}{suffix}" for suffix in suffixes if suffix not in found]
 
 
 def _search_ordinary(store: Store, stripped: str,
@@ -465,7 +646,11 @@ def hybrid_search(store: Store, question: str,
     """
     mode = (search_mode if search_mode in _SEARCH_MODES
             else effective_search_mode())
-    if mode == "lexical":
+    if mode == "lexical" or techcard_exact_query(question):
+        # Ф1.9: точный номер карты с суффиксами — чисто лексическая ветка,
+        # без слияния с семантикой: семантика на номере карты даёт только
+        # шум, а слагаемое специфичности зависит от написания номера
+        # («035.10.00e» ≠ «035.10.00 e») и перемешивает одинаковые листы.
         return search(store, question, aircraft_type, limit)
     # Импорт по месту: rag_fusion импортирует query наверху, а чисто
     # лексический путь не должен тянуть его на старте (замыкание цикла).

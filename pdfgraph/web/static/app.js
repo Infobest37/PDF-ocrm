@@ -112,6 +112,13 @@ function neighborsNode(neighbors) {
     + names.join("; "));
 }
 
+// Ф1.9: запрошенные карты, которых нет в базе — отдельная строка, не цитата.
+function techcardMissingNode(items) {
+  if (!items || !items.length) return null;
+  return el("p", "neighbors", "В базе не найдены: "
+    + items.map((key) => `карта ${key}`).join("; "));
+}
+
 function renderAnswer(message, payload) {
   for (const claim of payload.claims) {
     message.append(el("p", "answer-text", claim.text));
@@ -123,12 +130,17 @@ function renderAnswer(message, payload) {
   if (warning) message.append(el("p", "applicability-warning", warning));
   const neighbors = neighborsNode(payload.neighbors);
   if (neighbors) message.append(neighbors);
+  const missing = techcardMissingNode(payload.techcard_missing);
+  if (missing) message.append(missing);
 }
 
 function renderRefusal(message, payload) {
   const plate = el("p", "reason status-plate fail",
     "Отказ: " + (payload.reason || "нет подтверждений в документах"));
   message.append(plate);
+  // Ф1.9: ненайденные карты показываются и при отказе.
+  const missing = techcardMissingNode(payload.techcard_missing);
+  if (missing) message.append(missing);
 }
 
 function renderClarify(message, payload) {

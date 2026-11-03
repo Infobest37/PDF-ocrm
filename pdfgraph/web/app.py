@@ -159,6 +159,8 @@ def create_app(store_path: str, pdf_dir: str | None = None,
                     for claim in answer.claims],
                 "citations": citations,
                 "neighbors": list(answer.neighbors),
+                "techcard_missing": list(getattr(
+                    answer, "techcard_missing", [])),
                 "applicability_warning": answer.applicability_warning,
                 "options": options,
             }
