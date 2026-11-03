@@ -391,3 +391,99 @@ def test_cli_prints_roles_and_section_more(capsys):
     assert "— карта, как выполняется" in out
     assert "Карта 035.10.00c в базе не найдена" in out
     assert "Ещё 2 карт раздела" in out
+
+
+# --- Ф2.8: цифровой индекс в номере карты -----------------------------------
+
+#: Кн.7 л.372 — базовая карта 033.10.00а в шапке карты.
+_KN7_BASE_TEXT = (
+    "Ми-8МТВ-1\nРУКОВОДСТВО ПО ТЕХНИЧЕСКОЙ ЭКСПЛУАТАЦИИ\n033.10.00\n"
+    "Стр. 203/204\nК РО Ми-8МТВ-1\nТЕХНОЛОГИЧЕСКАЯ КАРТА\n"
+    "Пункт РО\n033.10.00 a\nНаименование работы:\n"
+    "Осмотр осветительного оборудования кабины экипажа\nТрудоемкость,\n"
+    "0,1 чел.ч.\nСодержание операции и технические требования (ТТ)\n"
+    "1. Осмотрите стекла плафонов и световых табло.")
+#: Д-1697 кн.2 л.132 — карта 033.10.00а1; индекс OCR даёт «;».
+_D1697_A1_TEXT = (
+    "Ми-8МТВ-1\nДОПОЛНЕНИЕ К РУКОВОДСТВУ ПО ТЕХНИЧЕСКОЙ ЭКСПЛУАТАЦИИ\n"
+    "МИ 8МТВ-1 ТЕХНОЛОГИЧЕСКАЯ КАРТА 203/204\nПункт РО\n033.10.00 a;\n"
+    "Наименование работы:\nОсмотр светотехнического оборудования кабины "
+    "экипажа\nТрудоемкость,\n0,1 чел.ч.\n"
+    "Содержание операции и технические требования (ТТ)\n"
+    "1. Осмотрите стекла потолочных светильников.")
+#: Ссылка в середине абзаца; шапки карты на листе нет (Ф2.8, п. 2 владельца).
+_REFERENCE_TEXT = (
+    "Дополнение к регламенту: работы выполняются по картам раздела. "
+    "См. карту 033.10.00 а; далее осмотрите плафоны и светильники.")
+
+
+def _store_f28(tmp_path) -> Store:
+    store = Store(str(tmp_path / "f28.db"))
+    pages = [
+        ("РТЭ Ми-8МТВ-1 кн. 7 (изм. от 24.08.2023).pdf", 372, _KN7_BASE_TEXT),
+        ("Доп. к РТЭ Д-1697 кн.2 для вертолета 22217 22562.pdf", 132,
+         _D1697_A1_TEXT),
+        ("Доп. к РО Д-1723 ч.2 для вертолета 22217 22562.pdf", 9,
+         _REFERENCE_TEXT),
+    ]
+    for document, page, text in pages:
+        store.upsert_page(document, page, "Ми-8МТВ", "", "", text,
+                          normalize_for_search(text))
+    return store
+
+
+def test_parse_index_suffix_f28():
+    """Ф2.8: разбор номера с индексом; 035.10.00e по-прежнему без индекса."""
+    assert parse_techcard_query("033.10.00а1") == ("033.10.00", ["a1"])
+    assert parse_techcard_query("033.10.00a1") == ("033.10.00", ["a1"])
+    assert parse_techcard_query("033.10.00а1,b") == ("033.10.00", ["a1", "b"])
+    assert parse_techcard_query("035.10.00e") == ("035.10.00", ["e"])
+    assert parse_techcard_query("035.10.00") == ("035.10.00", [])
+
+
+def test_card_suffix_in_text_exact_f28():
+    """Ф2.8: а ≠ а1 в обе стороны; «;» и «₁» — индекс только в шапке."""
+    from pdfgraph.gates import _card_suffix_in_text
+
+    header = _D1697_A1_TEXT.lower()
+    # Единица после буквы не съедается: «a;» в шапке — карта а1.
+    assert _card_suffix_in_text(header, "033.10.00a1")
+    assert not _card_suffix_in_text(header, "033.10.00a")
+    base = _KN7_BASE_TEXT.lower()
+    assert _card_suffix_in_text(base, "033.10.00a")
+    assert not _card_suffix_in_text(base, "033.10.00a1")
+    # Нижний индекс ₁ в сыром тексте — тоже а1.
+    subscript = "Пункт РО\n033.10.00 а₁ оборудования\n".lower()
+    assert _card_suffix_in_text(subscript, "033.10.00a1")
+    # «;» вне шапки — пунктуация: не а1 и не а.
+    reference = _REFERENCE_TEXT.lower()
+    assert not _card_suffix_in_text(reference, "033.10.00a1")
+    assert not _card_suffix_in_text(reference, "033.10.00a")
+
+
+def test_base_and_index_are_different_keys_f28(tmp_path):
+    """Приёмка Ф2.8: 033.10.00a — базовая карта кн.7; 033.10.00a1 — карта
+    из Д-1697; лист со ссылкой «…а;» без шапки не попадает никуда."""
+    store = _store_f28(tmp_path)
+    try:
+        base_hits = search(store, "033.10.00a")
+        assert [(hit.document, hit.page) for hit in base_hits] == [
+            ("РТЭ Ми-8МТВ-1 кн. 7 (изм. от 24.08.2023).pdf", 372)]
+        index_hits = search(store, "033.10.00a1")
+        assert [(hit.document, hit.page) for hit in index_hits] == [
+            ("Доп. к РТЭ Д-1697 кн.2 для вертолета 22217 22562.pdf", 132)]
+        assert all(hit.page != 9 for hit in base_hits + index_hits)
+    finally:
+        store.close()
+
+
+def test_missing_distinguishes_index_f28(tmp_path):
+    """Ф2.8: ненайденные суффиксы различают а и а1 честно."""
+    store = _store_f28(tmp_path)
+    try:
+        assert techcard_missing_suffixes(store, "033.10.00a") == []
+        assert techcard_missing_suffixes(store, "033.10.00a1") == []
+        assert techcard_missing_suffixes(store, "033.10.00c1") == \
+            ["033.10.00c1"]
+    finally:
+        store.close()

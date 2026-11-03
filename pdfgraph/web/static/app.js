@@ -131,6 +131,10 @@ function techcardNode(card) {
   if (card.labor) {
     box.append(el("p", "techcard-labor", `Трудоёмкость: ${card.labor}`));
   }
+  /* Ф2.8: карта найдена только в дополнении — пометка применимости. */
+  if (card.applicability) {
+    box.append(el("p", "techcard-applicability", card.applicability));
+  }
   for (const sheet of card.sheets) {
     const line = el("p", "techcard-sheet",
       `${sheet.document} лист ${sheet.page} — ${sheet.role}`);

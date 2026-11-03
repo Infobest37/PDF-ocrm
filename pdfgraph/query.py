@@ -46,6 +46,7 @@ from dataclasses import dataclass, replace
 
 from pdfprepare.codes import normalize_code
 from pdfprepare.normalize import normalize_for_search, normalize_part_number
+from pdfgraph.gates import card_suffix_occurrences
 from pdfgraph.store import Store
 
 #: Snippet window length in characters of original page text.
@@ -66,7 +67,7 @@ SEARCH_MODE_ENV = "PDFGRAPH_SEARCH_MODE"
 DEFAULT_SEARCH_MODE = "hybrid_gated"
 _SEARCH_MODES = ("lexical", "hybrid_gated", "hybrid_full")
 _TECHCARD_QUERY_RE = re.compile(
-    r"^(?:\d{2,3}\.\d{2}\.\d{2}\s*[a-zа-я]?|№?\s*\d{2,4})$",
+    r"^(?:\d{2,3}\.\d{2}\.\d{2}\s*[a-zа-я]\d?|№?\s*\d{2,4})$",
     re.IGNORECASE,
 )
 
@@ -82,16 +83,15 @@ _TECHCARD_HOMOGLYPHS = {"а": "a", "с": "c", "е": "e", "о": "o", "р": "p",
                         "в": "b", "н": "h"}
 #: Запрос карты: необязательное слово «(технологическая) карта(-ы)», номер
 #: NNN.NN.NN (пробелы и точки-разделители не значимы: 035.10.00e,
-#: 035.10.00 e и 0351000e — один номер), суффиксы через запятую.
+#: 035.10.00 e и 0351000e — один номер), суффиксы через запятую. После
+#: буквы суффикса допустим индекс — одна цифра (Ф2.8: «033.10.00а1»);
 #: «035.10е.00» (буква внутри номера) картой не считается.
 _TECHCARD_EXPR_RE = re.compile(
     r"(?:(?:технологическая\s+)?карт[аы]\s+)?"
     r"(\d{3})[\s.]*(\d{2})[\s.]*(\d{2})\s*"
-    r"([a-zа-яё](?:\s*,\s*[a-zа-яё])*)?",
+    r"([a-zа-яё]\d?(?:\s*,\s*[a-zа-яё]\d?)*)?",
     re.IGNORECASE,
 )
-#: Вхождение карты в нормализованный текст листа; кэш по базе номера.
-_TECHCARD_TEXT_RES: dict[tuple[str, str, str], re.Pattern[str]] = {}
 
 # --- Ф1.9б: карты на виду, роль документа -----------------------------------
 
@@ -113,7 +113,7 @@ _ROLE_REGLEMENT_RE = re.compile(r"регламент", re.IGNORECASE)
 #: в pdfgraph.gates.
 _DOCUMENT_ROLE_CACHE: dict[tuple[int, str], str] = {}
 _TECHCARD_CODE_WITH_SUFFIX_RE = re.compile(
-    r"^\d{2,3}\.\d{2}\.\d{2}\s*[a-zа-я]$", re.IGNORECASE,
+    r"^\d{2,3}\.\d{2}\.\d{2}\s*[a-zа-я]\d?$", re.IGNORECASE,
 )
 _TECHCARD_NUMBER_RE = re.compile(r"^№?\s*\d{2,4}$")
 _REGULATION_DOCUMENT_TERMS = ("Регламент", "РЕГЛАМЕНТ", "регламент")
@@ -323,10 +323,11 @@ def search(
 def parse_techcard_query(query: str) -> tuple[str, list[str]] | None:
     """Ф1.9: разобрать запрос карты → (база «NNN.NN.NN», суффиксы) | None.
 
-    Пробелы и точки внутри номера не значимы, суффикс — одна буква, список
+    Пробелы и точки внутри номера не значимы, суффикс — буква с
+    необязательным индексом-цифрой (Ф2.8: «033.10.00а1»), список
     суффиксов — через запятую («035.10.00а,b,e»); кириллические двойники
-    приводятся к латинице. Буква внутри номера («035.10е.00») картой не
-    считается — возвращается None. Без суффиксов суффикс-список пуст.
+    букв приводятся к латинице. Буква внутри номера («035.10е.00») картой
+    не считается — возвращается None. Без суффиксов суффикс-список пуст.
     """
     match = _TECHCARD_EXPR_RE.fullmatch(query.strip())
     if match is None:
@@ -335,31 +336,14 @@ def parse_techcard_query(query: str) -> tuple[str, list[str]] | None:
     suffixes: list[str] = []
     if raw_suffixes:
         for chunk in raw_suffixes.split(","):
-            letter = chunk.strip().lower()
+            token = chunk.strip().lower()
+            index = token[-1] if token[-1:].isdigit() else ""
+            letter = token[:-1] if index else token
             letter = _TECHCARD_HOMOGLYPHS.get(letter, letter)
-            if letter and letter not in suffixes:
-                suffixes.append(letter)
+            suffix = f"{letter}{index}"
+            if suffix and suffix not in suffixes:
+                suffixes.append(suffix)
     return f"{d1}.{d2}.{d3}", suffixes
-
-
-def _techcard_text_re(d1: str, d2: str, d3: str) -> re.Pattern[str]:
-    """Regex вхождения карты NNN.NN.NN+буква в нормализованный текст.
-
-    Разделители цифр — пробелы и точки (не значимы); суффикс — одна буква,
-    не продолжающаяся в слово (иначе «035.10.00 кислородное» считалось бы
-    картой «035.10.00к»).
-    """
-    key = (d1, d2, d3)
-    pattern = _TECHCARD_TEXT_RES.get(key)
-    if pattern is None:
-        sep = r"[\s.]*"
-        pattern = re.compile(
-            rf"(?<![\da-zа-яё.]){d1}{sep}{d2}{sep}{d3}{sep}"
-            rf"([a-zа-яё])(?![a-zа-яё])",
-            re.IGNORECASE,
-        )
-        _TECHCARD_TEXT_RES[key] = pattern
-    return pattern
 
 
 def _techcard_matches(store: Store, base: str, aircraft_type: str | None
@@ -367,12 +351,13 @@ def _techcard_matches(store: Store, base: str, aircraft_type: str | None
     """Карты базы ``base`` в корпусе: (документ, лист, коды, суффикс).
 
     Кандидаты — листы, чей нормализованный текст содержит номер в любой из
-    форм (с точками, пробелами, слитно); точную проверку суффикса делает
-    :func:`_techcard_text_re`. Дубликаты (суффикс, лист) убираются; мусор
-    и документы-дубли скрыты штатными фильтрами хранилища.
+    форм (с точками, пробелами, слитно); точный суффикс (буква, двойники,
+    индекс; «;»/«:» — только в зоне заголовка карты) признаёт
+    :func:`pdfgraph.gates.card_suffix_occurrences` по исходному тексту
+    листа — в FTS-теле переносы строк схлопнуты, и зону по строкам не
+    посчитать (Ф2.8). Дубликаты (суффикс, лист) убираются; мусор и
+    документы-дубли скрыты штатными фильтрами хранилища.
     """
-    d1, d2, d3 = base.split(".")
-    pattern = _techcard_text_re(d1, d2, d3)
     sql = (
         "SELECT pg.document, pg.page, pg.system_code, pg.subsystem_code, "
         "fts.body FROM pages_fts AS fts "
@@ -380,6 +365,7 @@ def _techcard_matches(store: Store, base: str, aircraft_type: str | None
         "AND pg.page = CAST(fts.page AS INTEGER) "
         "WHERE (fts.body LIKE ? OR fts.body LIKE ? OR fts.body LIKE ?)"
     )
+    d1, d2, d3 = base.split(".")
     args: list[object] = [f"%{d1}.{d2}.{d3}%", f"%{d1} {d2} {d3}%",
                           f"%{d1}{d2}{d3}%"]
     if aircraft_type is not None:
@@ -390,17 +376,18 @@ def _techcard_matches(store: Store, base: str, aircraft_type: str | None
     sql += " ORDER BY pg.document, pg.page"
     matches: list[tuple[str, int, str, str, str]] = []
     seen: set[tuple[str, int, str]] = set()
-    for document, page, system_code, subsystem_code, body \
+    for document, page, system_code, subsystem_code, _body \
             in store._connection.execute(sql, args):
-        for found in pattern.finditer(body or ""):
-            letter = found.group(1).lower()
-            letter = _TECHCARD_HOMOGLYPHS.get(letter, letter)
-            key = (document, page, letter)
+        text = store.page_text(document, page) or ""
+        for found_base, suffix, _position in card_suffix_occurrences(text):
+            if found_base != base:
+                continue
+            key = (document, page, suffix)
             if key in seen:
                 continue
             seen.add(key)
             matches.append((document, page, system_code, subsystem_code,
-                            letter))
+                            suffix))
     return matches
 
 
@@ -435,9 +422,12 @@ def _search_techcard(store: Store, base: str, suffixes: list[str],
         return fragments[:max(limit, 0)]
     # Лист регламента может нести несколько карт — дедупликация по
     # (суффикс, лист), иначе свод-форма скроет все карты, кроме первой.
+    # Ф2.8: базовая карта (без индекса) выше карты-дополнения с индексом.
     cards: list[Fragment] = []
     card_sheets: set[tuple[str, int]] = set()
-    for suffix in sorted(by_suffix)[:TECHCARD_SECTION_LIMIT]:
+    for suffix in sorted(by_suffix,
+                         key=lambda item: (item[1:] != "", item))[
+                :TECHCARD_SECTION_LIMIT]:
         for document, page, system_code, subsystem_code, _suffix \
                 in sorted(by_suffix[suffix],
                           key=lambda row: _role_row_key(store, row)):

@@ -338,6 +338,9 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
                 print(f"  Наименование работы: {card.title}")
             if card.labor:
                 print(f"  Трудоёмкость: {card.labor}")
+            # Ф2.8: карта найдена только в дополнении — пометка применимости.
+            if getattr(card, "applicability", ""):
+                print(f"  {card.applicability}")
             for sheet in card.sheets:
                 print(f"  - {sheet.document} лист {sheet.page} — {sheet.role}")
     elif answer.claims:

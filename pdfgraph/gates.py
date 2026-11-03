@@ -231,37 +231,107 @@ def _number_in_text(text: str, number: str) -> bool:
 
 # --- Ф1.9в: двойники суффикса номера карты ----------------------------------
 
-#: Номер карты с суффиксом в обозначении: NNN[.\s]?NN[.\s]?NN + одна буква.
+#: Номер карты с суффиксом в обозначении: NNN[.\s]?NN[.\s]?NN + буква
+#: (+ необязательный индекс 1, Ф2.8). «033.10.00а» и «033.10.00а1» —
+#: разные ключи.
 _TECHCARD_DESIGNATOR_RE = re.compile(
-    r"^(\d{3})[.\s]?(\d{2})[.\s]?(\d{2})\s*([a-zа-яё])$", re.IGNORECASE)
+    r"^(\d{3})[.\s]?(\d{2})[.\s]?(\d{2})\s*([a-zа-яё])([1;₁])?$",
+    re.IGNORECASE)
 #: Кириллические двойники букв суффикса карты (Ф1.9в). Применяются ТОЛЬКО
 #: в проверке суффикса карты: агрегатные обозначения (ВР-14, Д-1638) и
 #: числа гейта numbers не затронуты.
 _SUFFIX_HOMOGLYPHS = {"а": "a", "е": "e", "о": "o", "р": "p", "с": "c",
                       "х": "x", "у": "y", "к": "k", "м": "m", "т": "t",
                       "в": "b", "н": "h"}
+#: Индекс после буквы суффикса (Ф2.8): цифра 1, нижний индекс ₁ и его
+#: OCR-варианты «;» и «:» (замер ДО правки: в корпусе 103 вхождения
+#: «NNN.NN.NN + буква + ;», индекс ₁ NFKC-нормализацией тела даёт «1»).
+_CARD_INDEX_CHARS = "1;₁:"
+#: Строки зоны заголовка карты (Ф2.8, решение владельца): «Пункт РО»
+#: (включая слитное OCR «пунктро» и латинское «PO») и «ТЕХНОЛОГИЧЕСКАЯ
+#: КАРТА». «;»/«:» после буквы признаётся индексом только в этой зоне,
+#: вне её — пунктуация («см. карту 033.10.00 а; далее…»).
+_CARD_HEADER_RE = re.compile(r"пункт\s*[рp][оo]|технологическая\s+карта",
+                             re.IGNORECASE)
+#: Окно зоны заголовка: ±N строк от строки-заголовка.
+CARD_HEADER_WINDOW = 6
+#: Вхождение карты в текст листа: база + буква (+ необязательный индекс).
+#: Без индекса буква не продолжается в букву/цифру/индекс (иначе
+#: «035.10.00 кислородное» считалось бы картой «…к», а «033.10.00 a;» —
+#: базовой «…а»); с индексом — ровно один символ индекса.
+_CARD_IN_TEXT_RE = re.compile(
+    r"(?<![\da-zа-яё.])(\d{3})[.\s]*(\d{2})[.\s]*(\d{2})[.\s]*"
+    rf"([a-zа-яё])(?:([{re.escape(_CARD_INDEX_CHARS)}])(?![a-zа-яё\d])"
+    rf"|(?![a-zа-яё\d{re.escape(_CARD_INDEX_CHARS)}]))",
+    re.IGNORECASE)
+
+
+def _card_header_lines(text: str) -> list[int]:
+    """Номера строк зоны заголовка карты («Пункт РО», «ТЕХНОЛОГИЧЕСКАЯ КАРТА»)."""
+    return [number for number, line in enumerate(text.splitlines())
+            if _CARD_HEADER_RE.search(line)]
+
+
+def _index_in_header_zone(text: str, position: int,
+                          headers: list[int]) -> bool:
+    """«;»/«:» после буквы — индекс только в зоне заголовка (Ф2.8, п. 2)."""
+    line_no = text.count("\n", 0, position)
+    return any(abs(line_no - number) <= CARD_HEADER_WINDOW
+               for number in headers)
+
+
+def card_suffix_occurrences(text: str) -> list[tuple[str, str, int]]:
+    """Карты «NNN.NN.NN + буква (+ индекс)» в тексте листа (Ф1.9в, Ф2.8).
+
+    Возвращает (база «NNN.NN.NN», суффикс, позиция буквы) без повторов:
+    суффикс — каноническая латинская буква (двойники приравнены) с
+    индексом «1» или без. Точное совпадение суффикса: базовая буква не
+    матчит карту-индекс и наоборот («033.10.00а» ≠ «033.10.00а1»).
+    «;»/«:» считается индексом 1 только в зоне заголовка карты
+    (±:data:`CARD_HEADER_WINDOW` строк от «Пункт РО»/«ТЕХНОЛОГИЧЕСКАЯ
+    КАРТА»), вне зоны — пунктуация, вхождение пропускается. Границы:
+    перед базой не цифра/буква/точка («1035.10.00e» не совпадает).
+    """
+    headers = _card_header_lines(text)
+    found: list[tuple[str, str, int]] = []
+    seen: set[tuple[str, str]] = set()
+    for match in _CARD_IN_TEXT_RE.finditer(text):
+        d1, d2, d3, letter, index = match.groups()
+        letter = _SUFFIX_HOMOGLYPHS.get(letter.lower(), letter.lower())
+        if index is None:
+            suffix = letter
+        else:
+            if index not in "1₁" and not _index_in_header_zone(
+                    text, match.start(4), headers):
+                continue
+            suffix = f"{letter}1"
+        key = (f"{d1}.{d2}.{d3}", suffix)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append((*key, match.start(4)))
+    return found
 
 
 def _card_suffix_in_text(lowered: str, designator: str) -> bool:
-    """Суффикс карты приравнен к двойникам (Ф1.9в).
+    """Точное совпадение суффикса карты (Ф1.9в, Ф2.8).
 
-    Только для обозначений-номеров карт «NNN.NN.NN + буква»: база в тексте,
-    суффикс — латинская буква или любой её кириллический двойник. Границы:
-    перед базой не цифра/буква/точка («1035.10.00e» не совпадает), суффикс
-    не продолжается в слово («035.10.00 кислородное» — не карта «…к»).
+    Только для обозначений-номеров карт «NNN.NN.NN + буква (+ индекс)»:
+    суффикс — латинская буква или любой её кириллический двойник, индекс
+    (если запрошен) обязан быть в тексте. Запрос базовой буквы не
+    совпадает с картой-индексом и наоборот; суффикс не продолжается в
+    слово («035.10.00 кислородное» — не карта «…к»).
     """
     match = _TECHCARD_DESIGNATOR_RE.fullmatch(designator.strip())
     if match is None:
         return False
-    d1, d2, d3, suffix = match.groups()
-    suffix = suffix.lower()
-    canonical = _SUFFIX_HOMOGLYPHS.get(suffix, suffix)
-    variants = {canonical} | {key for key, value in _SUFFIX_HOMOGLYPHS.items()
-                              if value == canonical}
-    chars = "".join(sorted(variants))
-    pattern = (rf"(?<![\da-zа-яё.]){d1}[.\s]*{d2}[.\s]*{d3}[.\s]*"
-               rf"[{chars}](?![a-zа-яё])")
-    return re.search(pattern, lowered) is not None
+    d1, d2, d3, suffix, index = match.groups()
+    suffix = _SUFFIX_HOMOGLYPHS.get(suffix.lower(), suffix.lower())
+    wanted = f"{suffix}1" if index else suffix
+    base = f"{d1}.{d2}.{d3}"
+    return any(found_base == base and found_suffix == wanted
+               for found_base, found_suffix, _position
+               in card_suffix_occurrences(lowered))
 
 
 def _designator_in_text(text: str, designator: str) -> bool:
@@ -360,7 +430,7 @@ def _scan_corpus_for_designator(store: Store, designator: str) -> bool:
     # признаёт _designator_in_text, в том числе карточную форму с двойниками.
     card = _TECHCARD_DESIGNATOR_RE.fullmatch(lowered)
     if card is not None:
-        d1, d2, d3, _suffix = card.groups()
+        d1, d2, d3, _suffix, _index = card.groups()
         variants |= {f"{d1}.{d2}.{d3}", f"{d1}{d2}{d3}", f"{d1} {d2} {d3}"}
     seen: set[tuple[str, int]] = set()
     for variant in sorted(variants):

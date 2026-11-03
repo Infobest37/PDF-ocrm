@@ -6,7 +6,8 @@
 
 Поля карточки:
 
-- ``number`` — номер карты в канонической форме («035.10.00e»);
+- ``number`` — номер карты в канонической форме («035.10.00e», с индексом
+  «033.10.00а1» — Ф2.8);
 - ``title``  — наименование работы: текст после маркера «Наименование
   работы» (регистр и ё/е не важны, двоеточие опционально) до следующего
   раздела листа; переносы строк OCR схлопываются — содержимое дословное;
@@ -14,7 +15,10 @@
 - ``labor``  — трудоёмкость: строка «Трудоемкость/Трудоёмкость», из неё
   «N,N чел.ч»; маркера или числа нет — пустая строка;
 - ``sheets`` — листы карты: документ, лист, роль-подпись
-  («как выполняется» / «когда выполняется», Ф1.9б).
+  («как выполняется» / «когда выполняется», Ф1.9б);
+- ``applicability`` — пометка применимости (Ф2.8): карта найдена только
+  в дополнении — «карта из дополнения Д-1697; применима к бортам …;
+  для остальных бортов — базовая карта в …»; иначе пустая строка.
 """
 
 from __future__ import annotations
@@ -22,8 +26,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from pdfgraph.gates import _designator_in_text
-from pdfgraph.query import parse_techcard_query
+from pdfgraph import documents as documents_table
+from pdfgraph.gates import _card_suffix_in_text
+from pdfgraph.query import (ROLE_MANUAL, _techcard_matches, document_role,
+                            parse_techcard_query)
 from pdfgraph.store import Store
 
 #: Маркер наименования работы: регистр не важен, ё/е эквивалентны,
@@ -69,6 +75,9 @@ class TechCard:
     title: str = ""
     labor: str = ""
     sheets: list[CardSheet] = field(default_factory=list)
+    #: Ф2.8: пометка применимости для карты, найденной только в
+    #: дополнении; пустая строка — обычная карта основной книги.
+    applicability: str = ""
 
 
 def _segment_after_marker(text: str, marker: re.Pattern[str]) -> str:
@@ -102,12 +111,63 @@ def extract_labor(page_text: str) -> str:
     return match.group(0).strip().rstrip(".")
 
 
-def build_card(number: str, store: Store, fragments: list) -> TechCard:
+def _base_card_book(store: Store, base: str, letter: str) -> str:
+    """Краткое имя руководства с базовой картой (без индекса), Ф2.8.
+
+    Первый по порядку документ-руководство, где встречается карта базы
+    ``base`` с буквой ``letter`` без индекса; имя без «.pdf» и ревизии в
+    скобках («РТЭ Ми-8МТВ-1 кн. 7»). Базовой карты в корпусе нет — ''.
+    """
+    for document, _page, _code1, _code2, suffix \
+            in _techcard_matches(store, base, None):
+        if suffix != letter or document_role(store, document) != ROLE_MANUAL:
+            continue
+        name = document[:-4] if document.lower().endswith(".pdf") else document
+        return re.sub(r"\s*\([^)]*\)", "", name).strip()
+    return ""
+
+
+def _applicability_note(store: Store, base: str, suffix: str,
+                        sheets: list[CardSheet]) -> str:
+    """Пометка применимости: карта найдена только в дополнении (Ф2.8, п. 4).
+
+    Хотя бы один лист карты из основной книги — '' (карта общая). Все
+    листы из дополнений — строка по таблице documents: «карта из
+    дополнения <target>; применима к бортам <serials>; для остальных
+    бортов — базовая карта в <книга>». Без target/бортов в documents
+    (scope equipment до ручной правки) пометка не строится — fail-closed.
+    """
+    if not sheets:
+        return ""
+    rows = []
+    for document in sorted({sheet.document for sheet in sheets}):
+        row = documents_table.get_row(store, document)
+        if row is None or row.get("layer") != "supplement":
+            return ""
+        rows.append(row)
+    targets = sorted({row["target"] for row in rows if row.get("target")})
+    serials = sorted({part.strip() for row in rows
+                      for part in (row.get("applicability_serials")
+                                   or "").split(",") if part.strip()})
+    if not targets or not serials:
+        return ""
+    note = (f"карта из дополнения {', '.join(targets)}; "
+            f"применима к бортам {', '.join(serials)}")
+    book = _base_card_book(store, base, suffix[0])
+    if book:
+        note += f"; для остальных бортов — базовая карта в {book}"
+    return note
+
+
+def build_card(number: str, store: Store, fragments: list,
+               applicability: str = "") -> TechCard:
     """Карточка одного номера карты из techcard-фрагментов выдачи.
 
     ``fragments`` — фрагменты (kind="techcard"), чей лист относится к этой
     карте (для сводного листа регламента — да, несёт несколько карт);
     порядок фрагментов сохраняется (руководства выше регламента, Ф1.9б).
+    ``applicability`` — пометка применимости (Ф2.8), вычисляет
+    :func:`collect_techcards`.
     """
     sheets = [
         CardSheet(document=fragment.document, page=fragment.page,
@@ -126,7 +186,8 @@ def build_card(number: str, store: Store, fragments: list) -> TechCard:
         labor = labor or extract_labor(text)
         if title and labor:
             break
-    return TechCard(number=number, title=title, labor=labor, sheets=sheets)
+    return TechCard(number=number, title=title, labor=labor, sheets=sheets,
+                    applicability=applicability)
 
 
 def collect_techcards(store: Store, question: str, fragments: list
@@ -145,9 +206,13 @@ def collect_techcards(store: Store, question: str, fragments: list
     cards: list[TechCard] = []
     for suffix in suffixes:
         number = f"{base}{suffix}"
+        # Ф2.8: точное совпадение суффикса — базовая карта не собирает
+        # листы карты-дополнения с индексом и наоборот.
         sheets = [fragment for fragment in tech_fragments
-                  if _designator_in_text(
-                      store.page_text(fragment.document, fragment.page)
-                      or "", number)]
-        cards.append(build_card(number, store, sheets))
+                  if _card_suffix_in_text(
+                      (store.page_text(fragment.document, fragment.page)
+                       or "").lower(), number)]
+        cards.append(build_card(
+            number, store, sheets,
+            applicability=_applicability_note(store, base, suffix, sheets)))
     return cards

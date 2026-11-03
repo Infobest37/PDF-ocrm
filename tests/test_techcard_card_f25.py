@@ -205,3 +205,87 @@ def test_json_payload_carries_techcard(tmp_path, capsys):
             "как выполняется"
     finally:
         store.close()
+
+
+# --- Ф2.8: цифровой индекс в номере карты -----------------------------------
+
+#: Кн.7 л.372 — базовая карта 033.10.00а в шапке карты.
+_KN7_BASE_TEXT = (
+    "Ми-8МТВ-1\nРУКОВОДСТВО ПО ТЕХНИЧЕСКОЙ ЭКСПЛУАТАЦИИ\n033.10.00\n"
+    "Стр. 203/204\nК РО Ми-8МТВ-1\nТЕХНОЛОГИЧЕСКАЯ КАРТА\n"
+    "Пункт РО\n033.10.00 a\nНаименование работы:\n"
+    "Осмотр осветительного оборудования кабины экипажа\nТрудоемкость,\n"
+    "0,1 чел.ч.\nСодержание операции и технические требования (ТТ)\n"
+    "1. Осмотрите стекла плафонов и световых табло.")
+#: Д-1697 кн.2 л.132 — карта 033.10.00а1; индекс OCR даёт «;».
+_SUPPLEMENT_A1_TEXT = (
+    "Ми-8МТВ-1\nДОПОЛНЕНИЕ К РУКОВОДСТВУ ПО ТЕХНИЧЕСКОЙ ЭКСПЛУАТАЦИИ\n"
+    "МИ 8МТВ-1 ТЕХНОЛОГИЧЕСКАЯ КАРТА 203/204\nПункт РО\n033.10.00 a;\n"
+    "Наименование работы:\nОсмотр светотехнического оборудования кабины "
+    "экипажа\nТрудоемкость,\n0,1 чел.ч.\n"
+    "Содержание операции и технические требования (ТТ)\n"
+    "1. Осмотрите стекла потолочных светильников.")
+
+
+def _store_f28(tmp_path) -> Store:
+    """Корпус Ф2.8: базовая карта в кн.7, карта-дополнение а1 в Д-1697."""
+    from pdfgraph import documents
+
+    store = Store(str(tmp_path / "f28card.db"))
+    pages = [
+        ("РТЭ Ми-8МТВ-1 кн. 7 (изм. от 24.08.2023).pdf", 372,
+         _KN7_BASE_TEXT),
+        ("Доп. к РТЭ Д-1697 кн.2 для вертолета 22217 22562.pdf", 132,
+         _SUPPLEMENT_A1_TEXT),
+    ]
+    for document, page, text in pages:
+        store.upsert_page(document, page, "Ми-8МТВ", "", "", text,
+                          normalize_for_search(text))
+    documents.fill_missing(store)
+    return store
+
+
+def test_base_card_answer_without_note_f28(tmp_path):
+    """Приёмка Ф2.8: 033.10.00a — базовая карта кн.7 «Осмотр осветительного
+    оборудования», без пометки применимости."""
+    store = _store_f28(tmp_path)
+    try:
+        answer = build_answer(store, "033.10.00a")
+        assert not answer.refusal and answer.techcard
+        card = answer.techcard[0]
+        assert card.number == "033.10.00a"
+        assert card.title == (
+            "Осмотр осветительного оборудования кабины экипажа")
+        assert card.labor == "0,1 чел.ч"
+        assert card.applicability == ""
+        assert [(sheet.document, sheet.page) for sheet in card.sheets] == [
+            ("РТЭ Ми-8МТВ-1 кн. 7 (изм. от 24.08.2023).pdf", 372)]
+    finally:
+        store.close()
+
+
+def test_index_card_answer_with_note_f28(tmp_path, capsys):
+    """Приёмка Ф2.8: 033.10.00a1 — карта Д-1697 «Осмотр светотехнического
+    оборудования» с пометкой про борта 22217, 22562 и базовую карту кн.7."""
+    store = _store_f28(tmp_path)
+    try:
+        answer = build_answer(store, "033.10.00a1")
+        assert not answer.refusal and answer.techcard
+        card = answer.techcard[0]
+        assert card.number == "033.10.00a1"
+        assert card.title == (
+            "Осмотр светотехнического оборудования кабины экипажа")
+        assert card.applicability == (
+            "карта из дополнения Д-1697; применима к бортам 22217, 22562; "
+            "для остальных бортов — базовая карта в РТЭ Ми-8МТВ-1 кн. 7")
+        assert [(sheet.document, sheet.page) for sheet in card.sheets] == [
+            ("Доп. к РТЭ Д-1697 кн.2 для вертолета 22217 22562.pdf", 132)]
+        # CLI печатает пометку в блоке карточки.
+        from pdfgraph.cli import _print_text
+
+        _print_text(answer, [], True)
+        out = capsys.readouterr().out
+        assert "карта из дополнения Д-1697" in out
+        assert "22217, 22562" in out
+    finally:
+        store.close()
