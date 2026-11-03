@@ -361,6 +361,15 @@ def test_answer_with_cyrillic_suffix_on_sheet(tmp_path):
         store.close()
 
 
+def test_homoglyph_tables_in_sync():
+    """Ф1.9д: таблицы двойников суффикса в query и gates совпадают —
+    рассинхрон (Ф1.9в: без к/м/т/в/н) ломал поиск карт с этими суффиксами."""
+    from pdfgraph.gates import _SUFFIX_HOMOGLYPHS
+    from pdfgraph.query import _TECHCARD_HOMOGLYPHS
+
+    assert _TECHCARD_HOMOGLYPHS == _SUFFIX_HOMOGLYPHS
+
+
 def test_cli_prints_roles_and_section_more(capsys):
     """CLI: подпись роли в доказательствах и строка «Ещё N карт раздела»."""
     from pdfgraph.answer import Answer
