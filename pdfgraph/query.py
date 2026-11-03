@@ -88,6 +88,26 @@ _TECHCARD_EXPR_RE = re.compile(
 )
 #: Вхождение карты в нормализованный текст листа; кэш по базе номера.
 _TECHCARD_TEXT_RES: dict[tuple[str, str, str], re.Pattern[str]] = {}
+
+# --- Ф1.9б: карты на виду, роль документа -----------------------------------
+
+#: Роль документа результата: руководство («карта, как выполняется») или
+#: регламент («когда выполняется»). Определяется по имени файла:
+#: documents.family хранит семейство ВС, а не роль (см. docs/PITFALLS.md).
+ROLE_MANUAL = "manual"
+ROLE_REGLAMENT = "reglament"
+#: Подписи ролей результата (Ф1.9б).
+ROLE_LABELS = {
+    ROLE_MANUAL: "карта, как выполняется",
+    ROLE_REGLAMENT: "когда выполняется",
+}
+#: Сколько карт раздела попадает в выдачу при запросе без буквы (Ф1.9б);
+#: остаток — :func:`techcard_section_more` → ``Answer.techcard_more``.
+TECHCARD_SECTION_LIMIT = 10
+_ROLE_REGLEMENT_RE = re.compile(r"регламент", re.IGNORECASE)
+#: Кэш роли по (id(store), документ) — тот же приём, что _CORPUS_TYPE_CACHE
+#: в pdfgraph.gates.
+_DOCUMENT_ROLE_CACHE: dict[tuple[int, str], str] = {}
 _TECHCARD_CODE_WITH_SUFFIX_RE = re.compile(
     r"^\d{2,3}\.\d{2}\.\d{2}\s*[a-zа-я]$", re.IGNORECASE,
 )
@@ -115,6 +135,9 @@ class Fragment:
     char_end: int
     score: float
     kind: str
+    #: Ф1.9б: роль документа результата («manual»/«reglament»), только
+    #: для карт; подпись — :data:`ROLE_LABELS`. Аддитивно, по умолчанию ''.
+    role: str = ""
 
 
 def _search_index(text: str) -> tuple[str, list[tuple[int, int]]]:
@@ -180,7 +203,8 @@ def _window(text: str, match: tuple[int, int] | None) -> tuple[str, int, int]:
 
 
 def _fragment(store: Store, document: str, page: int, system_code: str,
-              subsystem_code: str, score: float, kind: str, needle: str) -> Fragment:
+              subsystem_code: str, score: float, kind: str, needle: str,
+              role: str = "") -> Fragment:
     text = store.page_text(document, page)
     norm, spans = _search_index(text)
     match = _match_span(norm, spans, needle) if norm else None
@@ -189,6 +213,7 @@ def _fragment(store: Store, document: str, page: int, system_code: str,
         document=document, page=page, system_code=system_code,
         subsystem_code=subsystem_code, snippet=snippet,
         char_start=char_start, char_end=char_end, score=score, kind=kind,
+        role=role,
     )
 
 
@@ -383,46 +408,76 @@ def _search_techcard(store: Store, base: str, suffixes: list[str],
     С суффиксами — каждая запрошенная карта отдельным результатом
     (kind="techcard", score=1.0), ВСЕ листы карты, в порядке суффиксов
     запроса; карта, которой нет в базе, просто не возвращается (её честно
-    перечисляет ``Answer.techcard_missing``, Ф1.9). Без суффиксов — раздел:
-    прежняя code-ветка плюс перечисление найденных в нём карт в хвосте
-    (контракт Fragment не меняется).
+    перечисляет ``Answer.techcard_missing``, Ф1.9). Без суффиксов — раздел
+    (Ф1.9б): карты раздела ВЫШЕ листов раздела, больше
+    :data:`TECHCARD_SECTION_LIMIT` — первые по суффиксам, остаток в
+    ``Answer.techcard_more`` (:func:`techcard_section_more`).
     """
     matches = _techcard_matches(store, base, aircraft_type)
     by_suffix: dict[str, list[tuple[str, int, str, str, str]]] = {}
     for row in matches:
         by_suffix.setdefault(row[4], []).append(row)
     if suffixes:
+        # Ф1.9б: внутри карты руководства выше регламента, затем документ/лист.
         fragments: list[Fragment] = []
         for suffix in suffixes:
             for document, page, system_code, subsystem_code, _suffix \
-                    in by_suffix.get(suffix, []):
+                    in sorted(by_suffix.get(suffix, []),
+                              key=lambda row: _role_row_key(store, row)):
                 fragments.append(_fragment(
                     store, document, page, system_code, subsystem_code,
-                    1.0, "techcard", base))
+                    1.0, "techcard", base,
+                    role=document_role(store, document)))
         return fragments[:max(limit, 0)]
+    # Лист регламента может нести несколько карт — дедупликация по
+    # (суффикс, лист), иначе свод-форма скроет все карты, кроме первой.
+    cards: list[Fragment] = []
+    card_sheets: set[tuple[str, int]] = set()
+    for suffix in sorted(by_suffix)[:TECHCARD_SECTION_LIMIT]:
+        for document, page, system_code, subsystem_code, _suffix \
+                in sorted(by_suffix[suffix],
+                          key=lambda row: _role_row_key(store, row)):
+            cards.append(_fragment(
+                store, document, page, system_code, subsystem_code,
+                1.0, "techcard", base, role=document_role(store, document)))
+            card_sheets.add((document, page))
     section = _search_ordinary(store, base, aircraft_type, limit)
     # Номер мог попасть в партномерную/текстовую ветку — карты перечисляем
     # только при раздел-выдаче (code-ветка) или пустой выдаче.
     if section and not any(f.kind == "code" for f in section):
         return section
-    seen = {(f.document, f.page) for f in section}
-    for document, page, system_code, subsystem_code, _suffix in matches:
-        if (document, page) in seen:
-            continue
-        seen.add((document, page))
-        section.append(_fragment(store, document, page, system_code,
-                                 subsystem_code, 1.0, "techcard", base))
+    section = [f for f in section if (f.document, f.page) not in card_sheets]
+    return cards + section
     return section
 
 
-def techcard_exact_query(question: str) -> bool:
-    """Ф1.9: вопрос — точный номер карты с суффиксами?
+def document_role(store: Store, document: str) -> str:
+    """Роль документа по имени файла (Ф1.9б): регламент или руководство."""
+    key = (id(store), document)
+    role = _DOCUMENT_ROLE_CACHE.get(key)
+    if role is None:
+        role = (ROLE_REGLAMENT if _ROLE_REGLEMENT_RE.search(document)
+                else ROLE_MANUAL)
+        _DOCUMENT_ROLE_CACHE[key] = role
+    return role
+
+
+def _role_row_key(store: Store, row: tuple[str, int, str, str, str]
+                  ) -> tuple[int, str, int]:
+    """Порядок листов карты: руководства выше регламента, затем документ/лист."""
+    role = document_role(store, row[0])
+    return (0 if role == ROLE_MANUAL else 1, row[0], row[1])
+
+
+def techcard_query(question: str) -> bool:
+    """Ф1.9/Ф1.9б: вопрос — точный номер карты (с суффиксами или без)?
 
     Такие запросы идут только по лексической ветке (см.
-    :func:`hybrid_search` и слияние в ``answer._build_answer_core``).
+    :func:`hybrid_search` и слияние в ``answer._build_answer_core``):
+    для точного номера семантика — шум, а слагаемое специфичности
+    зависит от написания номера и перемешивает роли и листы.
     """
-    parsed = parse_techcard_query(question)
-    return parsed is not None and bool(parsed[1])
+    return parse_techcard_query(question) is not None
 
 
 def techcard_missing_suffixes(store: Store, question: str,
@@ -440,8 +495,27 @@ def techcard_missing_suffixes(store: Store, question: str,
     base, suffixes = parsed
     if not suffixes:
         return []
-    found = {row[4] for row in _techcard_matches(store, base, aircraft_type)}
+    # Ф1.9б: карта считается найденной, только когда она есть в руководстве
+    # («как выполняется»); версия только в регламенте (периодичность) —
+    # карта отсутствует, листы регламента при этом показываются (п. 4).
+    found = {row[4] for row in _techcard_matches(store, base, aircraft_type)
+             if document_role(store, row[0]) == ROLE_MANUAL}
     return [f"{base}{suffix}" for suffix in suffixes if suffix not in found]
+
+
+def techcard_section_more(store: Store, question: str,
+                          aircraft_type: str | None = None) -> int:
+    """Ф1.9б: сколько карт раздела не попало в выдачу (после лимита 10).
+
+    Не ноль — только для запроса раздела (без суффиксов); в
+    :func:`pdfgraph.answer.build_answer` идёт в ``Answer.techcard_more``.
+    """
+    parsed = parse_techcard_query(question)
+    if parsed is None or parsed[1]:
+        return 0
+    cards = {row[4]
+             for row in _techcard_matches(store, parsed[0], aircraft_type)}
+    return max(0, len(cards) - TECHCARD_SECTION_LIMIT)
 
 
 def _search_ordinary(store: Store, stripped: str,
@@ -646,11 +720,11 @@ def hybrid_search(store: Store, question: str,
     """
     mode = (search_mode if search_mode in _SEARCH_MODES
             else effective_search_mode())
-    if mode == "lexical" or techcard_exact_query(question):
-        # Ф1.9: точный номер карты с суффиксами — чисто лексическая ветка,
-        # без слияния с семантикой: семантика на номере карты даёт только
-        # шум, а слагаемое специфичности зависит от написания номера
-        # («035.10.00e» ≠ «035.10.00 e») и перемешивает одинаковые листы.
+    if mode == "lexical" or techcard_query(question):
+        # Ф1.9/Ф1.9б: точный номер карты — чисто лексическая ветка, без
+        # слияния с семантикой: семантика на номере даёт только шум, а
+        # слагаемое специфичности зависит от написания номера
+        # («035.10.00e» ≠ «035.10.00 e») и перемешивает роли и листы.
         return search(store, question, aircraft_type, limit)
     # Импорт по месту: rag_fusion импортирует query наверху, а чисто
     # лексический путь не должен тянуть его на старте (замыкание цикла).

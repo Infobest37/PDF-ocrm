@@ -18,8 +18,9 @@ from pdfgraph.query import (
     effective_search_mode,
     expand_continuations,
     search,
-    techcard_exact_query,
     techcard_missing_suffixes,
+    techcard_query,
+    techcard_section_more,
     vector_search,
 )
 from pdfgraph.store import Store
@@ -52,8 +53,10 @@ class Answer:
     ссылок ``{"document", "page", "label"}`` без цитат; в ранжирование,
     claims и проверку цитат не попадает.
     ``techcard_missing`` (Ф1.9) — запрошенные карты (номер с суффиксом),
-    которых нет в базе: отдельный список строк «035.10.00e» без цитат;
-    в ранжирование, claims и проверку цитат не попадает.
+    которых нет в руководствах базы: отдельный список строк «035.10.00e»
+    без цитат; в ранжирование, claims и проверку цитат не попадает.
+    ``techcard_more`` (Ф1.9б) — сколько карт раздела не попало в выдачу
+    после лимита 10; подпись «ещё N карт раздела», не цитата.
     ``applicability_warning`` (Ф0.3в) — пометка «документ применим к
     бортам …; ваш борт не указан», когда борт из вопроса не входит в
     применимость документа-лидера; ответ при этом выдаётся как раньше.
@@ -67,6 +70,7 @@ class Answer:
     clarification: dict | None = None
     neighbors: list[dict] = field(default_factory=list)
     techcard_missing: list[str] = field(default_factory=list)
+    techcard_more: int = 0
     applicability_warning: str = ""
 
 
@@ -282,10 +286,10 @@ def _build_answer_core(
         fragments = search(store, question, aircraft_type, channel_depth)[:10]
         mode_now = (effective_search_mode()
                     if search_mode is None else search_mode)
-        # Ф1.9: точный номер карты с суффиксами — без слияния с семантикой
-        # (та же причина, что в query.hybrid_search: шум и зависимость
-        # специфичности от написания номера).
-        if techcard_exact_query(question):
+        # Ф1.9/Ф1.9б: точный номер карты (с суффиксами или без) — без
+        # слияния с семантикой (та же причина, что в query.hybrid_search:
+        # шум и зависимость специфичности от написания номера).
+        if techcard_query(question):
             pass
         elif mode_now != "lexical" and (mode_now == "hybrid_full" or fragments):
             vector_ranking = vector_search(store, question,
@@ -504,6 +508,8 @@ def build_answer(
     # цитатой. Заполняется и при отказе — инженеру полезно знать, какие
     # именно карты не нашлись, даже когда ответа нет.
     answer.techcard_missing = techcard_missing_suffixes(
+        store, question, aircraft_type)
+    answer.techcard_more = techcard_section_more(
         store, question, aircraft_type)
     # Ф2.3: человеческое начало ответа — Claim.answer_text; Claim.text
     # (дословный сниппет-цитата) и verify не меняются.

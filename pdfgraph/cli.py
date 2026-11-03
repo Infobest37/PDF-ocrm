@@ -62,6 +62,7 @@ import sys
 from datetime import datetime
 
 from pdfgraph.answer import Answer, build_answer
+from pdfgraph.query import ROLE_LABELS
 from pdfgraph.build import (
     auto_embeddings,
     build,
@@ -289,6 +290,9 @@ def _print_json(answer: Answer, rows: list[dict], verified: bool) -> None:
     # в claims/citations не попадает (печатается и при отказе).
     if getattr(answer, "techcard_missing", None):
         payload["techcard_missing"] = list(answer.techcard_missing)
+    # Ф1.9б: карты раздела сверх лимита десяти.
+    if getattr(answer, "techcard_more", 0):
+        payload["techcard_more"] = answer.techcard_more
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -345,6 +349,11 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
             code = row["system_code"] or row["subsystem_code"] or "без кода"
             mark = "ok" if row["ok"] else "НЕ ПОДТВЕРЖДЕНА"
             line = f"  [{mark}] {sheet} код {code}"
+            # Ф1.9б: роль документа результата карты — «как/когда выполняется».
+            role = ROLE_LABELS.get(getattr(fragment, "role", ""), "") \
+                if fragment is not None else ""
+            if role:
+                line += f" — {role}"
             # Ф0.3в: слой и применимость документа цитаты.
             if row.get("doc_layer"):
                 line += (f" — слой {row['doc_layer']}, применимость "
@@ -366,6 +375,10 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
     # что комплект полный.
     for key in getattr(answer, "techcard_missing", None) or []:
         print(f"Карта {key} в базе не найдена")
+    # Ф1.9б: карты раздела, не попавшие в выдачу после лимита десяти.
+    more = getattr(answer, "techcard_more", 0)
+    if more:
+        print(f"Ещё {more} карт раздела")
     # Результат verify_citations печатается всегда: количество цитат и вердикт.
     ok = sum(1 for row in rows if row["ok"])
     print(f"Подтверждено {ok} из {len(rows)}")

@@ -36,6 +36,7 @@ from pydantic import BaseModel
 
 from pdfgraph.answer import Answer, build_answer
 from pdfgraph.cli import _base_aircraft_type, _evidence_rows
+from pdfgraph.query import ROLE_LABELS
 from pdfgraph.gui.pdf_opener import PAGE_OFFSET, _find_pdf_file, \
     resolve_pdf_dir
 from pdfgraph.store import Store
@@ -83,12 +84,20 @@ def _citation_rows(answer: Answer, store: Store) -> list[dict]:
         link = f"/doc/{quote(row['document'])}/page/{row['page']}"
         viewer = (f"/static/pdfjs/viewer.html?file={quote(link)}"
                   f"&page={max(1, row['page'] + PAGE_OFFSET)}")
+        # Ф1.9б: подпись роли документа результата карты.
+        fragment = next(
+            (f for f in answer.fragments
+             if f.document == row["document"] and f.page == row["page"]),
+            None)
+        role = ROLE_LABELS.get(getattr(fragment, "role", ""), "") \
+            if fragment is not None else ""
         citations.append({
             "document": row["document"],
             "page": row["page"],
             "ok": row["ok"],
             "reason": row["reason"],
             "system_code": row["system_code"],
+            "role": role,
             "doc_layer": row["doc_layer"],
             "doc_applicability": row["doc_applicability"],
             "doc_revision": row["doc_revision"],
@@ -161,6 +170,7 @@ def create_app(store_path: str, pdf_dir: str | None = None,
                 "neighbors": list(answer.neighbors),
                 "techcard_missing": list(getattr(
                     answer, "techcard_missing", [])),
+                "techcard_more": int(getattr(answer, "techcard_more", 0)),
                 "applicability_warning": answer.applicability_warning,
                 "options": options,
             }

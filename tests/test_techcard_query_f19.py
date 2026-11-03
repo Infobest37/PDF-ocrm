@@ -91,14 +91,15 @@ def test_all_writings_same_first_result(tmp_path):
 
 
 def test_suffix_query_returns_every_sheet_of_the_card(tmp_path):
-    """Карта e есть в Регламенте л.42 и РТЭ л.648 — обе в выдаче."""
+    """Карта e есть в Регламенте л.42 и РТЭ л.648 — обе в выдаче (Ф1.9б:
+    руководство выше регламента, роли подписаны)."""
     store = _store(tmp_path)
     try:
         hits = search(store, "035.10.00e")
-        assert {(hit.document, hit.page) for hit in hits} == {
-            ("Регламент ТО Ч.2 Ми-8МТВ-1.pdf", 42),
-            ("РТЭ Ми-8МТВ-1 кн. 7.pdf", 648),
-        }
+        assert [(hit.document, hit.page, hit.role) for hit in hits] == [
+            ("РТЭ Ми-8МТВ-1 кн. 7.pdf", 648, "manual"),
+            ("Регламент ТО Ч.2 Ми-8МТВ-1.pdf", 42, "reglament"),
+        ]
         assert all(hit.kind == "techcard" and hit.score == 1.0
                    for hit in hits)
     finally:
@@ -137,16 +138,18 @@ def test_section_query_lists_cards(tmp_path):
         assert [(h.document, h.page, h.kind) for h in bare] == \
             [(h.document, h.page, h.kind) for h in with_word]
         kinds = [hit.kind for hit in bare]
-        # Раздел — code-ветка впереди, карты — techcard в хвосте.
-        assert kinds[0] == "code"
-        assert set(kinds[1:]) == {"techcard"}
-        cards = {(hit.document, hit.page) for hit in bare[1:]}
-        assert cards == {
-            ("Регламент ТО Ч.2 Ми-8МТВ-1.pdf", 42),   # c и e
-            ("РТЭ Ми-8МТВ-1 кн. 7.pdf", 640),         # a
-            ("РТЭ Ми-8МТВ-1 кн. 7.pdf", 642),         # b
-            ("РТЭ Ми-8МТВ-1 кн. 7.pdf", 648),         # e
-        }
+        # Ф1.9б: карты раздела ВЫШЕ листов раздела (приёмка: карты в первых
+        # пяти результатах); внутри карты руководства выше регламента.
+        assert kinds[:5] == ["techcard"] * 5
+        assert kinds[-1] == "code"
+        cards = [(hit.document, hit.page, hit.role) for hit in bare[:5]]
+        assert cards == [
+            ("РТЭ Ми-8МТВ-1 кн. 7.pdf", 640, "manual"),          # a
+            ("РТЭ Ми-8МТВ-1 кн. 7.pdf", 642, "manual"),          # b
+            ("Регламент ТО Ч.2 Ми-8МТВ-1.pdf", 42, "reglament"),  # c
+            ("РТЭ Ми-8МТВ-1 кн. 7.pdf", 648, "manual"),          # e
+            ("Регламент ТО Ч.2 Ми-8МТВ-1.pdf", 42, "reglament"),  # e
+        ]
     finally:
         store.close()
 
@@ -185,6 +188,10 @@ def test_techcard_missing_suffixes(tmp_path):
             ["035.10.00z"]
         assert techcard_missing_suffixes(store, "035.10.00y,z") == \
             ["035.10.00y", "035.10.00z"]
+        # Ф1.9б п.4: карта только в регламенте (периодичность) — карта
+        # отсутствует, хотя лист регламента в выдаче будет.
+        assert techcard_missing_suffixes(store, "035.10.00c") == \
+            ["035.10.00c"]
         # Не запрос карты — пусто.
         assert techcard_missing_suffixes(store, "давление масла") == []
         assert techcard_missing_suffixes(store, "035.10.00") == []
@@ -240,3 +247,92 @@ def test_letter_inside_code_is_not_a_techcard(tmp_path):
         assert all(hit.kind != "techcard" for hit in hits)
     finally:
         store.close()
+
+
+def test_card_in_two_manuals_shown_twice(tmp_path):
+    """Карта в двух руководствах — два результата с разными книгами,
+    не схлопываются (Ф1.9б п. 3)."""
+    store = Store(str(tmp_path / "two-manuals.db"))
+    for document, page, text in (
+        ("РТЭ Ми-8МТВ-1 кн. 7 (изм. от 24.08.2023).pdf", 648,
+         "035.10.00е Замена кислородного баллона, порядок работ."),
+        ("Руководство по технической эксплуатации РТЭ Ми-8МТВ-1 кн. 4"
+         ".pdf", 210,
+         "035.10.00е Замена баллона, работы при обслуживании."),
+    ):
+        store.upsert_page(document, page, "Ми-8МТВ", "", "", text,
+                          normalize_for_search(text))
+    try:
+        hits = search(store, "035.10.00e")
+        assert [(hit.document, hit.page, hit.role) for hit in hits] == [
+            ("РТЭ Ми-8МТВ-1 кн. 7 (изм. от 24.08.2023).pdf", 648, "manual"),
+            ("Руководство по технической эксплуатации РТЭ Ми-8МТВ-1 кн. 4"
+             ".pdf", 210, "manual"),
+        ]
+    finally:
+        store.close()
+
+
+def test_section_limit_ten_and_techcard_more(tmp_path):
+    """Карт раздела больше десяти — первые десять в выдаче, остаток в
+    techcard_more (Ф1.9б п. 1, лимит 10 по решению владельца)."""
+    from pdfgraph.answer import build_answer
+    from pdfgraph.query import techcard_section_more
+
+    store = Store(str(tmp_path / "many-cards.db"))
+    for index, suffix in enumerate("abcdefghijkl"):  # 12 карт
+        page = 640 + index
+        text = f"035.10.00{suffix} Карта раздела кислородного оборудования."
+        store.upsert_page("РТЭ Ми-8МТВ-1 кн. 7.pdf", page, "Ми-8МТВ",
+                          "", "", text, normalize_for_search(text))
+    try:
+        hits = search(store, "035.10.00")
+        assert len(hits) == 10
+        assert all(hit.kind == "techcard" for hit in hits)
+        assert techcard_section_more(store, "035.10.00") == 2
+        answer = build_answer(store, "035.10.00")
+        assert answer.techcard_more == 2
+        # Суффиксный запрос лимит раздела не задевает.
+        assert techcard_section_more(store, "035.10.00a") == 0
+    finally:
+        store.close()
+
+
+def test_answer_reglament_only_carries_missing(tmp_path):
+    """Ф1.9б п. 4: карта только в регламенте — лист регламента в выдаче,
+    карта в techcard_missing («в базе не найдена»)."""
+    from pdfgraph.answer import build_answer
+
+    store = _store(tmp_path)
+    try:
+        answer = build_answer(store, "035.10.00c")
+        assert not answer.refusal
+        assert [(f.document, f.page) for f in answer.fragments] == [
+            ("Регламент ТО Ч.2 Ми-8МТВ-1.pdf", 42)]
+        assert answer.fragments[0].role == "reglament"
+        assert answer.techcard_missing == ["035.10.00c"]
+    finally:
+        store.close()
+
+
+def test_cli_prints_roles_and_section_more(capsys):
+    """CLI: подпись роли в доказательствах и строка «Ещё N карт раздела»."""
+    from pdfgraph.answer import Answer
+    from pdfgraph.cli import _print_text
+    from pdfgraph.query import Fragment
+
+    answer = Answer(question="035.10.00", claims=[], fragments=[
+        Fragment(document="РТЭ кн.7.pdf", page=648, system_code="035.10.00",
+                 subsystem_code="", snippet="035.10.00е Замена баллона",
+                 char_start=0, char_end=21, score=1.0, kind="techcard",
+                 role="manual"),
+    ], techcard_missing=["035.10.00c"], techcard_more=2)
+    row = {"claim_index": 0, "document": "РТЭ кн.7.pdf", "page": 648,
+           "system_code": "035.10.00", "subsystem_code": "", "ok": True,
+           "reason": "", "doc_layer": "", "doc_applicability": "",
+           "doc_revision": ""}
+    _print_text(answer, [row], True)
+    out = capsys.readouterr().out
+    assert "— карта, как выполняется" in out
+    assert "Карта 035.10.00c в базе не найдена" in out
+    assert "Ещё 2 карт раздела" in out

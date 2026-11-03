@@ -52,6 +52,8 @@ function citationNode(citation) {
   const metaParts = [`слой: ${LAYER_RU[citation.doc_layer] || citation.doc_layer || "—"}`,
     `применимость: ${applicabilityRu(citation.doc_applicability)}`];
   if (citation.doc_revision) metaParts.push(`ревизия: ${citation.doc_revision}`);
+  /* Ф1.9б: роль документа результата карты — «как/когда выполняется». */
+  if (citation.role) metaParts.push(`роль: ${citation.role}`);
   box.append(el("div", "doc-meta", metaParts.join(" · ")));
 
   const link = el("a", null, "открыть лист →");
@@ -132,6 +134,7 @@ function renderAnswer(message, payload) {
   if (neighbors) message.append(neighbors);
   const missing = techcardMissingNode(payload.techcard_missing);
   if (missing) message.append(missing);
+  appendTechcardMore(message, payload.techcard_more);
 }
 
 function renderRefusal(message, payload) {
@@ -141,6 +144,11 @@ function renderRefusal(message, payload) {
   // Ф1.9: ненайденные карты показываются и при отказе.
   const missing = techcardMissingNode(payload.techcard_missing);
   if (missing) message.append(missing);
+}
+
+// Ф1.9б: карты раздела, не попавшие в выдачу после лимита десяти.
+function appendTechcardMore(message, more) {
+  if (more) message.append(el("p", "neighbors", `Ещё ${more} карт раздела`));
 }
 
 function renderClarify(message, payload) {

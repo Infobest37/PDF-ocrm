@@ -84,7 +84,12 @@ def test_techcard_queries_return_document_pair_and_number_search_results(
 
         system_code_hits = search(store, "023.21.00")
         assert system_code_hits
-        assert all(hit.kind == "code" for hit in system_code_hits)
+        # Ф1.9б: карты раздела выше листов раздела; карта «023.21.00b»
+        # встречается на листах 1–2, обе книги показываются.
+        card_hits = [hit for hit in system_code_hits if hit.kind == "techcard"]
+        code_hits = [hit for hit in system_code_hits if hit.kind == "code"]
+        assert {hit.page for hit in card_hits} == {1, 2}
+        assert code_hits
 
         for query in ("023.21.00b", "023.21.00 b"):
             hits = search(store, query)
@@ -161,8 +166,10 @@ def test_limit_is_respected(fx_store):
 
 def test_fragment_is_a_dataclass_with_declared_fields(fx_store):
     fields = {f.name for f in __import__("dataclasses").fields(Fragment)}
+    # Ф1.9б: role — аддитивное поле роли документа карты (по умолчанию '').
     assert fields == {"document", "page", "system_code", "subsystem_code",
-                      "snippet", "char_start", "char_end", "score", "kind"}
+                      "snippet", "char_start", "char_end", "score", "kind",
+                      "role"}
 
 
 def test_text_query_falls_back_to_or_and_is_penalized(fx_store):
