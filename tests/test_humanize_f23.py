@@ -40,6 +40,14 @@ def test_header_line_rules():
         is False
 
 
+def test_technical_card_title_not_header():
+    """«ТЕХНОЛОГИЧЕСКАЯ КАРТА» — название документа, не колонтитул
+    (решение владельца): строка с ним не удаляется."""
+    line = "84.10.00г ТЕХНОЛОГИЧЕСКАЯ КАРТА — Замена масла"
+    assert is_header_line(line) is False
+    assert line in clean_page_lines([line], header_lines=set())
+
+
 def test_clean_page_lines(tmp_path):
     lines = [
         "Ми-8МТВ-1",
