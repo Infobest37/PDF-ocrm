@@ -103,29 +103,51 @@ async function renderWindow(center) {
   }
 }
 
+/* Ф2.9: текущая страница — по фактической геометрии отрисованных
+   canvas (высота листа зависит от масштаба и документа), а не по
+   шагу 1200px: прежняя аппроксимация открывала лист на единицу раньше
+   нужного. */
+function currentPage() {
+  const marker = container.scrollTop + container.clientHeight / 3;
+  let current = 1;
+  for (const canvas of container.querySelectorAll("canvas[data-page]")) {
+    if (canvas.offsetTop <= marker) {
+      current = parseInt(canvas.dataset.page, 10);
+    }
+  }
+  return current;
+}
+
 function updatePosition() {
-  const center = Math.max(1, Math.round(container.scrollTop / 1200) + 1);
+  const center = currentPage();
   document.getElementById("pos").textContent =
     `лист ${center} из ${pdf.numPages}`;
   renderWindow(center);
 }
 
 async function jumpTo(number) {
-  const height = 1200 * scale / 1.4;
-  container.scrollTop = (number - 1) * height;
+  await renderWindow(number);
+  const target = container.querySelector(`canvas[data-page="${number}"]`);
+  container.scrollTop = target ? Math.max(0, target.offsetTop - 8)
+                               : (number - 1) * 1200 * scale / 1.4;
   updatePosition();
 }
 
-document.getElementById("zoom-in").addEventListener("click",
-  () => { scale = Math.min(4, scale * 1.25); clearPages(); rendered.clear();
-    renderWindow(Math.round(container.scrollTop / 1200) + 1); });
-document.getElementById("zoom-out").addEventListener("click",
-  () => { scale = Math.max(0.5, scale / 1.25); clearPages(); rendered.clear();
-    renderWindow(Math.round(container.scrollTop / 1200) + 1); });
+document.getElementById("zoom-in").addEventListener("click", () => {
+  const center = currentPage();
+  scale = Math.min(4, scale * 1.25); clearPages(); rendered.clear();
+  renderWindow(center);
+});
+document.getElementById("zoom-out").addEventListener("click", () => {
+  const center = currentPage();
+  scale = Math.max(0.5, scale / 1.25); clearPages(); rendered.clear();
+  renderWindow(center);
+});
 document.getElementById("rotate").addEventListener("click", () => {
+  const center = currentPage();
   rotation = (rotation + 90) % 360;
   clearPages(); rendered.clear();
-  renderWindow(Math.round(container.scrollTop / 1200) + 1);
+  renderWindow(center);
 });
 container.addEventListener("scroll", updatePosition);
 

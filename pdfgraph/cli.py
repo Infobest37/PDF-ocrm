@@ -342,7 +342,12 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
             if getattr(card, "applicability", ""):
                 print(f"  {card.applicability}")
             for sheet in card.sheets:
-                print(f"  - {sheet.document} лист {sheet.page} — {sheet.role}")
+                line = f"  - {sheet.document} лист {sheet.page} — {sheet.role}"
+                # Ф2.9: метка многолистовой карты («начало карты»/
+                # «продолжение»), если есть.
+                if getattr(sheet, "part", ""):
+                    line += f" ({sheet.part})"
+                print(line)
     elif answer.claims:
         print("Ответ:")
         # Ф2.3: человеческий абзац (answer_text) — над цитатой; сам

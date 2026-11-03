@@ -60,3 +60,73 @@ def test_citation_carries_full_url(tmp_path):
     from urllib.parse import unquote
     assert unquote(citation["full_url"]).endswith(
         f"/doc/{FX_DOCUMENT}/page/47?view=full")
+
+
+# --- Ф2.9: единая функция ссылок и подпись физической страницы ---------------
+
+def test_sheet_links_builds_all_forms_f29():
+    """Ф2.9: sheet_links — единая точка сборки: адрес — граф-лист,
+    viewer_url и подпись кнопки — физическая страница (PAGE_OFFSET = 1)."""
+    from urllib.parse import unquote
+
+    from pdfgraph.web.app import sheet_links
+
+    links = sheet_links(FX_DOCUMENT, 47)
+    assert unquote(links["link"]) == f"/doc/{FX_DOCUMENT}/page/47"
+    assert unquote(links["full_url"]) == \
+        f"/doc/{FX_DOCUMENT}/page/47?view=full"
+    assert "/static/pdfjs/viewer.html?file=" in links["viewer_url"]
+    assert "page=48" in links["viewer_url"]
+    assert links["physical_page"] == 48
+
+
+def test_techcard_sheet_link_and_physical_label_f29(tmp_path):
+    """Приёмка Ф2.9: карточный лист 372 — адрес page/372, физическая
+    страница для подписи кнопки — 373 («Открыть лист — стр. 373»),
+    оба числа согласованы."""
+    from pdfgraph.answer import Answer
+    from pdfgraph.techcard_card import CardSheet, TechCard
+
+    def ask(store, question, aircraft_type):
+        card = TechCard(number="033.10.00a", title="Осмотр осветительного "
+                        "оборудования",
+                        sheets=[CardSheet(document=FX_DOCUMENT, page=372,
+                                          role="как выполняется")])
+        return Answer(question=question, claims=[], fragments=[],
+                      techcard=[card])
+
+    client, _ = make_client(tmp_path, ask_fn=ask)
+    payload = client.post("/api/ask",
+                          json={"question": "033.10.00a"}).json()
+    sheet = payload["techcard"][0]["sheets"][0]
+    # Адрес — граф-лист 372, подпись кнопки строится из physical_page 373.
+    assert sheet["full_url"].endswith("/page/372?view=full")
+    assert sheet["physical_page"] == 373
+
+
+def test_citation_carries_physical_page_f29(tmp_path):
+    """Ф2.9: цитата несёт physical_page — миниатюра и подписи строятся
+    без дублирования смещения в app.js."""
+    client, _ = make_client(tmp_path)
+    payload = client.post("/api/ask",
+                          json={"question": "радиомаяк ПАРМ-406А"}).json()
+    citation = payload["citations"][0]
+    assert citation["physical_page"] == citation["page"] + 1
+
+
+def test_neighbors_carry_links_f29(tmp_path):
+    """Ф2.9: соседние листы получают ссылки той же функцией sheet_links."""
+    from pdfgraph.answer import Answer
+
+    def ask(store, question, aircraft_type):
+        return Answer(question=question, claims=[], fragments=[],
+                      neighbors=[{"document": FX_DOCUMENT, "page": 12,
+                                  "label": "следующий лист, возможно "
+                                           "продолжение"}])
+
+    client, _ = make_client(tmp_path, ask_fn=ask)
+    payload = client.post("/api/ask", json={"question": "тест"}).json()
+    neighbor = payload["neighbors"][0]
+    from urllib.parse import unquote
+    assert unquote(neighbor["full_url"]) == \
+        f"/doc/{FX_DOCUMENT}/page/12?view=full"

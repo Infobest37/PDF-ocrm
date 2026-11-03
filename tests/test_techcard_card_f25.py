@@ -289,3 +289,79 @@ def test_index_card_answer_with_note_f28(tmp_path, capsys):
         assert "22217, 22562" in out
     finally:
         store.close()
+
+
+# --- Ф2.9: многолистовые карты -----------------------------------------------
+
+_F29_DOC = "РТЭ Ми-8МТВ-1 кн. 7 (изм. от 24.08.2023).pdf"
+_F29_P10 = (
+    "Ми-8МТВ-1\nТЕХНОЛОГИЧЕСКАЯ КАРТА\nПункт РО\n033.10.00 a\n"
+    "Наименование работы:\nОсмотр оборудования\nТрудоемкость,\n"
+    "0,1 чел.ч.\n1. Осмотрите стекла.")
+
+
+def _store_f29(tmp_path, page11_text: str, mark_continuation: bool = False):
+    """Корпус Ф2.9: карта на л.10, второй лист л.11 — по варианту теста."""
+    store = Store(str(tmp_path / "f29.db"))
+    store.upsert_page(_F29_DOC, 10, "Ми-8МТВ", "", "", _F29_P10,
+                      normalize_for_search(_F29_P10))
+    store.upsert_page(_F29_DOC, 11, "Ми-8МТВ", "", "", page11_text,
+                      normalize_for_search(page11_text))
+    if mark_continuation:
+        store.set_page_continuation(_F29_DOC, 11, True)
+    return store
+
+
+def test_multisheet_card_parts_f29(tmp_path, capsys):
+    """Ф2.9: карта на двух листах с повторённым номером — оба листа в
+    карточке: первый «начало карты», следующий «продолжение»."""
+    page11 = ("Продолжение табл.\n033.10.00 a\n"
+              "2. Осмотрите плафоны и светильники.")
+    store = _store_f29(tmp_path, page11)
+    try:
+        answer = build_answer(store, "033.10.00a")
+        assert not answer.refusal and answer.techcard
+        card = answer.techcard[0]
+        assert [(sheet.page, sheet.part) for sheet in card.sheets] == [
+            (10, "начало карты"), (11, "продолжение")]
+        assert all(sheet.role == "как выполняется"
+                   for sheet in card.sheets)
+        # CLI печатает метку продолжения.
+        from pdfgraph.cli import _print_text
+
+        _print_text(answer, [], True)
+        out = capsys.readouterr().out
+        assert "(продолжение)" in out
+        assert "(начало карты)" in out
+    finally:
+        store.close()
+
+
+def test_continuation_without_number_attached_f29(tmp_path):
+    """Ф2.9: продолжение карты без повторённого номера — признак
+    «Продолжение» (is_continuation) приклеивает лист к карточке."""
+    page11 = "Продолжение табл.\n2. Осмотрите плафоны и светильники."
+    store = _store_f29(tmp_path, page11, mark_continuation=True)
+    try:
+        answer = build_answer(store, "033.10.00a")
+        assert not answer.refusal and answer.techcard
+        card = answer.techcard[0]
+        assert [(sheet.page, sheet.part) for sheet in card.sheets] == [
+            (10, "начало карты"), (11, "продолжение")]
+    finally:
+        store.close()
+
+
+def test_continuation_of_other_card_not_attached_f29(tmp_path):
+    """Ф2.9: лист-продолжение с другой картой той же базы (сводная
+    таблица) к карточке не приклеивается."""
+    page11 = "Продолжение табл.\n033.10.00 b Проверка креплений кронштейнов."
+    store = _store_f29(tmp_path, page11, mark_continuation=True)
+    try:
+        answer = build_answer(store, "033.10.00a")
+        assert not answer.refusal and answer.techcard
+        card = answer.techcard[0]
+        assert [sheet.page for sheet in card.sheets] == [10]
+        assert card.sheets[0].part == ""
+    finally:
+        store.close()

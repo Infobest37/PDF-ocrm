@@ -87,8 +87,10 @@ async function renderThumb(citation) {
   try {
     const task = pdfjsLib.getDocument(citation.link);
     const pdf = await task.promise;
-    const page = await pdf.getPage(
-      Math.min(citation.page + 1, pdf.numPages));
+    /* Ф2.9: физическая страница считается сервером (sheet_links,
+       PAGE_OFFSET из pdfgraph.gui.pdf_opener) — вручную не дублируется. */
+    const physical = citation.physical_page || citation.page + 1;
+    const page = await pdf.getPage(Math.min(physical, pdf.numPages));
     const viewport = page.getViewport({ scale: 0.4 });
     const canvas = document.createElement("canvas");
     canvas.width = viewport.width;
@@ -109,9 +111,19 @@ async function renderThumb(citation) {
 
 function neighborsNode(neighbors) {
   if (!neighbors || !neighbors.length) return null;
-  const names = neighbors.map((n) => `${n.document} лист ${n.page} — ${n.label}`);
-  return el("p", "neighbors", "Соседние листы (может быть продолжение): "
-    + names.join("; "));
+  /* Ф2.9: ссылки соседних листов строит сервер (sheet_links) — та же
+     единая точка, что у цитат и карточки; открывается full-вьюер. */
+  const box = el("p", "neighbors",
+    "Соседние листы (может быть продолжение): ");
+  neighbors.forEach((neighbor, index) => {
+    if (index) box.append("; ");
+    const link = el("a", null,
+      `${neighbor.document} лист ${neighbor.page} — ${neighbor.label}`);
+    link.href = neighbor.full_url || "#";
+    link.target = "_blank";
+    box.append(link);
+  });
+  return box;
 }
 
 // Ф1.9: запрошенные карты, которых нет в базе — отдельная строка, не цитата.
@@ -136,10 +148,14 @@ function techcardNode(card) {
     box.append(el("p", "techcard-applicability", card.applicability));
   }
   for (const sheet of card.sheets) {
+    /* Ф2.9: метка многолистовой карты; подпись кнопки — физическая
+       страница (sheet_links), адрес остаётся граф-листом. */
+    const part = sheet.part ? ` — ${sheet.part}` : "";
     const line = el("p", "techcard-sheet",
-      `${sheet.document} лист ${sheet.page} — ${sheet.role}`);
-    const open = el("a", "techcard-open", "Открыть лист");
-    open.href = `/doc/${encodeURIComponent(sheet.document)}/page/${sheet.page}?view=full`;
+      `${sheet.document} лист ${sheet.page} — ${sheet.role}${part}`);
+    const open = el("a", "techcard-open",
+      `Открыть лист — стр. ${sheet.physical_page}`);
+    open.href = sheet.full_url;
     open.target = "_blank";
     line.append(" ");
     line.append(open);

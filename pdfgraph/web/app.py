@@ -72,19 +72,38 @@ def _log_web(store_path: str, outcome: str, question: str) -> None:
         handle.write(f"{stamp} outcome={outcome} question={question}\n")
 
 
+def sheet_links(document: str, page: int) -> dict[str, int | str]:
+    """Единая сборка ссылок на лист PDF (Ф2.9, п. 1).
+
+    Все ссылки на PDF — цитаты, карточка техкарты, соседние листы —
+    строятся только здесь. ``link`` — граф-лист (сырой PDF), ``full_url``
+    — тот же граф-лист с ``?view=full`` (смещение по-прежнему применяется
+    на сервере, контракт Ф2.2 неизменен), ``viewer_url`` — PDF.js-viewer
+    с физической страницей, ``physical_page`` — физическая страница
+    вьюера (graph + PAGE_OFFSET; единый источник смещения —
+    pdfgraph.gui.pdf_opener). Подпись кнопки открытия строится из
+    ``physical_page`` (решение владельца Ф2.9: адрес — граф-лист 372,
+    подпись — «стр. 373»).
+    """
+    link = f"/doc/{quote(document)}/page/{page}"
+    physical = max(1, page + PAGE_OFFSET)
+    return {
+        "link": link,
+        "full_url": link + "?view=full",
+        "viewer_url": (f"/static/pdfjs/viewer.html?file={quote(link)}"
+                       f"&page={physical}"),
+        "physical_page": physical,
+    }
+
+
 def _citation_rows(answer: Answer, store: Store) -> list[dict]:
     """Цитаты с метаданными документа и ссылками на открытие листа.
 
-    ``link`` ведёт на граф-лист (как в CLI), ``viewer_url`` — на
-    локальный PDF.js-viewer с физической страницей (graph + PAGE_OFFSET,
-    единый источник смещения — pdfgraph.gui.pdf_opener).
+    Ссылки строит :func:`sheet_links` (Ф2.9: единая точка сборки).
     """
     rows = _evidence_rows(answer, verify_citations(answer, store), store)
     citations: list[dict] = []
     for row in rows:
-        link = f"/doc/{quote(row['document'])}/page/{row['page']}"
-        viewer = (f"/static/pdfjs/viewer.html?file={quote(link)}"
-                  f"&page={max(1, row['page'] + PAGE_OFFSET)}")
         # Ф1.9б: подпись роли документа результата карты.
         fragment = next(
             (f for f in answer.fragments
@@ -102,9 +121,7 @@ def _citation_rows(answer: Answer, store: Store) -> list[dict]:
             "doc_layer": row["doc_layer"],
             "doc_applicability": row["doc_applicability"],
             "doc_revision": row["doc_revision"],
-            "link": link,
-            "full_url": link + "?view=full",
-            "viewer_url": viewer,
+            **sheet_links(row["document"], row["page"]),
         })
     return citations
 
@@ -168,13 +185,24 @@ def create_app(store_path: str, pdf_dir: str | None = None,
                     {"text": claim.answer_text or claim.text}
                     for claim in answer.claims],
                 "citations": citations,
-                "neighbors": list(answer.neighbors),
                 "techcard_missing": list(getattr(
                     answer, "techcard_missing", [])),
                 "techcard_more": int(getattr(answer, "techcard_more", 0)),
                 # Ф2.5: карточки карт для отображения (не цитаты).
-                "techcard": [dataclasses.asdict(card)
-                             for card in getattr(answer, "techcard", [])],
+                # Ф2.9: ссылки листов карточки — sheet_links (единая
+                # точка сборки), подпись кнопки — physical_page.
+                "techcard": [
+                    {**dataclasses.asdict(card),
+                     "sheets": [{**dataclasses.asdict(sheet),
+                                 **sheet_links(sheet.document, sheet.page)}
+                                for sheet in card.sheets]}
+                    for card in getattr(answer, "techcard", [])],
+                # Ф2.9: соседи получают ссылки той же функцией.
+                "neighbors": [{**neighbor,
+                               "full_url": sheet_links(
+                                   neighbor["document"],
+                                   neighbor["page"])["full_url"]}
+                              for neighbor in answer.neighbors],
                 "applicability_warning": answer.applicability_warning,
                 "options": options,
             }

@@ -27,7 +27,7 @@ import re
 from dataclasses import dataclass, field
 
 from pdfgraph import documents as documents_table
-from pdfgraph.gates import _card_suffix_in_text
+from pdfgraph.gates import _card_suffix_in_text, card_suffix_occurrences
 from pdfgraph.query import (ROLE_MANUAL, _techcard_matches, document_role,
                             parse_techcard_query)
 from pdfgraph.store import Store
@@ -60,11 +60,17 @@ _SHEET_ROLES = {
 
 @dataclass
 class CardSheet:
-    """Лист карты в карточке: документ, лист, подпись роли."""
+    """Лист карты в карточке: документ, лист, подпись роли.
+
+    ``part`` — метка многолистовой карты (Ф2.9): «начало карты» на первом
+    листе и «продолжение» на следующих подряд; у одностраничной карты и
+    листов-регламента вне цепочки продолжений — пустая строка.
+    """
 
     document: str
     page: int
     role: str
+    part: str = ""
 
 
 @dataclass
@@ -166,12 +172,15 @@ def build_card(number: str, store: Store, fragments: list,
     ``fragments`` — фрагменты (kind="techcard"), чей лист относится к этой
     карте (для сводного листа регламента — да, несёт несколько карт);
     порядок фрагментов сохраняется (руководства выше регламента, Ф1.9б).
+    Элемент может быть и готовым :class:`CardSheet` с сырой ролью и
+    меткой ``part`` (Ф2.9: листы-продолжения без своего фрагмента).
     ``applicability`` — пометка применимости (Ф2.8), вычисляет
     :func:`collect_techcards`.
     """
     sheets = [
         CardSheet(document=fragment.document, page=fragment.page,
-                  role=_SHEET_ROLES.get(fragment.role, fragment.role))
+                  role=_SHEET_ROLES.get(fragment.role, fragment.role),
+                  part=getattr(fragment, "part", ""))
         for fragment in fragments
     ]
     # Название и трудоёмкость — с первого листа-руководства, где они есть;
@@ -190,12 +199,62 @@ def build_card(number: str, store: Store, fragments: list,
                     applicability=applicability)
 
 
+def _with_continuations(store: Store, base: str,
+                        entries: list[tuple[str, int, str]],
+                        used: set[tuple[str, int]]
+                        ) -> list[tuple[str, int, str]]:
+    """Приклейка листов-продолжений без повторённого номера (Ф2.9, п. 3).
+
+    Признак продолжения — :meth:`pdfgraph.store.Store.is_continuation`
+    (текст «Продолжение») на следующем листе того же документа; лист с
+    любой картой той же базы не приклеивается (это сводная таблица или
+    следующая карта), занятый другими карточками ответа — тоже.
+    """
+    result = list(entries)
+    for document, page, role in list(entries):
+        probe = page
+        while True:
+            probe += 1
+            if (document, probe) in used:
+                break
+            if not store.is_continuation(document, probe):
+                break
+            text = store.page_text(document, probe) or ""
+            if any(found_base == base for found_base, _suffix, _position
+                   in card_suffix_occurrences(text)):
+                break
+            result.append((document, probe, role))
+            used.add((document, probe))
+    return result
+
+
+def _sheet_parts(entries: list[tuple[str, int, str]]) -> list[str]:
+    """Метки «начало карты»/«продолжение» по цепочке листов (Ф2.9).
+
+    Продолжение — лист того же документа, следующий за предыдущим листом
+    карты; метки ставятся только когда продолжение есть. Порядок entries —
+    порядок листов карточки (руководства выше регламента, Ф1.9б).
+    """
+    parts = [""] * len(entries)
+    for index in range(1, len(entries)):
+        document, page, _role = entries[index]
+        prev_document, prev_page, _prev_role = entries[index - 1]
+        if document == prev_document and page == prev_page + 1:
+            parts[index] = "продолжение"
+    if any(parts) and parts[0] == "":
+        parts[0] = "начало карты"
+    return parts
+
+
 def collect_techcards(store: Store, question: str, fragments: list
                       ) -> list[TechCard]:
     """Карточки по запрошенным суффиксам, в порядке запроса (Ф2.5).
 
     Пустой список — вопрос не про карту с суффиксом или в выдаче нет
-    карточных фрагментов (раздел-запрос идёт прежним путём).
+    карточных фрагментов (раздел-запрос идёт прежним путём). Ф2.9: карта
+    на нескольких листах подряд показывается целиком — продолжения без
+    повторённого номера приклеиваются, первый лист метится «начало
+    карты», следующие подряд — «продолжение».
     """
     parsed = parse_techcard_query(question)
     if parsed is None or not parsed[1] or not fragments:
@@ -203,16 +262,31 @@ def collect_techcards(store: Store, question: str, fragments: list
     base, suffixes = parsed
     tech_fragments = [fragment for fragment in fragments
                       if fragment.kind == "techcard"]
-    cards: list[TechCard] = []
+    # Сначала все листы всех запрошенных карт — занятые ими листы не
+    # приклеиваются к чужим карточкам как продолжения.
+    found: dict[str, list[tuple[str, int, str]]] = {}
+    used: set[tuple[str, int]] = set()
     for suffix in suffixes:
         number = f"{base}{suffix}"
         # Ф2.8: точное совпадение суффикса — базовая карта не собирает
         # листы карты-дополнения с индексом и наоборот.
-        sheets = [fragment for fragment in tech_fragments
-                  if _card_suffix_in_text(
-                      (store.page_text(fragment.document, fragment.page)
-                       or "").lower(), number)]
+        entries = [(fragment.document, fragment.page, fragment.role)
+                   for fragment in tech_fragments
+                   if _card_suffix_in_text(
+                       (store.page_text(fragment.document, fragment.page)
+                        or "").lower(), number)]
+        found[suffix] = entries
+        used.update((document, page) for document, page, _role in entries)
+    cards: list[TechCard] = []
+    for suffix in suffixes:
+        entries = _with_continuations(store, base, found[suffix], used)
+        parts = _sheet_parts(entries)
+        # Сырая роль: build_card сам отображает её в подпись (Ф1.9б).
+        sheets = [
+            CardSheet(document=document, page=page, role=role, part=part)
+            for (document, page, role), part in zip(entries, parts)
+        ]
         cards.append(build_card(
-            number, store, sheets,
+            f"{base}{suffix}", store, sheets,
             applicability=_applicability_note(store, base, suffix, sheets)))
     return cards
