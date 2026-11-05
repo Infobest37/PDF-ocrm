@@ -43,3 +43,5 @@ pdfs/
 prepared/
 models/
 *.db.backup*
+feedback.jsonl
+errors.log
