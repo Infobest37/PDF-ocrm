@@ -25,7 +25,8 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import quote
 
-#: Folder of the prepared source PDFs (the 49-document ``PDFprog\\pdfs`` set).
+#: Папка с исходными PDF (задаётся через PDFGRAPH_PDF_DIR или --pdf-dir).
+
 DEFAULT_PDF_DIR = Path("pdfs")
 
 
