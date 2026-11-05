@@ -914,6 +914,60 @@ def _cmd_emb_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def _feedback_summary(records: list[dict]) -> dict:
+    """Сводка журнала промахов (Ф2.11): всего, по вопросам, с листом."""
+    questions: dict[str, int] = {}
+    with_correct = 0
+    for record in records:
+        question = str(record.get("question", ""))
+        questions[question] = questions.get(question, 0) + 1
+        if record.get("correct_sheet"):
+            with_correct += 1
+    return {
+        "total": len(records),
+        "with_correct_sheet": with_correct,
+        "without_correct_sheet": len(records) - with_correct,
+        "questions": questions,
+    }
+
+
+def _cmd_feedback_list(args: argparse.Namespace) -> int:
+    """Ф2.11: сводка feedback.jsonl рядом с базой; --json — словарём.
+
+    Журнал пишется веб-интерфейсом (кнопка «Это не то» / «Ответ в
+    документах есть» / «Вопрос был понятен»); файла нет — нулевая сводка.
+    """
+    feedback_path = pathlib.Path(args.store_path).with_name("feedback.jsonl")
+    records: list[dict] = []
+    if feedback_path.is_file():
+        with feedback_path.open("r", encoding="utf-8") as handle:
+            for line_no, line in enumerate(handle, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as error:
+                    # Битая строка не глушится молча: предупреждение в stderr.
+                    print(f"warning: feedback.jsonl строка {line_no} "
+                          f"пропущена ({error})", file=sys.stderr)
+                    continue
+                if isinstance(record, dict):
+                    records.append(record)
+    summary = _feedback_summary(records)
+    if getattr(args, "as_json", False):
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
+    print(f"Записей: {summary['total']}")
+    print(f"С указанным правильным листом: {summary['with_correct_sheet']}")
+    print(f"Без правильного листа: {summary['without_correct_sheet']}")
+    if summary["questions"]:
+        print("По вопросам:")
+        for question, count in summary["questions"].items():
+            _safe_print(f"  {count} × {question}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     """Dispatch ``pdfgraph`` subcommands; return the process exit code."""
     parser = argparse.ArgumentParser(
@@ -1128,6 +1182,17 @@ def main(argv: list[str]) -> int:
         "--rebuild", action="store_true",
         help="Re-encode every sheet, ignoring the previous index.")
     emb_parser.set_defaults(handler=_cmd_emb_index)
+
+    # Ф2.11: сводка журнала промахов (feedback.jsonl рядом с базой).
+    feedback_list_parser = commands.add_parser(
+        "feedback-list",
+        help="Summary of the misses journal (feedback.jsonl).")
+    feedback_list_parser.add_argument(
+        "store_path", help="SQLite graph file.")
+    feedback_list_parser.add_argument(
+        "--json", dest="as_json", action="store_true",
+        help="Print the summary as JSON.")
+    feedback_list_parser.set_defaults(handler=_cmd_feedback_list)
 
     args = parser.parse_args(argv)
     return args.handler(args)

@@ -201,6 +201,56 @@ function renderRefusal(message, payload) {
   if (missing) message.append(missing);
 }
 
+/* Ф2.11: журнал промахов — кнопка обратной связи под каждым исходом.
+   Подпись по исходу (решение владельца): answer → «Это не то»,
+   refusal → «Ответ в документах есть», clarify → «Вопрос был понятен». */
+const FEEDBACK_LABELS = {
+  answer: "Это не то",
+  refusal: "Ответ в документах есть",
+  clarify: "Вопрос был понятен",
+};
+
+function feedbackNode(question, payload) {
+  const status = payload.status || "answer";
+  const box = el("div", "feedback");
+  const button = el("button", "feedback-toggle",
+    FEEDBACK_LABELS[status] || "Это не то");
+  box.append(button);
+  button.addEventListener("click", () => {
+    if (box.querySelector(".feedback-form")) return;
+    const form = el("div", "feedback-form");
+    const sheetInput = el("input", "feedback-input");
+    sheetInput.placeholder = "Правильный документ и лист (необязательно)";
+    const commentInput = el("input", "feedback-input");
+    commentInput.placeholder = "Комментарий (необязательно)";
+    const send = el("button", "feedback-send", "Отправить");
+    send.addEventListener("click", async () => {
+      const sheets = (payload.citations || []).map((citation) => ({
+        document: citation.document, page: citation.page,
+      }));
+      try {
+        await fetch("/api/feedback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            question,
+            status,
+            sheets,
+            correct_sheet: sheetInput.value.trim() || null,
+            comment: commentInput.value.trim() || null,
+          }),
+        });
+        form.remove();
+        button.textContent = "Отмечено";
+        button.disabled = true;
+      } catch (error) { /* сервер недоступен — форма остаётся */ }
+    });
+    form.append(sheetInput, commentInput, send);
+    box.append(form);
+  });
+  return box;
+}
+
 // Ф1.9б: карты раздела, не попавшие в выдачу после лимита десяти.
 function appendTechcardMore(message, more) {
   if (more) message.append(el("p", "neighbors", `Ещё ${more} карт раздела`));
@@ -257,6 +307,7 @@ async function ask(question) {
     if (payload.status === "answer") renderAnswer(message, payload);
     else if (payload.status === "refusal") renderRefusal(message, payload);
     else renderClarify(message, payload);
+    message.append(feedbackNode(text, payload));
     saveConversation(text, payload);
   } catch (error) {
     pending.remove();
@@ -284,5 +335,6 @@ form.addEventListener("submit", (event) => {
     else if (payload.status === "refusal")
       renderRefusal(message, payload);
     else renderClarify(message, payload);
+    message.append(feedbackNode(question, payload));
   } catch (error) { /* повреждённая запись — начинаем с пустой ленты */ }
 })();

@@ -17,11 +17,19 @@
   никаких обращений к CDN в рантайме.
 
 Каждый вопрос пишется в ``web.log`` рядом с базой: время, вопрос, исход.
+
+Ф2.11: журнал промахов — ``POST /api/feedback`` дописывает строку JSON в
+``feedback.jsonl`` рядом с базой (вопрос, исход, выданные листы,
+top_documents, правильный лист, комментарий); необработанные исключения
+маршрутов пишутся в ``errors.log`` рядом с базой (время, маршрут,
+вопрос если был, тип и текст ошибки), сервер продолжает работать.
+Поиск и база при этом не меняются.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import time
 from datetime import datetime
@@ -30,7 +38,7 @@ from typing import Callable
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -58,6 +66,27 @@ class AskRequest(BaseModel):
     question: str
 
 
+class SheetRef(BaseModel):
+    """Выданный лист: документ и номер листа (Ф2.11)."""
+
+    document: str
+    page: int
+
+
+class FeedbackRequest(BaseModel):
+    """Тело POST /api/feedback (Ф2.11): промах, отмеченный инженером.
+
+    ``sheets`` — выданные листы (для refusal/clarify пустой);
+    ``correct_sheet`` и ``comment`` необязательны.
+    """
+
+    question: str
+    status: str
+    sheets: list[SheetRef] = []
+    correct_sheet: str | None = None
+    comment: str | None = None
+
+
 def _production_ask(store: Store, question: str,
                     aircraft_type: str | None) -> Answer:
     """Штатная цепочка — единственный источник ответа (Ф2.1, п. 4)."""
@@ -70,6 +99,16 @@ def _log_web(store_path: str, outcome: str, question: str) -> None:
     stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(f"{stamp} outcome={outcome} question={question}\n")
+
+
+def _append_feedback(store_path: str, entry: dict) -> None:
+    """Журнал промахов: строка JSON в feedback.jsonl рядом с базой (Ф2.11).
+
+    Поиск и база не меняются — журнал только для разбора промахов.
+    """
+    log_path = Path(store_path).with_name("feedback.jsonl")
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def sheet_links(document: str, page: int) -> dict[str, int | str]:
@@ -146,6 +185,24 @@ def create_app(store_path: str, pdf_dir: str | None = None,
     ask = ask_fn or _production_ask
     resolved_pdf_dir = (Path(pdf_dir) if pdf_dir else resolve_pdf_dir())
 
+    @app.exception_handler(Exception)
+    async def log_unhandled(request: Request, exc: Exception):
+        """Ф2.11: необработанные исключения — errors.log рядом с базой.
+
+        Время, маршрут, вопрос если был (request.state.question ставится
+        в /api/ask), тип и текст ошибки; сервер продолжает работать —
+        клиенту уходит 500.
+        """
+        log_path = Path(store_path).with_name("errors.log")
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        question = getattr(request.state, "question", None)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{stamp} route={request.url.path} "
+                         f"question={question if question is not None else '—'}"
+                         f" error={type(exc).__name__}: {exc}\n")
+        return JSONResponse(status_code=500,
+                            content={"detail": "внутренняя ошибка сервера"})
+
     @app.get("/")
     def index(request: Request):  # noqa: ANN202 — Jinja2-обработчик
         connection_store = Store(store_path)
@@ -161,11 +218,32 @@ def create_app(store_path: str, pdf_dir: str | None = None,
             request, "index.html",
             {"aircraft_types": aircraft_types})
 
+    @app.post("/api/feedback")
+    def api_feedback(body: FeedbackRequest) -> dict:  # noqa: ANN202
+        """Ф2.11: отметить промах — строка JSON в feedback.jsonl."""
+        top_documents: list[str] = []
+        for sheet in body.sheets:
+            if sheet.document not in top_documents:
+                top_documents.append(sheet.document)
+        entry = {
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "question": body.question,
+            "status": body.status,
+            "sheets": [{"document": sheet.document, "page": sheet.page}
+                       for sheet in body.sheets],
+            "top_documents": top_documents,
+            "correct_sheet": body.correct_sheet or None,
+            "comment": body.comment or None,
+        }
+        _append_feedback(store_path, entry)
+        return {"ok": True}
+
     @app.post("/api/ask")
-    def api_ask(body: AskRequest) -> dict:  # noqa: ANN202 — обёртка
+    def api_ask(request: Request, body: AskRequest) -> dict:  # noqa: ANN202
         started = time.perf_counter()
         store = Store(store_path)
         try:
+            request.state.question = body.question
             aircraft_type = _base_aircraft_type(store)
             answer = ask(store, body.question, aircraft_type)
             checks_ok = all(check.ok for check in

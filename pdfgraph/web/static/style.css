@@ -217,3 +217,18 @@ body {
 .viewer { width: 100%; height: calc(100vh - 96px); border: 1px solid var(--line); border-radius: 6px; }
 
 .viewer-hint { color: var(--text-3); }
+
+/* F2.11: feedback button and mini form. */
+.feedback { margin-top: 6px; }
+
+.feedback-toggle { font: inherit; padding: 3px 10px; cursor: pointer; border: 1px solid var(--line); border-radius: 4px; background: none; }
+
+.feedback-toggle:hover { background: var(--line); }
+
+.feedback-toggle:disabled { opacity: 0.6; cursor: default; }
+
+.feedback-form { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+
+.feedback-input { flex: 1 1 180px; font: inherit; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; }
+
+.feedback-send { font: inherit; padding: 4px 12px; cursor: pointer; }
