@@ -181,6 +181,10 @@ function renderAnswer(message, payload) {
   }
   const warning = payload.applicability_warning;
   if (warning) message.append(el("p", "applicability-warning", warning));
+  /* Ф2.10: статус «нормы не нашёл» для вопроса о параметре; при
+     отказе-конверсии тот же текст уже показан в plate с reason. */
+  const paramStatus = payload.param_norm_missing;
+  if (paramStatus) message.append(el("p", "applicability-warning", paramStatus));
   const neighbors = neighborsNode(payload.neighbors);
   if (neighbors) message.append(neighbors);
   const missing = techcardMissingNode(payload.techcard_missing);

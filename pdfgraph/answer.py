@@ -76,6 +76,10 @@ class Answer:
     #: суффикс); в ранжирование, claims и проверку цитат не попадает.
     techcard: list[TechCard] = field(default_factory=list)
     applicability_warning: str = ""
+    #: Ф2.10: статус «нормы не нашёл» для вопроса о параметре (давление,
+    #: температура, …): где искал и что нашлось вместо нормы. Строка,
+    #: не цитата — в claims, verify и проверку цитат не попадает.
+    param_norm_missing: str = ""
 
 
 class Answerer(Protocol):
@@ -235,6 +239,208 @@ def applicability_verdict(store: Store, question: str, fragments: list
         return None, (f"документ применим к бортам "
                       f"{leader_row['serials']}; ваш борт не указан")
     return None, ""
+
+
+# --- Ф2.10: вопрос о параметре — норма с числом и единицей --------------------
+
+#: Число (в т.ч. диапазон «12–16» и допуск «±0,5») перед единицей.
+_PARAM_NUM = r"\d+(?:[.,]\d+)?(?:\s*[±–—-]\s*\d+(?:[.,]\d+)?)?"
+
+#: Регэкспы «число + единица» по классам величины (п. 2 карточки Ф2.10);
+#: единица — во 2-й группе, берётся с листа дословно, не додумывается.
+#: Число необязательно: в корпусе норма часто стоит в шапке таблицы
+#: («Давление масла в магистрали, кгс/см2») — числа в ячейках. Единица
+#: класса на листе — «норма на листе есть» (безопасная сторона: меньше
+#: ложных отказов); чужой узел отсекается исходом 3.
+#: Замена знака ² у OCR: «кгс/см2», «кгс/см?», «кгс/см*», «кгс/см”»,
+#: «кго/см?» (кгс→кго). Один символ-мусор после «см» допускается.
+_PARAM_SM2 = r"[²*?.”\"'2]"
+
+_PARAM_PRESSURE_RES = (
+    re.compile(
+        rf"(?:({_PARAM_NUM})\s*)?"
+        rf"((?:кгс|кго|кг)\s*/\s*см\s*{_PARAM_SM2})"),
+    re.compile(rf"(?:({_PARAM_NUM})\s*)?(МПа)"),
+)
+_PARAM_TEMP_RES = (re.compile(rf"(?:({_PARAM_NUM})\s*)?(°\s*[CС])"),)
+_PARAM_MM_RES = (re.compile(rf"(?:({_PARAM_NUM})\s*)?(мм)(?![а-яё])"),)
+_PARAM_TORQUE_RES = (
+    re.compile(rf"(?:({_PARAM_NUM})\s*)?(Н\s*[·.]\s*м)"),
+    re.compile(rf"(?:({_PARAM_NUM})\s*)?(Нм)(?![а-яё])"),
+    re.compile(rf"(?:({_PARAM_NUM})\s*)?(кгс\s*[·.]\s*м)"),
+    re.compile(rf"(?:({_PARAM_NUM})\s*)?(кгс\s+м)(?![а-яё])"),
+    re.compile(rf"(?:({_PARAM_NUM})\s*)?(кгсм)(?![а-яё])"),
+)
+#: Расход в корпусе и в «л/мин», и в «л/ч»/«л/час» (л. 38 РЭ1: «Не
+#: более 0,3 л/ч»; л. 21 ВР-14: «Расход масла, л/час»).
+_PARAM_FLOW_RES = (
+    re.compile(rf"(?:({_PARAM_NUM})\s*)?(л\s*/\s*(?:мин|час|ч))(?![а-яё])"),)
+_PARAM_ROT_RES = (re.compile(rf"(?:({_PARAM_NUM})\s*)?(об\s*/\s*мин)"),)
+_PARAM_VOLT_RES = (
+    re.compile(rf"(?:({_PARAM_NUM})\s*)?([ВB])(?![а-яёa-zA-Z])"),)
+_PARAM_CURRENT_RES = (
+    re.compile(rf"(?:({_PARAM_NUM})\s*)?([АA])(?![а-яёa-zA-Z])"),)
+
+#: Стемы параметров в вопросе → (каноническое имя, регэкспы единиц).
+#: «ток» — отдельно, по границам слова (не «поток», «электроток»).
+_PARAM_STEMS: tuple[tuple[str, str, tuple[re.Pattern[str], ...]], ...] = (
+    ("давлени", "давление", _PARAM_PRESSURE_RES),
+    ("температур", "температура", _PARAM_TEMP_RES),
+    ("зазор", "зазор", _PARAM_MM_RES),
+    ("люфт", "люфт", _PARAM_MM_RES),
+    ("момент затяжк", "момент затяжки", _PARAM_TORQUE_RES),
+    ("расход", "расход", _PARAM_FLOW_RES),
+    ("напряжени", "напряжение", _PARAM_VOLT_RES),
+)
+#: «обороты» как частота вращения — только формы мн. числа: «при полном
+#: обороте ручки центровки» (ед.ч.) — не вопрос о параметре (золотой e07).
+_PARAM_RPM_RE = re.compile(r"оборот(?:ы|ов|ам|ами|ах)(?![а-яё])")
+_PARAM_CURRENT_RE = re.compile(r"(?<![а-яё])ток(?:а|у|е|ом|и)?(?![а-яё])")
+
+#: Узел/система вопроса для исхода «число про другую систему»: стем →
+#: (именительный для «не про …», винительный для «найдено про …»).
+#: Список замкнутый: узла нет в списке — исход 3 не применяется
+#: (безопасный недоотказ; слова вроде «каком» узлами не становятся).
+_PARAM_SYSTEM_STEMS: tuple[tuple[str, str, str], ...] = (
+    ("двигател", "двигатель", "двигатель"),
+    ("гидросистем", "гидросистема", "гидросистему"),
+    ("маслосистем", "маслосистема", "маслосистему"),
+    ("топливн", "топливная система", "топливную систему"),
+    ("пневмосистем", "пневмосистема", "пневмосистему"),
+    ("электросистем", "электросистема", "электросистему"),
+)
+
+
+#: Вопросительное слово или «?» в конце — гейт срабатывания Ф2.10
+#: (решение владельца от 2026-11-05): «минимальное давление масла» и
+#: «Продолжение табл. 18 давление масла» — не вопросы о норме, правило
+#: на них не срабатывает.
+_PARAM_QWORD_RE = re.compile(
+    r"(?<![а-яёa-z])(?:"
+    r"как(?:ой|ая|ое|ие|ого|ому|им|ими|ую|их|ом)"
+    r"|каков(?:а|о)?"
+    r"|сколько"
+    r"|чему"
+    r"|(?:назови|укажи)(?:те)?"
+    r")(?![а-яё])")
+
+
+def _asks_for_value(question: str) -> bool:
+    """Вопрос просит значение: вопросительное слово или «?» в конце."""
+    return bool(_PARAM_QWORD_RE.search(question.lower())) \
+        or question.rstrip().endswith("?")
+
+
+def _param_question(question: str
+                    ) -> tuple[str, tuple[re.Pattern[str], ...]] | None:
+    """(имя параметра, регэкспы единиц) либо None — вопрос не о параметре.
+
+    П. 1 карточки Ф2.10: слово параметра (давление, температура, зазор,
+    момент затяжки, расход, обороты, напряжение, ток, люфт).
+    """
+    lowered = question.lower()
+    if _PARAM_CURRENT_RE.search(lowered):
+        return "ток", _PARAM_CURRENT_RES
+    if _PARAM_RPM_RE.search(lowered):
+        return "обороты", _PARAM_ROT_RES
+    for stem, name, patterns in _PARAM_STEMS:
+        if stem in lowered:
+            return name, patterns
+    return None
+
+
+def _param_page_text(store: Store, document: str, page: int) -> str:
+    """Полный текст листа; недоступен — пустая строка (правило молчит).
+
+    Сниппет фрагмента обрезан SNIPPET_CHARS — единицы искать можно только
+    по полному тексту листа (store.page_text).
+    """
+    try:
+        return store.page_text(str(document), int(page)) or ""
+    except (sqlite3.Error, TypeError, ValueError, AttributeError) as error:
+        logger.warning("param_norm: текст листа %s:%s недоступен: %s",
+                       document, page, error)
+        return ""
+
+
+def param_norm_verdict(store: Store, question: str, fragments: list) -> str:
+    """Ф2.10: «нормы не нашёл» для вопроса о параметре; иначе пустая строка.
+
+    Гейт срабатывания (решение владельца от 2026-11-05): в вопросе есть
+    вопросительное слово (какой/каков/сколько/чему/назови/укажи) или «?»
+    в конце — «минимальное давление масла» и «Продолжение табл. 18
+    давление масла» не вопросы о норме, правило на них молчит.
+
+    На лидере и в топ-3 выдачи ищется единица класса параметра, по
+    возможности с числом рядом (давление → кгс/см², кг/см², МПа;
+    температура → °C; зазор/люфт → мм; момент затяжки → Н·м, кгс·м;
+    расход → л/мин; обороты → об/мин; напряжение → В; ток → А). В корпусе
+    норма часто стоит в шапке таблицы («Давление …, кгс/см2») — единица
+    без числа рядом тоже считается «норма на листе есть»: безопасная
+    сторона (меньше ложных отказов), чужой узел отсекается исходом 3.
+    Три исхода (п. 3 карточки): единица класса есть и лист упоминает узел
+    из вопроса → обычный ответ (пустая строка); единицы нет ни на одном
+    листе → статус «нормы не нашёл» с перечнем листов и документов;
+    единица есть, но узла из вопроса на этих листах нет → тот же статус
+    с пометкой «найдено про …, не про …». Правило работает поверх готовой
+    выдачи: поиск, гейты, verify и веса не затрагиваются. Текст ни одного
+    листа недоступен — правило молчит (безопасный недоотказ).
+    """
+    detected = _param_question(question)
+    if not detected or not fragments or not _asks_for_value(question):
+        return ""
+    param_name, patterns = detected
+    searched = fragments[:3]
+    pages_str = ", ".join(
+        f"{fragment.document or '?'} л. {fragment.page}"
+        for fragment in searched)
+    docs = sorted({fragment.document for fragment in searched
+                   if fragment.document})
+    texts = {index: _param_page_text(store, fragment.document,
+                                     fragment.page)
+             for index, fragment in enumerate(searched)}
+    if not any(texts.values()):
+        return ""  # ни один лист не удалось проверить — не отказывать
+    hits: list[tuple[int, str]] = []  # (индекс листа, единица с листа)
+    for index, text in texts.items():
+        if not text:
+            continue
+        for pattern in patterns:
+            match = pattern.search(text)
+            if match:
+                hits.append((index, match.group(2)))
+                break
+    if not hits:
+        status = (f"нормы не нашёл: искал на листах {pages_str}; "
+                  f"нормы «{param_name}» (число с единицей) там нет")
+        if docs:
+            status += f"; документы: {', '.join(docs)}"
+        return status
+    # Исход 3: узел(ы) из вопроса не упомянуты ни на одном листе с числом.
+    lowered = question.lower()
+    wanted = [(stem, nom) for stem, nom, _acc in _PARAM_SYSTEM_STEMS
+              if stem in lowered]
+    if not wanted:
+        return ""
+    for index, _unit in hits:
+        page_lower = texts[index].lower()
+        if all(stem in page_lower for stem, _nom in wanted):
+            return ""  # число относится к узлу из вопроса — обычный ответ
+    hit_pages = ", ".join(
+        f"{searched[index].document or '?'} л. {searched[index].page}"
+        for index, _unit in hits)
+    hit_text = " ".join(texts[index].lower() for index, _unit in hits)
+    wanted_stems = {stem for stem, _nom in wanted}
+    found = "другим узлом"
+    for stem, _nom, acc in _PARAM_SYSTEM_STEMS:
+        if stem not in wanted_stems and stem in hit_text:
+            found = acc
+            break
+    wanted_str = " / ".join(nom for _stem, nom in wanted)
+    return (f"нормы не нашёл: искал на листах {pages_str}; "
+            f"на листах {hit_pages} есть {param_name} "
+            f"({hits[0][1]} — единица с листа), но найдено про {found}, "
+            f"не про {wanted_str}")
 
 
 def _build_answer_core(
@@ -506,6 +712,16 @@ def build_answer(
         answer = Answer(question=question, claims=[],
                         fragments=answer.fragments, refusal=True,
                         reason=reason)
+    # Ф2.10: вопрос о параметре — поверх готовой выдачи (п. 5 карточки:
+    # поиск, гейты, verify, веса не тронуты). «Нормы не нашёл» — отказ
+    # по решению владельца, как в Ф0.3в; листы выдачи сохраняются во
+    # фрагментах, статус печатается CLI и вебом через поле
+    # param_norm_missing. Уточнение (rc=3) не переопределяется.
+    param_status = param_norm_verdict(store, question, answer.fragments)
+    if param_status and not answer.refusal and not answer.clarification:
+        answer = Answer(question=question, claims=[],
+                        fragments=answer.fragments, refusal=True,
+                        reason=param_status, param_norm_missing=param_status)
     answer.neighbors = collect_neighbors(store, answer.fragments)
     answer.applicability_warning = warning
     # Ф1.9: карты из списка суффиксов, которых нет в базе; строкой, не

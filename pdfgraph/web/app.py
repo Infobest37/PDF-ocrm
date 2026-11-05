@@ -204,6 +204,10 @@ def create_app(store_path: str, pdf_dir: str | None = None,
                                    neighbor["page"])["full_url"]}
                               for neighbor in answer.neighbors],
                 "applicability_warning": answer.applicability_warning,
+                # Ф2.10: статус «нормы не нашёл» для вопроса о параметре
+                # (строкой, не цитатой; при отказе дублирует reason).
+                "param_norm_missing": getattr(
+                    answer, "param_norm_missing", ""),
                 "options": options,
             }
         finally:

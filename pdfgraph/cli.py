@@ -286,6 +286,11 @@ def _print_json(answer: Answer, rows: list[dict], verified: bool) -> None:
     # вопроса (ответ при этом выдаётся как раньше).
     if getattr(answer, "applicability_warning", ""):
         payload["applicability_warning"] = answer.applicability_warning
+    # Ф2.10: статус «нормы не нашёл» для вопроса о параметре — строкой,
+    # не цитатой; в claims/citations не попадает (отказ-конверсия несёт
+    # его же в reason).
+    if getattr(answer, "param_norm_missing", ""):
+        payload["param_norm_missing"] = answer.param_norm_missing
     # Ф1.9: запрошенные карты, которых нет в базе; строкой, не цитатой —
     # в claims/citations не попадает (печатается и при отказе).
     if getattr(answer, "techcard_missing", None):
@@ -398,6 +403,10 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
     # что комплект полный.
     for key in getattr(answer, "techcard_missing", None) or []:
         print(f"Карта {key} в базе не найдена")
+    # Ф2.10: статус «нормы не нашёл» для вопроса о параметре. При
+    # отказе-конверсии он же напечатан в reason ниже — не дублируется.
+    if getattr(answer, "param_norm_missing", "") and not answer.refusal:
+        print(answer.param_norm_missing)
     # Ф1.9б: карты раздела, не попавшие в выдачу после лимита десяти.
     more = getattr(answer, "techcard_more", 0)
     if more:
