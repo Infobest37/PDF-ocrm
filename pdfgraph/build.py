@@ -25,6 +25,7 @@ from pdfprepare.models import DocResult, PageInfo
 from pdfprepare.normalize import normalize_for_search, normalize_part_number
 from pdfprepare.quality import rescan_component, service_component
 from pdfgraph.store import Store
+from pdfgraph.textclean import clean_search_text
 
 #: Longest page-text-derived label kept for codes missing from the registry.
 _MAX_LABEL_CHARS = 120
@@ -250,7 +251,10 @@ def build(
             store.upsert_page(
                 doc_key, page.page_index, aircraft_type,
                 system_code, subsystem_code,
-                page.full_text, normalize_for_search(page.full_text),
+                # Ф1.11: поисковый текст чистится (заполнители и OCR-мусор);
+                # pages.text остаётся дословным, verify не затронут.
+                page.full_text,
+                normalize_for_search(clean_search_text(page.full_text)),
             )
             _mark_page_flags(store, doc_key, page)
 

@@ -914,6 +914,33 @@ def _cmd_emb_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_reindex_text(args: argparse.Namespace) -> int:
+    """Ф1.11: пересобрать поисковый индекс (pages_fts, pages_fts_trigram)
+    из pages.text с правилами чистки textclean.
+
+    pages.text не меняется (цитаты дословные), OCR не запускается,
+    векторы не пересчитываются; идемпотентно.
+    """
+    from pdfgraph.textclean import clean_search_text
+
+    from pdfprepare.normalize import normalize_for_search
+
+    store = Store(args.store_path)
+    try:
+        rows = store._connection.execute(
+            "SELECT document, page, text FROM pages "
+            "ORDER BY document, page").fetchall()
+        for document, page, text in rows:
+            # Ф1.11: чистка мусора. pages.text не меняется, OCR и
+            # векторы не запускаются.
+            body = normalize_for_search(clean_search_text(text))
+            store.reindex_search_body(document, page, body)
+    finally:
+        store.close()
+    print(f"Переиндексировано листов: {len(rows)}")
+    return 0
+
+
 def _feedback_summary(records: list[dict]) -> dict:
     """Сводка журнала промахов (Ф2.11): всего, по вопросам, с листом."""
     questions: dict[str, int] = {}
@@ -1193,6 +1220,15 @@ def main(argv: list[str]) -> int:
         "--json", dest="as_json", action="store_true",
         help="Print the summary as JSON.")
     feedback_list_parser.set_defaults(handler=_cmd_feedback_list)
+
+    # Ф1.11: чистка поискового текста — переиндексация pages_fts из
+    # pages.text (без OCR и векторов; pages.text и verify не трогаются).
+    reindex_text_parser = commands.add_parser(
+        "reindex-text",
+        help="Rebuild the FTS search text from pages.text (Ф1.11).")
+    reindex_text_parser.add_argument(
+        "store_path", help="SQLite graph file.")
+    reindex_text_parser.set_defaults(handler=_cmd_reindex_text)
 
     args = parser.parse_args(argv)
     return args.handler(args)

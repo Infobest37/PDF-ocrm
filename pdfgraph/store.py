@@ -337,6 +337,31 @@ class Store:
                 (document, str(page), search_text),
             )
 
+    def reindex_search_body(self, document: str, page: int, body: str) -> None:
+        """Replace the FTS bodies of one page (Ф1.11 ``reindex-text``).
+
+        ``pages.text`` не меняется — пересобираются только тела
+        ``pages_fts`` и ``pages_fts_trigram``; без OCR и векторов.
+        """
+        with self._connection:
+            self._connection.execute(
+                "DELETE FROM pages_fts WHERE document = ? AND page = ?",
+                (document, str(page)),
+            )
+            self._connection.execute(
+                "INSERT INTO pages_fts (document, page, body) VALUES (?, ?, ?)",
+                (document, str(page), body),
+            )
+            self._connection.execute(
+                "DELETE FROM pages_fts_trigram WHERE document = ? AND page = ?",
+                (document, str(page)),
+            )
+            self._connection.execute(
+                "INSERT INTO pages_fts_trigram (document, page, body) "
+                "VALUES (?, ?, ?)",
+                (document, str(page), body),
+            )
+
     def page_text(self, document: str, page: int) -> str:
         """Return page text, or an empty string when the page is absent."""
         row = self._connection.execute(
