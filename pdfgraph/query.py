@@ -566,6 +566,15 @@ def _by_fts(store: Store, needle: str, aircraft_type: str | None,
     )
     penalty = 1.0
     if not rows:
+        # Ф1.12 (этап 1, решение владельца): префиксная ветка раньше OR —
+        # та же точность, что AND, но с учётом словоформ; жертвовать ею
+        # ради «хоть что-нибудь» нельзя. Штрафы и текст не менялись.
+        rows = store.search_pages(
+            _fts_prefix_expr(tokens, " AND "), aircraft_type, limit,
+            document_terms=document_terms,
+        )
+        penalty = PREFIX_PENALTY
+    if not rows:
         # Tolerant retry (fix round 3): a conversational query ("рисунок 12")
         # must still find documents phrased differently ("Рис. 12").
         rows = store.search_pages(
@@ -573,12 +582,6 @@ def _by_fts(store: Store, needle: str, aircraft_type: str | None,
             document_terms=document_terms,
         )
         penalty = OR_PENALTY
-    if not rows:
-        rows = store.search_pages(
-            _fts_prefix_expr(tokens, " AND "), aircraft_type, limit,
-            document_terms=document_terms,
-        )
-        penalty = PREFIX_PENALTY
     if not rows:
         trigram_hits: dict[tuple[str, int], tuple[str, int, str, str]] = {}
         for token in tokens:
