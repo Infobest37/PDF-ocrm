@@ -232,3 +232,51 @@ body {
 .feedback-input { flex: 1 1 180px; font: inherit; padding: 4px 8px; border: 1px solid var(--line); border-radius: 4px; }
 
 .feedback-send { font: inherit; padding: 4px 12px; cursor: pointer; }
+
+/* Ф2.4: мобильный вид — одна колонка, крупные тач-таргеты, переносы.
+   Только в медиаблоке: выше 768px десктопная вёрстка не меняется. */
+@media (max-width: 768px) {
+  body { font-size: 16px; }
+
+  .screen {
+    grid-template-columns: 1fr;
+    gap: 8px;
+    padding: 8px;
+    min-height: 0;
+  }
+
+  /* Чат первым, просмотр вторым, типы ВС — в конец. */
+  .col-chat { order: 1; min-width: 0; }
+  .col-viewer { order: 2; min-width: 0; }
+  .col-types { order: 3; min-width: 0; }
+
+  /* Тач-таргеты не ниже 44px, между ними не меньше 8px. */
+  .ask-form { gap: 8px; flex-wrap: wrap; }
+  .ask-send,
+  .clarify .option,
+  .feedback-toggle,
+  .feedback-send,
+  .type-option {
+    min-height: 44px;
+  }
+  .clarify .options { gap: 8px; }
+
+  /* Ссылки-действия — крупнее для касания. */
+  .citation a,
+  .techcard-open {
+    display: inline-block;
+    min-height: 44px;
+    line-height: 44px;
+  }
+
+  /* Длинные ссылки, номера карт и документы переносятся. */
+  .doc-line,
+  .doc-meta,
+  .answer-text,
+  .neighbors,
+  .techcard-sheet,
+  .techcard-labor {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+}

@@ -58,8 +58,10 @@ function citationNode(citation) {
 
   const link = el("a", null, "открыть лист →");
   /* Ф2.2: полный просмотр в новой вкладке (масштаб/прокрутка/поиск/
-     поворот); клик по номеру листа ведёт туда же. */
-  link.href = citation.full_url || citation.viewer_url || citation.link;
+     поворот); клик по номеру листа ведёт туда же.
+     Ф2.4: одностраничный viewer.html из fallback убран — непрерывную
+     прокрутку ведёт ?view=full; сырой PDF — последняя страховка. */
+  link.href = citation.full_url || citation.link;
   link.target = "_blank";
   link.addEventListener("click", (event) => {
     event.preventDefault();
@@ -101,7 +103,7 @@ async function renderThumb(citation) {
     viewer.replaceChildren(canvas);
     const full = el("button", null, "Открыть на весь экран");
     full.addEventListener("click", () =>
-      window.open(citation.full_url || citation.viewer_url, "_blank"));
+      window.open(citation.full_url || citation.link, "_blank"));
     viewer.append(full);
   } catch (error) {
     viewer.replaceChildren(el("p", null,
