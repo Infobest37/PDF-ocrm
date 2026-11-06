@@ -7,7 +7,6 @@ pages.text не трогается; чистится только копия д�
 вырезаются. Векторы не пересчитываются.
 """
 
-from pdfgraph.stemmer import stem_text
 from pdfgraph.textclean import clean_search_text
 from pdfgraph.store import Store
 from pdfgraph.cli import main
