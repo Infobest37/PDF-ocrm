@@ -19,6 +19,12 @@
 
 Правило чистит копию для индекса и никогда не применяется к полям
 документа, цитатам и проверке цитат.
+
+Ф1.17: :func:`clean_search_text_mapped` возвращает дополнительно карту
+позиций — на каждый символ очищенного текста диапазон ``(start, end)``
+в ИСХОДНОМ тексте, из которого он получен. Карта позволяет резать чанки
+и сниппеты по очищенному тексту, а срезы брать дословно из исходного —
+``pages.text``, цитаты и verify не трогаются.
 """
 
 import re
@@ -42,11 +48,71 @@ def clean_search_text(text: str) -> str:
 
     Аргумент — дословный текст листа; результат — только для индекса
     (``pages_fts.body``), исходные данные не меняются. Идемпотентно:
-    повторная чистка результата даёт тот же результат.
+    повторная чистка результата даёт тот же результат. Делегирует в
+    :func:`clean_search_text_mapped` — строка байт-в-байт та же.
     """
-    cleaned = _PRESSURE_UNIT_RE.sub("кгс/см2", text)
-    cleaned = _CELSIUS_RE.sub("°C", cleaned)
-    cleaned = _CASE_BOUNDARY_RE.sub(" ", cleaned)
-    cleaned = _COMB_RE.sub(" ", cleaned)
-    cleaned = _DOTS_RE.sub(" ", cleaned)
-    return re.sub(r"\s+", " ", cleaned).strip()
+    cleaned, _spans = clean_search_text_mapped(text)
+    return cleaned
+
+
+#: Схлопывание пробельных последовательностей — последний проход чистки.
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _mapped_sub(pattern: re.Pattern, repl: str, text: str,
+                spans: list[tuple[int, int]]) -> tuple[str,
+                                                       list[tuple[int, int]]]:
+    """``re.sub`` с ведением карты: cleaned[i] → (start, end) в исходнике.
+
+    ``spans`` параллелен ``text`` и всегда ссылается на ИСХОДНЫЙ текст
+    листа. Символы замены отображаются на весь диапазон совпадения
+    (многие-к-одному — при чтении используются только границы).
+    Нулевая ширина совпадения (стык регистра Ф1.11) даёт синтетический
+    символ с пустым диапазоном в точке стыка исходника.
+    """
+    out: list[str] = []
+    out_spans: list[tuple[int, int]] = []
+    pos = 0
+    for match in pattern.finditer(text):
+        start, end = match.start(), match.end()
+        if start > pos:
+            out.append(text[pos:start])
+            out_spans.extend(spans[pos:start])
+        if start == end:  # нулевая ширина: точка между символами исходника
+            out_spans.append((spans[start][0], spans[start][0])
+                             if start < len(spans) else (len(text), len(text)))
+        else:
+            out_spans.extend((spans[start][0], spans[end - 1][1])
+                             for _ in repl)
+        out.append(repl)
+        pos = end
+    out.append(text[pos:])
+    out_spans.extend(spans[pos:])
+    return "".join(out), out_spans
+
+
+def clean_search_text_mapped(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """Очищенная копия текста и карта позиций в исходник (Ф1.17).
+
+    Возвращает ``(cleaned, spans)``: ``spans[i]`` — диапазон ``(start, end)``
+    в исходном тексте, породивший ``cleaned[i]``. Правила чистки — те же,
+    что в :func:`clean_search_text` (Ф1.11), строка результата совпадает
+    байт-в-байт. Срез ``text[spans[i][0]:spans[j][1]]`` — дословный фрагмент
+    исходника, соответствующий ``cleaned[i:j + 1]``. Идемпотентно.
+    """
+    cleaned = text
+    spans: list[tuple[int, int]] = [(i, i + 1) for i in range(len(text))]
+    cleaned, spans = _mapped_sub(_PRESSURE_UNIT_RE, "кгс/см2", cleaned, spans)
+    cleaned, spans = _mapped_sub(_CELSIUS_RE, "°C", cleaned, spans)
+    cleaned, spans = _mapped_sub(_CASE_BOUNDARY_RE, " ", cleaned, spans)
+    cleaned, spans = _mapped_sub(_COMB_RE, " ", cleaned, spans)
+    cleaned, spans = _mapped_sub(_DOTS_RE, " ", cleaned, spans)
+    cleaned, spans = _mapped_sub(_WHITESPACE_RE, " ", cleaned, spans)
+    # Тот же .strip(), что в clean_search_text: края и их диапазоны срезаются.
+    while cleaned.startswith(" "):
+        cleaned = cleaned[1:]
+        spans = spans[1:]
+    while cleaned.endswith(" "):
+        cleaned = cleaned[:-1]
+        spans = spans[:-1]
+    return cleaned, spans

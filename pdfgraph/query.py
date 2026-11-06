@@ -649,8 +649,10 @@ def vector_search(store: Store, question: str, limit: int = 10,
                   aircraft_type: str | None = None) -> list[Fragment]:
     """Семантические фрагменты «вопрос — лист» поверх чанк-векторов.
 
-    Каждый хит — дословный срез текста одного листа (границы даёт
-    :func:`pdfgraph.embedding.chunk_span`); скор отображается в полосу
+    Каждый хит — дословный срез текста одного листа (границы чанка,
+    построенного из очищенного текста Ф1.17, переводятся в координаты
+    исходника через :func:`pdfgraph.embedding.chunk_span_raw`); скор
+    отображается в полосу
     ``(SEMANTIC_BASE_LOW, SEMANTIC_BASE_HIGH]``, чтобы точные ветки
     (код, номер листа) оставались впереди. Хранилище без индекса даёт
     ``[]`` без вызова модели: канал вспомогательный и отказ не поднимает.
@@ -679,17 +681,21 @@ def vector_search(store: Store, question: str, limit: int = 10,
             continue
         seen.add((document, page))
         text = store.page_text(document, page)
-        stripped = text.strip()
-        offset = text.find(stripped) if stripped else -1
-        if offset < 0:
+        if not text:
             continue
-        start, end = embedding.chunk_span(stripped, chunk_ix)
+        # Ф1.17: чанки кодируются из очищенного текста; границы чанка
+        # восстанавливаются в координатах ИСХОДНОГО текста (карта позиций
+        # чистки) — сниппет остаётся дословным срезом pages.text.
+        try:
+            start, end = embedding.chunk_span_raw(text, chunk_ix)
+        except IndexError:
+            continue
         system_code, subsystem_code = _page_codes(store, document, page)
         fragments.append(Fragment(
             document=document, page=page,
             system_code=system_code, subsystem_code=subsystem_code,
-            snippet=text[offset + start:offset + end],
-            char_start=offset + start, char_end=offset + end,
+            snippet=text[start:end],
+            char_start=start, char_end=end,
             score=embedding.SEMANTIC_BASE_LOW
             + (embedding.SEMANTIC_BASE_HIGH - embedding.SEMANTIC_BASE_LOW)
             * max(0.0, min(1.0, cosine)),

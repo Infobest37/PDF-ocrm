@@ -66,7 +66,9 @@ def test_build_page_embeddings_rows(tmp_path, monkeypatch):
         report = embedding.build_page_embeddings(store)
         assert report == {"chunks": 4, "embedded": 2, "bumped": True,
                           "version": 1}
-        assert store.get_meta("emb_chunk") == "600:120"
+        # Ф1.17 (решение владельца): маркер чистки векторов — смена маркера
+        # означает, что emb-index без --rebuild потребует полного пересчёта.
+        assert store.get_meta("emb_chunk") == "600:120:clean"
         rows = store.embedding_rows()
         assert [(r.page, r.chunk_ix) for r in rows] == [(7, 0), (7, 1), (8, 0), (8, 1)]
         for row in rows:

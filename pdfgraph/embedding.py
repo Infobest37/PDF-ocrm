@@ -18,6 +18,8 @@ import os
 import re
 from pathlib import Path
 
+from pdfgraph.textclean import clean_search_text, clean_search_text_mapped
+
 import numpy as np
 
 #: URL модели — единственный источник, задаётся и в скрипте выгрузки.
@@ -310,7 +312,12 @@ def build_page_embeddings(store, model_dir=None, *, chunk_size: int = CHUNK_SIZE
     model_file_paths(model_dir)  # FileNotFoundError при отсутствии модели
     write_continuation_flags(store)  # Ф1.0: маркеры «Продолжение табл.»
     model_name = DEFAULT_EMB_MODEL
-    params = f"{chunk_size}:{overlap}"
+    # Ф1.17: чанки строятся из ОЧИЩЕННОГО текста (clean_search_text,
+    # правила Ф1.11); маркер конфигурации с суффиксом «:clean» — после
+    # смены маркера любой запуск emb-index БЕЗ --rebuild потребует полного
+    # перерасчёта (same_config=False → clear + пересчёт всех листов),
+    # старые и новые векторы не смешиваются.
+    params = f"{chunk_size}:{overlap}:clean"
 
     version = int(store.get_meta("emb_version", "0") or "0")
     same_config = (store.get_meta("emb_model", "") == model_name
@@ -332,11 +339,14 @@ def build_page_embeddings(store, model_dir=None, *, chunk_size: int = CHUNK_SIZE
     dim_written: int | None = None
     for document, page in todo:
         text = store.page_text(document, page)
-        spans = chunk_spans(text, chunk_size, overlap)
+        # Ф1.17: чанк-спаны — на очищенном тексте (правила Ф1.11);
+        # дословные сниппеты читатель восстанавливает через
+        # :func:`chunk_span_raw` (карта позиций → срез исходника).
+        cleaned = clean_search_text(text)
+        spans = chunk_spans(cleaned, chunk_size, overlap)
         if not spans:
             continue
-        stripped = text.strip()
-        chunks = [stripped[start:end] for start, end in spans]
+        chunks = [cleaned[start:end] for start, end in spans]
         vectors = encode_texts(chunks, model_dir=model_dir)
         vectors = np.atleast_2d(np.asarray(vectors, dtype=np.float32))
         blobs = [row.astype("<f4", copy=False).tobytes() for row in vectors]
@@ -415,6 +425,28 @@ def chunk_span(text: str, chunk_ix: int, chunk_size: int = CHUNK_SIZE,
         return 0, len(stripped)
     start = min(chunk_ix * max(1, chunk_size - overlap), len(stripped) - 1)
     return start, min(start + chunk_size, len(stripped))
+
+
+def chunk_span_raw(text: str, chunk_ix: int, chunk_size: int = CHUNK_SIZE,
+                   overlap: int = CHUNK_OVERLAP) -> tuple[int, int]:
+    """Границы чанка ``chunk_ix`` в координатах ИСХОДНОГО текста (Ф1.17).
+
+    Чанки кодируются из очищенного текста (:func:`clean_search_text`,
+    правила Ф1.11); читатель восстанавливает границы чанка на очищенном
+    тексте и через карту позиций
+    (:func:`pdfgraph.textclean.clean_search_text_mapped`) переводит их в
+    срез ИСХОДНОГО текста — сниппет остаётся дословным, verify не ломается.
+    Чистка детерминирована, поэтому пересчёт на чтении даёт те же границы,
+    что были при построении. Нарезка совместима с :func:`chunk_spans`
+    (та же функция).
+    """
+    cleaned, spans = clean_search_text_mapped(text)
+    spans_all = chunk_spans(cleaned, chunk_size, overlap)
+    if chunk_ix < 0 or chunk_ix >= len(spans_all):
+        raise IndexError(
+            f"чанк {chunk_ix} вне диапазона 0..{len(spans_all) - 1}")
+    start, end = spans_all[chunk_ix]
+    return spans[start][0], spans[end - 1][1]
 
 
 #: Переменная окружения, задающая порог косинуса (читается на каждый вызов).
