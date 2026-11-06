@@ -736,7 +736,8 @@ def hybrid_search(store: Store, question: str,
                                    model_dir=model_dir,
                                    aircraft_type=aircraft_type)
     return fuse_hybrid(lexical_ranking, vector_ranking, limit,
-                       spec_fn=make_specificity_fn(store, question))
+                       spec_fn=make_specificity_fn(store, question),
+                       store=store, question=question)
 
 
 def expand_continuations(store: Store,

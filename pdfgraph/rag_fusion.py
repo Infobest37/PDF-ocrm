@@ -398,7 +398,9 @@ def rrf_fuse(rankings: list[list[Fragment]], k: int = RRF_K,
 
 def fuse_hybrid(lexical: list[Fragment], vector: list[Fragment],
                 limit: int = 10,
-                spec_fn: SpecificityFn | None = None) -> list[Fragment]:
+                spec_fn: SpecificityFn | None = None, *,
+                store: Store | None = None,
+                question: str | None = None) -> list[Fragment]:
     """RRF-слияние лексического и векторного каналов до отсечения (Ф1.1).
 
     Лексический список — ранги :func:`pdfgraph.query.search`, векторный —
@@ -409,6 +411,14 @@ def fuse_hybrid(lexical: list[Fragment], vector: list[Fragment],
     Скор фрагментов не перезаписывается. Отсечение топ-``limit`` — только
     после слияния, поэтому лист встречается в топ-5, даже если он был
     только в векторном канале.
+
+    Ф1.16: при переданных ``store`` и ``question`` слитый список перед
+    отсечением переранжируется этапом А (:func:`pdfgraph.rerank.
+    rerank_coverage` — IDF-покрытие, бонус за числа; только порядок,
+    скор и сниппеты не тронуты); выключатель ``PDFGRAPH_RERANK`` возвращает
+    порядок байт-в-байт прежний. Без ``store``/``question`` (прежние
+    вызовы из тестов и инструментов) переранжирования нет — контракт
+    прежний.
     """
     if limit <= 0:
         return []
@@ -417,6 +427,12 @@ def fuse_hybrid(lexical: list[Fragment], vector: list[Fragment],
                      boost_kinds=EXACT_KINDS,
                      spec_weight=effective_specificity_weight(),
                      spec_fn=spec_fn)
+    if store is not None and question is not None:
+        from pdfgraph.rerank import effective_rerank_enabled, rerank_coverage
+        if effective_rerank_enabled():
+            lexical_keys = {(fragment.document, fragment.page)
+                            for fragment in lexical}
+            fused = rerank_coverage(store, question, fused, lexical_keys)
     return fused[:limit]
 
 
