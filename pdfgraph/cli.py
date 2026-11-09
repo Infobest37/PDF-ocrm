@@ -941,6 +941,55 @@ def _cmd_reindex_text(args: argparse.Namespace) -> int:
     return 0
 
 
+def rebuild_chunk_index(store: Store) -> int:
+    """Ф1.23а: пересобрать chunks_fts из pages.text (полный rebuild).
+
+    Нарезка :func:`pdfgraph.embedding.chunk_page` (600/120) — та же, что
+    у векторного канала; тело чанка чистится
+    :func:`pdfgraph.textclean.clean_search_text` (Ф1.11). Идемпотентно:
+    ``DELETE`` + вставка, повторный запуск не дублирует. Возвращает
+    число записанных чанков.
+    """
+    from pdfgraph.embedding import chunk_page
+    from pdfgraph.textclean import clean_search_text
+
+    store._connection.execute("DELETE FROM chunks_fts")
+    total = 0
+    for document, page in store.searchable_pages():
+        text = store.page_text(document, page)
+        for chunk_ix, chunk in enumerate(chunk_page(text or "")):
+            store._connection.execute(
+                "INSERT INTO chunks_fts (chunk_ix, document, page, body) "
+                "VALUES (?, ?, ?, ?)",
+                (chunk_ix, document, page, clean_search_text(chunk)))
+            total += 1
+    store._connection.commit()
+    return total
+
+
+def _cmd_chunk_index(args: argparse.Namespace) -> int:
+    """Ф1.23а: заполнить чанковый FTS-индекс (chunks_fts) для третьего
+    канала поиска. pages.text, pages_fts и векторы не трогаются;
+    идемпотентно; печатает счётчики и время."""
+    import time
+
+    from pdfgraph.embedding import CHUNK_SIZE, CHUNK_OVERLAP
+
+    store = Store(args.store_path)
+    try:
+        pages_total = store._connection.execute(
+            "SELECT COUNT(*) FROM pages").fetchone()[0]
+        started = time.perf_counter()
+        chunks_total = rebuild_chunk_index(store)
+        elapsed = time.perf_counter() - started
+    finally:
+        store.close()
+    print(f"Чанков проиндексировано: {chunks_total} "
+          f"(листов {pages_total}; нарезка {CHUNK_SIZE}/{CHUNK_OVERLAP}); "
+          f"время: {elapsed:.1f} c")
+    return 0
+
+
 def _feedback_summary(records: list[dict]) -> dict:
     """Сводка журнала промахов (Ф2.11): всего, по вопросам, с листом."""
     questions: dict[str, int] = {}
@@ -1229,6 +1278,15 @@ def main(argv: list[str]) -> int:
     reindex_text_parser.add_argument(
         "store_path", help="SQLite graph file.")
     reindex_text_parser.set_defaults(handler=_cmd_reindex_text)
+
+    # Ф1.23а: чанковый FTS-индекс для третьего канала слияния.
+    chunk_index_parser = commands.add_parser(
+        "chunk-index",
+        help="Rebuild the chunk FTS index (chunks_fts) for the "
+             "chunk search channel (Ф1.23а).")
+    chunk_index_parser.add_argument(
+        "store_path", help="SQLite graph file.")
+    chunk_index_parser.set_defaults(handler=_cmd_chunk_index)
 
     args = parser.parse_args(argv)
     return args.handler(args)

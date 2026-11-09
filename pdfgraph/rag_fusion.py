@@ -430,7 +430,17 @@ def fuse_hybrid(lexical: list[Fragment], vector: list[Fragment],
     """
     if limit <= 0:
         return []
-    fused = rrf_fuse([list(lexical), list(vector)],
+    rankings: list[list[Fragment]] = [list(lexical), list(vector)]
+    # Ф1.23а: третий канал — FTS по чанкам (chunks_fts, флаг
+    # PDFGRAPH_CHUNK_CHANNEL, по умолчанию выключен). Флаг выключен или
+    # нет store/question — канал не добавляется, поведение байт-в-байт.
+    if store is not None and question is not None:
+        from pdfgraph.query import effective_chunk_channel_enabled
+        if effective_chunk_channel_enabled():
+            from pdfgraph.query import chunk_search
+            rankings.append(chunk_search(store, question,
+                                         FUSION_CHANNEL_DEPTH))
+    fused = rrf_fuse(rankings,
                      k=effective_fusion_k(), boost=effective_exact_boost(),
                      boost_kinds=EXACT_KINDS,
                      spec_weight=effective_specificity_weight(),

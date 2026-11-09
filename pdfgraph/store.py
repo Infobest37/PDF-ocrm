@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 #: (base/supplement/change) и применимость (scope/serials/source);
 #: аддитивная, существующие таблицы не меняются; заполнение —
 #: pdfgraph/documents.fill_missing, правки — CLI docs-set/docs-unset.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 @dataclasses.dataclass(frozen=True)
@@ -207,18 +207,39 @@ class Store:
                 "ALTER TABLE pages ADD COLUMN is_continuation "
                 "INTEGER NOT NULL DEFAULT 0")
             page_columns.add("is_continuation")
+        # Ф1.23а (миграция 6→7): чанковый FTS-индекс для третьего канала
+        # поиска. Нарезка та же, что у векторного канала
+        # (:func:`pdfgraph.embedding.chunk_page`, 600/120); тело чанка —
+        # очищенный текст (:func:`pdfgraph.textclean.clean_search_text`,
+        # Ф1.11). Заполняется командой ``chunk-index``; при миграции
+        # создаётся пустой — незаполненный индекс даёт пустой канал
+        # (fail-open, слияние прежнее).
+        self._connection.executescript(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+                chunk_ix UNINDEXED,
+                document UNINDEXED,
+                page UNINDEXED,
+                body
+            );
+            """
+        )
         # Сверка счётчиков до/после миграции (правило .clinerules 3.7):
         # аддитивная миграция не меняет число листов и чанков.
         before = (
             self._connection.execute("SELECT COUNT(*) FROM pages").fetchone()[0],
             self._connection.execute(
                 "SELECT COUNT(*) FROM page_embeddings").fetchone()[0],
+            self._connection.execute(
+                "SELECT COUNT(*) FROM chunks_fts").fetchone()[0],
         )
         self._connection.commit()
         after = (
             self._connection.execute("SELECT COUNT(*) FROM pages").fetchone()[0],
             self._connection.execute(
                 "SELECT COUNT(*) FROM page_embeddings").fetchone()[0],
+            self._connection.execute(
+                "SELECT COUNT(*) FROM chunks_fts").fetchone()[0],
         )
         if before != after:
             raise RuntimeError(
@@ -900,6 +921,74 @@ class Store:
         sql += self._dup_filter("pg.document")
         sql += self._garbage_filter("pg.")
         sql += " ORDER BY pg.document, pg.page"
+        return self._connection.execute(sql, args).fetchall()
+
+    # --- Ф1.23а: чанковый канал поиска (chunks_fts) --------------------------
+
+    def search_chunks_fts(
+        self,
+        match_expr: str,
+        aircraft_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[tuple[str, int, int, float]]:
+        """FTS5-поиск по чанкам ``chunks_fts`` (Ф1.23а).
+
+        ``match_expr`` — готовое FTS5 MATCH-выражение (строит вызывающий).
+        Возвращает ``(document, page, chunk_ix, bm25)``, лучший ранг
+        первым (bm25 отрицательный, меньше = лучше). Листы чужого типа ВС
+        (при заданном ``aircraft_type``), мусорные и дубль-документы
+        скрыты теми же фильтрами, что в :meth:`search_pages`.
+        """
+        sql = (
+            "SELECT chunks_fts.document, chunks_fts.page, "
+            "chunks_fts.chunk_ix, bm25(chunks_fts) AS rank "
+            "FROM chunks_fts "
+            "JOIN pages pg ON pg.document = chunks_fts.document "
+            "AND pg.page = chunks_fts.page "
+            "WHERE chunks_fts MATCH ?"
+        )
+        args: list[object] = [match_expr]
+        if aircraft_type is not None:
+            sql += " AND pg.aircraft_type = ?"
+            args.append(aircraft_type)
+        sql += self._dup_filter("pg.document")
+        sql += self._garbage_filter("pg.")
+        sql += " ORDER BY rank"
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(limit)
+        return self._connection.execute(sql, args).fetchall()
+
+    def search_chunks_like(
+        self,
+        pattern: str,
+        aircraft_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[tuple[str, int, int]]:
+        """LIKE-поиск по телу чанка (trigram-ветка чанкового канала).
+
+        Отдельного trigram-индекса для чанков нет — скан по ~34 тыс.
+        строк приемлем; порядок и фильтры как в :meth:`search_chunks_fts`.
+        """
+        sql = (
+            "SELECT chunks_fts.document, chunks_fts.page, "
+            "chunks_fts.chunk_ix "
+            "FROM chunks_fts "
+            "JOIN pages pg ON pg.document = chunks_fts.document "
+            "AND pg.page = chunks_fts.page "
+            "WHERE chunks_fts.body LIKE ?"
+        )
+        args: list[object] = [pattern]
+        if aircraft_type is not None:
+            sql += " AND pg.aircraft_type = ?"
+            args.append(aircraft_type)
+        sql += self._dup_filter("pg.document")
+        sql += self._garbage_filter("pg.")
+        sql += " ORDER BY chunks_fts.document, chunks_fts.page, " \
+               "chunks_fts.chunk_ix"
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(limit)
         return self._connection.execute(sql, args).fetchall()
 
     def stats(self) -> dict[str, int]:

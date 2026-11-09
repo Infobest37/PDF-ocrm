@@ -71,7 +71,7 @@ def test_migration_creates_documents_table(tmp_path):
         version = int(store._connection.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()[0])
-        assert version == 6 == SCHEMA_VERSION
+        assert version == SCHEMA_VERSION == 7
     finally:
         store.close()
 
@@ -88,7 +88,7 @@ def test_migration_idempotent(tmp_path):
         version = int(store._connection.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()[0])
-        assert version == 6
+        assert version == SCHEMA_VERSION
         count = store._connection.execute(
             "SELECT COUNT(*) FROM documents").fetchone()[0]
         assert count == 1

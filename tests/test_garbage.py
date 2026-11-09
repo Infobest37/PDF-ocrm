@@ -184,8 +184,8 @@ def test_migration_3_to_4_adds_flag_columns(tmp_path):
         version = reopened._connection.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()[0]
-        # Ф0.3б: миграция поднимает версию до актуальной (v6).
-        assert version == "6"
+        # Ф0.3б/Ф1.23а: миграция поднимает версию до актуальной (v7).
+        assert version == "7"
         assert _page_row(reopened, "d.pdf", 1) == (0, "", 0.0, 0, "", 0.0)
     finally:
         reopened.close()

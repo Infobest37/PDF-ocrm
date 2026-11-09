@@ -704,6 +704,140 @@ def vector_search(store: Store, question: str, limit: int = 10,
     return fragments
 
 
+# ---------------------------------------------------------------------------
+# Ф1.23а: чанковый канал поиска (третий канал слияния)
+
+
+#: Выключатель чанкового канала; читается при каждом вызове, без кэша.
+#: По умолчанию выключен: «1»/«true»/«yes»/«on» (без учёта регистра)
+#: включают, пусто и любой мусор — выключено (стиль Ф1.16/Ф1.19).
+CHUNK_CHANNEL_ENV = "PDFGRAPH_CHUNK_CHANNEL"
+_ON_VALUES = {"1", "true", "yes", "on"}
+#: Бонус листу, у которого >=2 чанков в топе (карточка Ф1.23а); фикс. —
+#: не растёт с числом чанков, чтобы плотная таблица не доминировала.
+CHUNK_SECOND_BONUS = 0.05
+#: Глубина запроса чанков: limit*4 (но не меньше 50) — лист из нескольких
+#: чанков занимает один слот, чанков нужно с запасом; кап 1000.
+CHUNK_FETCH_FACTOR = 4
+CHUNK_FETCH_MIN = 50
+CHUNK_FETCH_MAX = 1000
+
+
+def effective_chunk_channel_enabled() -> bool:
+    """Выключатель Ф1.23а: ``PDFGRAPH_CHUNK_CHANNEL``; по умолчанию выключен."""
+    raw = os.environ.get(CHUNK_CHANNEL_ENV, "").strip().casefold()
+    return raw in _ON_VALUES
+
+
+def _aggregate_chunk_rows(rows: list[tuple[str, int, float]],
+                          limit: int) -> list[tuple[str, int, float]]:
+    """Агрегация чанков до листов (Ф1.23а): max(bm25) + бонус за >=2 чанка.
+
+    Один лист занимает ровно один слот независимо от числа его чанков
+    в топе (5 чанков одной плотной таблицы не вытесняют другие листы);
+    бонус :data:`CHUNK_SECOND_BONUS` начисляется один раз листу с >=2
+    чанками. Скор нормализован к лучшему чанку канала (|bm25|/max, как
+    в :func:`_by_fts`). Возвращает (document, page, score), скор ↓.
+    """
+    best: dict[tuple[str, int], float] = {}
+    counts: dict[tuple[str, int], int] = {}
+    for document, page, rank in rows:
+        key = (document, page)
+        current = best.get(key)
+        if current is None or rank < current:  # bm25: меньше = лучше
+            best[key] = rank
+        counts[key] = counts.get(key, 0) + 1
+    if not best:
+        return []
+    best_rank = max(abs(rank) for rank in best.values())
+    if best_rank <= 0.0:
+        best_rank = 1.0
+    scored = [
+        (key, abs(rank) / best_rank
+         + (CHUNK_SECOND_BONUS if counts[key] >= 2 else 0.0))
+        for key, rank in best.items()
+    ]
+    scored.sort(key=lambda item: -item[1])
+    return [(key[0], key[1], score) for key, score in
+            scored[:max(limit, 0)]]
+
+
+def chunk_search(store: Store, question: str, limit: int = 10,
+                 aircraft_type: str | None = None) -> list[Fragment]:
+    """Третий канал слияния (Ф1.23а): FTS по чанкам 600/120 из chunks_fts.
+
+    Плотная таблица размывает вес фразы в BM25 по целому листу; на куске
+    600 символов совпадение весит намного больше. Каскад веток тот же,
+    что в :func:`_by_fts` (AND → prefix → OR → trigram-LIKE по телу
+    чанков); результаты агрегируются до листов
+    (:func:`_aggregate_chunk_rows`). Сниппет — текст лучшего чанка:
+    чанк — дословный срез ``pages.text`` (нарезка
+    :func:`pdfgraph.embedding.chunk_page` идёт по исходному тексту),
+    поэтому цитата остаётся дословной. Незаполненный ``chunks_fts``
+    возвращает ``[]`` — канал пуст, слияние прежнее (fail-open).
+    """
+    needle = normalize_for_search(question)
+    tokens = needle.split()
+    if limit <= 0 or not tokens:
+        return []
+    fetch = min(CHUNK_FETCH_MAX,
+                max(CHUNK_FETCH_MIN, limit * CHUNK_FETCH_FACTOR))
+    rows = store.search_chunks_fts(_fts_expr(tokens, " AND "),
+                                   aircraft_type, fetch)
+    penalty = 1.0
+    if not rows:
+        rows = store.search_chunks_fts(_fts_prefix_expr(tokens, " AND "),
+                                       aircraft_type, fetch)
+        penalty = PREFIX_PENALTY
+    if not rows:
+        rows = store.search_chunks_fts(_fts_expr(tokens, " OR "),
+                                       aircraft_type, fetch)
+        penalty = OR_PENALTY
+    if not rows:
+        trigram: dict[tuple[str, int, int], tuple[str, int, int]] = {}
+        for token in tokens:
+            for pattern in _trigram_patterns(token):
+                for row in store.search_chunks_like(pattern, aircraft_type):
+                    trigram.setdefault((row[0], row[1], row[2]), row)
+        rows = [(*row, -1.0) for row in trigram.values()]
+        penalty = TRIGRAM_PENALTY
+    if not rows:
+        return []
+    aggregated = _aggregate_chunk_rows(
+        [(document, page, rank) for document, page, _ix, rank in rows],
+        limit)
+    from pdfgraph.embedding import chunk_page
+
+    fragments: list[Fragment] = []
+    for document, page, score in aggregated:
+        text = store.page_text(document, page)
+        if not text:
+            continue
+        chunk_ix = next(
+            (ix for d, p, ix, _rank in rows
+             if d == document and p == page), None)
+        snippet = ""
+        if chunk_ix is not None:
+            chunks = chunk_page(text)
+            if 0 <= chunk_ix < len(chunks):
+                snippet = chunks[chunk_ix]
+        if not snippet:
+            snippet = text[:SNIPPET_CHARS]
+        char_start = text.find(snippet)
+        if char_start < 0:
+            char_start, char_end = 0, len(snippet)
+        else:
+            char_end = char_start + len(snippet)
+        system_code, subsystem_code = _page_codes(store, document, page)
+        fragments.append(Fragment(
+            document=document, page=page,
+            system_code=system_code, subsystem_code=subsystem_code,
+            snippet=snippet, char_start=char_start, char_end=char_end,
+            score=penalty * min(1.0, score), kind="text",
+        ))
+    return fragments
+
+
 def hybrid_search(store: Store, question: str,
                   aircraft_type: str | None = None, limit: int = 10,
                   model_dir: str | None = None,
