@@ -268,7 +268,10 @@ function renderClarify(message, payload) {
     const doc = el("span", "option-doc",
       `${option.document || "—"} · раздел ${option.page ?? "—"}`);
     button.append(doc);
-    button.addEventListener("click", () => ask(option.label));
+    // Ф1.26: выбор варианта уходит с session_id и selected_option —
+    // сервер резолвит выбор и ищет дальше (без цикла уточнений).
+    button.addEventListener("click",
+      () => ask(option.label, option.id));
     options.append(button);
   }
   box.append(options);
@@ -291,7 +294,9 @@ function saveConversation(question, payload) {
   } catch (error) { /* приватный режим — просто не восстанавливаем */ }
 }
 
-async function ask(question) {
+let sessionId = "";
+
+async function ask(question, selectedOption) {
   const text = (question ?? input.value).trim();
   if (!text) return;
   if (!question) input.value = "";
@@ -302,9 +307,14 @@ async function ask(question) {
     const response = await fetch("/api/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: text }),
+      body: JSON.stringify({
+        question: text,
+        session_id: sessionId,
+        selected_option: selectedOption || "",
+      }),
     });
     const payload = await response.json();
+    if (payload.session_id) sessionId = payload.session_id;
     pending.remove();
     if (payload.status === "answer") renderAnswer(message, payload);
     else if (payload.status === "refusal") renderRefusal(message, payload);

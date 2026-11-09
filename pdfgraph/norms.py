@@ -50,6 +50,11 @@ _PARAMETERS: dict[str, str] = {
     "зазор": "зазор",
     "частота": "частот",
     "напряжение": "напряжен",
+    # Ф1.26: живой вопрос по щёткам МВ-1200 (Регламент ч.2, лист 141).
+    "высота": "высот",
+    "износ": "износ",
+    "толщина": "толщин",
+    "натяг": "натяг",
 }
 
 #: Единицы по параметру (regex по нормализованному тексту листа),
@@ -61,9 +66,14 @@ _UNITS: dict[str, str] = {
     "врем": r"\bмин\b|\bсек\b|\bс\b|\bч\b|\bчас\b",
     "ресурс": r"\bч\b|\bчас\b|\bцикл",
     "момент": r"кгс\s*·?\s*м|н\s*·?\s*м",
-    "зазор": r"\bмм\b|\bсм\b",
+    "зазор": r"\bмм\b|\bсм\b|\bмкм\b",
     "частот": r"%|об/мин|гц|герц",
     "напряжен": r"\bв\b|\bвольт\b|\bкв\b",
+    # Ф1.26: линейные износы/зазоры/натяги — мм и мкм.
+    "высот": r"\bмм\b|\bмкм\b|\bсм\b",
+    "износ": r"\bмм\b|\bмкм\b|\bсм\b",
+    "толщин": r"\bмм\b|\bмкм\b|\bсм\b",
+    "натяг": r"\bмм\b|\bмкм\b",
 }
 #: Общие единицы — для вопросов без параметра из словаря.
 _COMMON_UNITS = r"\bмм\b|\bсм\b|\bм\b|\bкг\b|\bг\b|\bл\b|\bч\b|\bс\b|\bмин\b"
@@ -225,8 +235,13 @@ def norm_candidates(store: Store, question: str, parameter: str,
     from pdfgraph.query import _fts_prefix_expr
 
     parameter_stem = _PARAMETERS.get(parameter, "")
-    object_stems = [_stem(word) if not word.isdigit() and "-" not in word
-                    else word for word in object_words]
+    # Основа объекта — после normalize_for_search (ё→е и пр.):
+    # «щёток» и «щеток» — одна основа «щет».
+    object_stems = [
+        (_stem(normalize_for_search(word))
+         if not word.isdigit() and "-" not in word else word)
+        for word in object_words
+    ]
     anchor_stems = ([parameter_stem] if parameter_stem
                     else object_stems[:1])
     if not anchor_stems or not anchor_stems[0]:

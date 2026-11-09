@@ -142,6 +142,28 @@ _STOP_WORDS = frozenset({
 })
 
 
+#: Ф1.26: даты — не обозначения («13.12.2024», «2024.12.13»).
+_DATE_TOKEN_RE = re.compile(
+    r"\d{1,2}\.\d{2}\.\d{4}|\d{4}\.\d{2}\.\d{2}")
+#: Ф1.26: номера изменений («изм. 5», «изм.5», «изм. от»).
+_REVISION_TOKEN_RE = re.compile(r"изм\.?(?:\s*\d+)?(?:\s*от)?\b", re.IGNORECASE)
+
+#: Ф1.26: гомоглифы латиница→кириллица при сравнении обозначений
+#: (только строки сравнения, pages.text не трогается).
+_HOMOGLYPHS = {"A": "А", "B": "В", "C": "С", "E": "Е", "H": "Н", "K": "К",
+               "M": "М", "O": "О", "P": "Р", "T": "Т", "X": "Х", "Y": "У"}
+
+
+def _fold_homoglyphs(text: str) -> str:
+    """Гомоглиф-фолд для сравнения: латиница → кириллица; З → 3 в
+    токене с цифрами («ТВЗ-117» → «тв3-117»). Регистр теряется —
+    вызывается только для строк сравнения."""
+    upper = text.upper()
+    folded = "".join(_HOMOGLYPHS.get(char, char) for char in upper)
+    folded = re.sub(r"З(?=[А-ЯЁ0-9-]*\d)", "3", folded)
+    return folded.lower()
+
+
 def is_designator(token: str) -> bool:
     """Токен — обозначение техники, агрегата или числовой код раздела?
 
@@ -180,6 +202,11 @@ def question_designators(question: str) -> list[str]:
     for token in _TOKEN_RE.findall(question):
         if token in found:
             continue
+        # Ф1.26: даты и номера изменений — не обозначения.
+        if _DATE_TOKEN_RE.fullmatch(token):
+            continue
+        if _REVISION_TOKEN_RE.fullmatch(token):
+            continue
         if is_designator(token):
             found.append(token)
     return found
@@ -199,6 +226,10 @@ def question_significant_numbers(question: str) -> list[str]:
     leftovers = question
     for token in question_designators(question):
         leftovers = leftovers.replace(token, " ")
+    # Ф1.26: даты и номера изменений не становятся значимыми числами
+    # (иначе «13.12.2024» и «5» из «изм. 5» требуют их на листе).
+    leftovers = _DATE_TOKEN_RE.sub(" ", leftovers)
+    leftovers = _REVISION_TOKEN_RE.sub(" ", leftovers)
     normalized = leftovers.replace(",", ".")
     numbers: list[str] = []
     for number in _STANDALONE_NUMBER_RE.findall(normalized):
@@ -365,8 +396,11 @@ def _designator_in_text(text: str, designator: str) -> bool:
     """
     if not text or not designator:
         return False
-    lowered = text.lower()
-    key = designator.lower()
+    # Ф1.26: гомоглиф-фолд обеих сторон сравнения (латиница →
+    # кириллица; З → 3 в токене с цифрами). Только строки сравнения:
+    # text (pages.text) не меняется.
+    lowered = _fold_homoglyphs(text)
+    key = _fold_homoglyphs(designator)
     if key in lowered:
         return True
     squeezed_text = re.sub(r"[-./\s]", "", lowered)

@@ -46,6 +46,9 @@ from pydantic import BaseModel
 from pdfgraph.answer import Answer, build_answer
 from pdfgraph.cli import _base_aircraft_type, _evidence_rows
 from pdfgraph.query import ROLE_LABELS
+from uuid import uuid4
+
+from pdfgraph.conversation import Conversation
 from pdfgraph.gui.pdf_opener import PAGE_OFFSET, _find_pdf_file, \
     resolve_pdf_dir
 from pdfgraph.store import Store
@@ -61,9 +64,18 @@ logger = logging.getLogger(__name__)
 
 
 class AskRequest(BaseModel):
-    """Тело POST /api/ask."""
+    """Тело POST /api/ask.
+
+    Ф1.26: ``session_id``/``selected_option`` — опциональные поля сессии
+    уточнений. Выбор варианта (``selected_option``) резолвится в
+    ``Conversation.resolve_clarification_reply`` — второй запрос ищет
+    дальше по обогащённому запросу, а не начинается заново (цикл
+    уточнений в вебе). Поля аддитивные: старые клиенты не ломаются.
+    """
 
     question: str
+    session_id: str = ""
+    selected_option: str = ""
 
 
 class SheetRef(BaseModel):
@@ -184,6 +196,11 @@ def create_app(store_path: str, pdf_dir: str | None = None,
     app = FastAPI(title="pdfgraph — ИИ-инженер", docs_url=None, redoc_url=None)
     ask = ask_fn or _production_ask
     resolved_pdf_dir = (Path(pdf_dir) if pdf_dir else resolve_pdf_dir())
+    # Ф1.26: сессии уточнений в памяти процесса {session_id: Conversation}.
+    # Веб не имел сессий вовсе — выбор варианта уходил как новый вопрос
+    # и уточнение повторялось бесконечно (цикл). GUI вёл Conversation,
+    # веб теперь ведёт так же.
+    sessions: dict[str, Conversation] = {}
 
     @app.exception_handler(Exception)
     async def log_unhandled(request: Request, exc: Exception):
@@ -245,7 +262,21 @@ def create_app(store_path: str, pdf_dir: str | None = None,
         try:
             request.state.question = body.question
             aircraft_type = _base_aircraft_type(store)
-            answer = ask(store, body.question, aircraft_type)
+            # Ф1.26: сессия уточнений. Новая (без session_id) — begin_
+            # question; существующая — та же Conversation; выбор варианта
+            # (selected_option) резолвится и ищется дальше.
+            session_id = body.session_id or uuid4().hex
+            conversation = sessions.setdefault(session_id, Conversation())
+            query = body.question
+            if body.selected_option:
+                conversation.add_user(body.selected_option)
+                resolved = conversation.resolve_clarification_reply(
+                    body.selected_option)
+                if resolved is not None:
+                    query = resolved["query"]
+            elif not body.session_id:
+                conversation.begin_question(query)
+            answer = ask(store, query, aircraft_type)
             checks_ok = all(check.ok for check in
                             verify_citations(answer, store))
             citations = _citation_rows(answer, store)
@@ -254,10 +285,16 @@ def create_app(store_path: str, pdf_dir: str | None = None,
             if answer.clarification and not answer.refusal:
                 options = [dict(option) for option
                            in answer.clarification.get("options", [])]
+                # Ф1.26: сохранить pending в сессии — следующий запрос
+                # с selected_option продолжит поиск, а не начнёт заново.
+                conversation.add_clarification(
+                    answer.clarification.get("question", ""),
+                    options=options, fragments=answer.fragments)
             payload = {
                 "status": status,
                 "exit_code": exit_code,
                 "reason": answer.reason,
+                "session_id": session_id,
                 "verified": checks_ok and not answer.refusal,
                 "claims": [
                     {"text": claim.answer_text or claim.text}
