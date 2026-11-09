@@ -225,3 +225,68 @@ def test_flag_on_norms_channel_changes_fusion(norms_store, monkeypatch):
                                      store=norms_store,
                                      question="какое давление масла")
     assert ordered[0].page == 38
+
+
+# --- Ф1.31: «минимально допустимая», «равна» и др. — нормативные конструкции --
+
+#: Дословные формулировки реальных листов (РТЭ кн.3 л.64 — карта
+#: 021.40.00h; Регламент ч.2 л.141 — приложение 2, перечень записей).
+FX_64 = ("Проверьте состояние коллектора и щеток электродвигателя "
+         "вентилятора. Замерьте и зафиксируйте высоту щеток. "
+         "Минимально допустимая высота щеток равна 13,5 мм. "
+         "При необходимости щетки замените новыми из комплекта ЗИП.")
+FX_141 = ("№ пп Содержание записи Место записи 3 Высота щеток "
+          "электродвигателя МВ-1200: - при измерении высоты щеток + - "
+          "- при замене щеток + +")
+
+
+def _norm_re() -> "re.Pattern[str]":
+    from pdfgraph.norms import _NORM_RE
+    return _NORM_RE
+
+
+def test_new_norm_constructions_match():
+    """Ф1.31: новые нормативные конструкции распознаются."""
+    norm_re = _norm_re()
+    for phrase in ("Минимально допустимая высота щеток равна",
+                   "максимально допустимое давление",
+                   "предельно допустимая температура",
+                   "допустимый зазор",
+                   "должна быть не менее",
+                   "должен быть равен",
+                   "давление составляет 4,5",
+                   "зазор равен 0,5"):
+        assert norm_re.search(phrase), phrase
+
+
+def test_sheet64_window_valid_after_f131():
+    """Ф1.31: на листе 64 («Минимально допустимая высота щеток равна
+    13,5 мм») окно признаётся валидным — прежде не признавалось."""
+    from pdfgraph.norms import _valid_windows, _stem
+    from pdfprepare.normalize import normalize_for_search
+
+    text_norm = normalize_for_search(FX_64)
+    valid = _valid_windows(text_norm, "высот", ["щеток"],
+                           _stem("высота"))
+    assert valid >= 1
+
+
+def test_sheet141_still_no_norm_window():
+    """Ф1.31: на листе 141 (перечень записей, числа с единицей нет)
+    валидных окон по-прежнему нет."""
+    from pdfgraph.norms import _valid_windows, _stem
+    from pdfprepare.normalize import normalize_for_search
+
+    text_norm = normalize_for_search(FX_141)
+    valid = _valid_windows(text_norm, "высот", ["щеток"],
+                           _stem("высота"))
+    assert valid == 0
+
+
+def test_old_constructions_still_match():
+    """Ф1.31: прежние конструкции («не менее», «±», диапазон) не сломаны."""
+    norm_re = _norm_re()
+    for phrase in ("не менее 2 кгс/см2", "(3,5±0,5) кгс/см2",
+                   "от 12 до 16", "в пределах 0,5…1,5", "номинал 27 В",
+                   "допускается замена"):
+        assert norm_re.search(phrase), phrase
