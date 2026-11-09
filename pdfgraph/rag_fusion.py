@@ -419,6 +419,14 @@ def fuse_hybrid(lexical: list[Fragment], vector: list[Fragment],
     порядок байт-в-байт прежний. Без ``store``/``question`` (прежние
     вызовы из тестов и инструментов) переранжирования нет — контракт
     прежний.
+
+    Ф1.19 (этап Б): после этапа А и перед отсечением топ-``TOP_N``
+    (:mod:`pdfgraph.crossrerank`) слитого списка пересортируется логитами
+    кросс-энкодера (:func:`pdfgraph.crossrerank.rerank_pairs`, модель
+    bge-reranker-base); хвост не трогается, при равных логитах прежний
+    порядок (устойчивая сортировка). Выключатель ``PDFGRAPH_CROSSRERANK``
+    — по умолчанию выключен: флаг выключен или модель недоступна —
+    порядок байт-в-байт прежний.
     """
     if limit <= 0:
         return []
@@ -433,7 +441,34 @@ def fuse_hybrid(lexical: list[Fragment], vector: list[Fragment],
             lexical_keys = {(fragment.document, fragment.page)
                             for fragment in lexical}
             fused = rerank_coverage(store, question, fused, lexical_keys)
+        # Ф1.19 (этап Б): свой выключатель — после этапа А, до отсечения.
+        # Флаг выключен: ни одна новая строка не выполняется, поведение
+        # байт-в-байт прежнее.
+        from pdfgraph.crossrerank import crossrerank_enabled
+        if crossrerank_enabled():
+            fused = _crossrerank_head(store, question, fused)
     return fused[:limit]
+
+
+def _crossrerank_head(store: Store, question: str,
+                      fused: list[Fragment]) -> list[Fragment]:
+    """Ф1.19: топ-``TOP_N`` слитого списка пересортировать по логитам.
+
+    Пары строятся по полному тексту листа (:func:`Store.page_text`),
+    сниппет — запас при пустом листе. Хвост за ``TOP_N`` возвращается
+    как есть; ``None`` от :func:`pdfgraph.crossrerank.rerank_pairs`
+    (модель недоступна) или неожиданная длина логитов — список прежний.
+    """
+    from pdfgraph.crossrerank import TOP_N, rerank_pairs
+    head = fused[:TOP_N]
+    logits = rerank_pairs(question, [store.page_text(fragment.document,
+                                                     fragment.page)
+                                     or fragment.snippet
+                                     for fragment in head])
+    if logits is None or len(logits) != len(head):
+        return list(fused)
+    ordered = sorted(zip(logits, head), key=lambda pair: -pair[0])
+    return [fragment for _logit, fragment in ordered] + fused[TOP_N:]
 
 
 def rag_search(store: Store, question: str, aircraft_type: str | None = None,
