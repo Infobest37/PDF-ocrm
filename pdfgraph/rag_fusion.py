@@ -357,7 +357,8 @@ def rrf_fuse(rankings: list[list[Fragment]], k: int = RRF_K,
              boost: float = 0.0,
              boost_kinds: tuple[str, ...] = (),
              spec_weight: float = 0.0,
-             spec_fn: SpecificityFn | None = None) -> list[Fragment]:
+             spec_fn: SpecificityFn | None = None,
+             ranking_weights: list[float] | None = None) -> list[Fragment]:
     """Reciprocal Rank Fusion over ``(document, page)`` keys, ranks from 1.
 
     Each key accumulates ``1 / (k + rank)`` from every ranking it appears in;
@@ -371,10 +372,13 @@ def rrf_fuse(rankings: list[list[Fragment]], k: int = RRF_K,
     fused: dict[tuple[str, int], float] = {}
     best: dict[tuple[str, int], Fragment] = {}
     boosted: set[tuple[str, int]] = set()
-    for ranking in rankings:
+    for index, ranking in enumerate(rankings):
+        weight = (ranking_weights[index]
+                  if ranking_weights is not None
+                  and index < len(ranking_weights) else 1.0)
         for rank, fragment in enumerate(ranking, start=1):
             key = (fragment.document, fragment.page)
-            fused[key] = fused.get(key, 0.0) + 1.0 / (k + rank)
+            fused[key] = fused.get(key, 0.0) + weight * (1.0 / (k + rank))
             if boost_kinds and fragment.kind in boost_kinds:
                 boosted.add(key)
             current = best.get(key)
@@ -431,6 +435,7 @@ def fuse_hybrid(lexical: list[Fragment], vector: list[Fragment],
     if limit <= 0:
         return []
     rankings: list[list[Fragment]] = [list(lexical), list(vector)]
+    norms_added = False
     # Ф1.23а: третий канал — FTS по чанкам (chunks_fts, флаг
     # PDFGRAPH_CHUNK_CHANNEL, по умолчанию выключен). Флаг выключен или
     # нет store/question — канал не добавляется, поведение байт-в-байт.
@@ -440,11 +445,25 @@ def fuse_hybrid(lexical: list[Fragment], vector: list[Fragment],
             from pdfgraph.query import chunk_search
             rankings.append(chunk_search(store, question,
                                          FUSION_CHANNEL_DEPTH))
+        # Ф1.24: четвёртый канал — нормы (лист со значением, а не с
+        # описанием; флаг PDFGRAPH_NORMS, по умолчанию выключен). Вес
+        # канала 2.0 — через ranking_weights RRF, не множитель к
+        # Fragment.score (скор используется гейтами).
+        from pdfgraph.norms import NORMS_WEIGHT, effective_norms_enabled
+        if effective_norms_enabled():
+            from pdfgraph.norms import norm_search_fragments
+            rankings.append(norm_search_fragments(
+                store, question, FUSION_CHANNEL_DEPTH))
+            norms_added = True
+    ranking_weights = None
+    if norms_added:
+        ranking_weights = [1.0] * (len(rankings) - 1) + [NORMS_WEIGHT]
     fused = rrf_fuse(rankings,
                      k=effective_fusion_k(), boost=effective_exact_boost(),
                      boost_kinds=EXACT_KINDS,
                      spec_weight=effective_specificity_weight(),
-                     spec_fn=spec_fn)
+                     spec_fn=spec_fn,
+                     ranking_weights=ranking_weights)
     if store is not None and question is not None:
         from pdfgraph.rerank import effective_rerank_enabled, rerank_coverage
         if effective_rerank_enabled():
