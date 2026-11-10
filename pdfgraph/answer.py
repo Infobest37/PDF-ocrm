@@ -516,10 +516,10 @@ def _value_leader_state(store: Store, question: str,
     затрагиваются: перестановка происходит ПОСЛЕ гейтов
     отказа/уточнения и отсечения по ``min_score``.
     """
-    from pdfgraph.norms import (_GENERIC_PARAMS, _NUMBER_BEFORE, _PARAMETERS,
-                                _PROC_WINDOW_RE, _stem, _unit_regex,
-                                _valid_windows, _class_stems, WINDOW_BACK,
-                                WINDOW_FORWARD, WINDOW_OBJECT_EXT)
+    from pdfgraph.norms import (_NUMBER_BEFORE, _PARAMETERS, _PROC_WINDOW_RE,
+                                _stem, _unit_regex, _valid_windows,
+                                WINDOW_BACK, WINDOW_FORWARD,
+                                WINDOW_OBJECT_EXT)
     from pdfgraph.norms import is_value_question
     from pdfgraph.textclean import clean_search_text
 
@@ -586,33 +586,6 @@ def _value_leader_state(store: Store, question: str,
             for token in expanded_tokens - original_tokens
             if len(token) >= 4
         }
-    #: Ф1.35: пометка расширения при полном окне, найденном классовым
-    #: стемом вместо якоря вопроса («найдено по параметру: высота
-    #: (в запросе: размер)»). Только для общих параметров —
-    #: частное→частное запрещено.
-    generic = parameter_stem in _GENERIC_PARAMS
-    param_names = {stem: name for name, stem in _PARAMETERS.items()}
-
-    def _expansion_note(fragment: Fragment) -> str:
-        """Пометка, если окно лидера нашлось классовым стемом."""
-        try:
-            text = store.page_text(fragment.document, fragment.page)
-        except (sqlite3.Error, TypeError, ValueError, AttributeError):
-            return ""
-        if not text:
-            return ""
-        text_norm = normalize_for_search(clean_search_text(text))
-        if re.search(re.escape(anchor), text_norm):
-            return ""  # якорь вопроса на листе есть — расширения не было
-        for stem in _class_stems(parameter_stem):
-            if stem == anchor:
-                continue
-            if _valid_windows(text_norm, stem, [primary_stem],
-                              parameter_stem) > 0:
-                name = param_names.get(stem, stem)
-                return (f"найдено по параметру: {name} "
-                        f"(в запросе: {parameter})")
-        return ""
 
     #: Максимальная длина строки, считающейся строкой таблицы
     #: (карточка Ф1.29: «только в табличном контексте, не в
@@ -742,7 +715,7 @@ def _value_leader_state(store: Store, question: str,
     # "full" без перестановки (лидер со значением не трогается).
     leader_full, leader_tabular = _windows(fragments[0])
     if leader_full or leader_tabular or _has_value(fragments[0]):
-        return fragments, "full", _expansion_note(fragments[0])
+        return fragments, "full", ""
     # Перестановка: сначала полный лист нормы, затем табличная норма;
     # по value-уровню перебора нет (см. докстринг _has_value).
     candidate = _first_with(1, 0)
@@ -752,7 +725,7 @@ def _value_leader_state(store: Store, question: str,
         picked = fragments[candidate]
         reordered = ([picked]
                      + [f for f in fragments if f is not picked])
-        return reordered, "full", _expansion_note(picked)
+        return reordered, "full", ""
     return fragments, "mention", _mention_note(question, parameter)
 
 

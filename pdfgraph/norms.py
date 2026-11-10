@@ -106,14 +106,6 @@ _PARAM_CLASSES: dict[str, list[str]] = {
     "frequency": ["частот", "оборот"],
 }
 
-#: Общие параметры (карточка Ф1.35): сами по себе ничего не измеряют,
-#: инженер и книга говорят об одном узле разными словами («размер
-#: щётки» против «высота щеток»). Только для них окно ищется по стемам
-#: класса. Частное→частное запрещено: «диаметр щётки» не должен
-#: находить «высоту щёток» — 13,5 мм с идеально проверенной цитатой и
-#: неправильным смыслом; citation_precision этого не заметит.
-_GENERIC_PARAMS: set[str] = {"размер", "величин"}
-
 
 def param_class(parameter: str) -> str | None:
     """Класс параметра по имени из :data:`_PARAMETERS`.
@@ -300,14 +292,9 @@ def _valid_windows(text_norm: str, anchor_stem: str,
         return valid
 
     valid = _count(anchor_stem)
-    if (valid == 0 and parameter_stem in _GENERIC_PARAMS
-            and not any(re.finditer(re.escape(anchor_stem), text_norm))):
-        # Ф1.34/Ф1.35: якоря на листе нет — fallback по стемам класса,
-        # но только для ОБЩЕГО параметра («размер», «величин»).
-        # Частное→частное запрещено: «диаметр щётки» не должен находить
-        # «высоту щёток». Якорь есть, но валидных окон нет — fallback
-        # тоже не делается (подстановка другого параметра может найти
-        # его число — ложный ответ хуже отказа, случай e35).
+    if valid == 0 and not any(re.finditer(re.escape(anchor_stem),
+                                          text_norm)):
+        # Ф1.34: якоря на листе нет — fallback по классу параметра.
         for stem in _class_stems(parameter_stem):
             if stem == anchor_stem:
                 continue
@@ -328,13 +315,6 @@ def norm_candidates(store: Store, question: str, parameter: str,
     считается по нормализованному очищенному тексту на лету (та же
     чистка, что у индекса). Лист засчитывается при хотя бы одном
     валидном окне; скор = 1.0 + 0.1 за каждое дополнительное (кап 1.5).
-
-    Ф1.35: для ОБЩЕГО параметра («размер», «величин» —
-    :data:`_GENERIC_PARAMS`) поиск кандидатов расширяется — подзапросы
-    prefix-AND по каждому стему класса (результаты объединяются без
-    дубликатов), валидация окон прежняя (объект + единица класса +
-    конструкция). Частный параметр — прежний prefix-AND по точному
-    якорю (частное→частное запрещено).
     """
     from pdfgraph.query import _fts_prefix_expr
 
@@ -350,33 +330,12 @@ def norm_candidates(store: Store, question: str, parameter: str,
                     else object_stems[:1])
     if not anchor_stems or not anchor_stems[0]:
         return []
+    stems = ([parameter_stem] if parameter_stem else []) + object_stems[:2]
+    if not stems:
+        stems = anchor_stems
     fetch = 200
-    if parameter_stem in _GENERIC_PARAMS:
-        # Ф1.35: общий параметр — подзапросы по стемам класса,
-        # объединение кандидатов без дубликатов. Дизайнаторы техники
-        # (с цифрами/дефисами — «мв-1200») исключаются из prefix-AND:
-        # на листе с нормой их обычно нет, AND с ними отсекает нужный
-        # лист (граница Ф1.26, живой случай «размер щётки на МВ-1200»).
-        class_stems = _class_stems(parameter_stem)
-        anchor_stems = class_stems or anchor_stems
-        object_no_designators = [
-            obj for obj in object_stems[:2]
-            if not any(ch.isdigit() for ch in obj) and "-" not in obj
-        ]
-        rows_by_key: dict[tuple[str, int], tuple] = {}
-        for stem in anchor_stems:
-            stems = [stem] + object_no_designators
-            for row in store.search_pages(
-                    _fts_prefix_expr(stems, " AND "), aircraft_type, fetch):
-                rows_by_key[(row[0], row[1])] = row
-        rows = list(rows_by_key.values())
-    else:
-        stems = ([parameter_stem] if parameter_stem else []) \
-            + object_stems[:2]
-        if not stems:
-            stems = anchor_stems
-        rows = store.search_pages(_fts_prefix_expr(stems, " AND "),
-                                  aircraft_type, fetch)
+    rows = store.search_pages(_fts_prefix_expr(stems, " AND "),
+                              aircraft_type, fetch)
     if not rows:
         return []
     scores: list[tuple[str, int, float]] = []

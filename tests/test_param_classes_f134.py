@@ -108,9 +108,8 @@ def test_size_question_finds_height_window(store):
                           object_stems, _PARAMETERS["размер"]) > 0
 
 
-def test_thickness_question_private_no_fallback(store):
-    """Ф1.35: «толщина» — частный параметр, частное→частное запрещено:
-    «высота щеток 13,5 мм» НЕ распознаётся как её норма."""
+def test_thickness_question_finds_height_window(store):
+    """«толщина» находит «высоту» (тот же класс geometry)."""
     from pdfgraph.norms import (_PARAMETERS, _valid_windows,  # noqa: E402
                                 is_value_question)
     from pdfgraph.textclean import clean_search_text  # noqa: E402
@@ -121,7 +120,7 @@ def test_thickness_question_private_no_fallback(store):
     text_norm = normalize_for_search(clean_search_text(text))
     assert "толщин" not in text_norm
     assert _valid_windows(text_norm, _PARAMETERS["толщина"],
-                          ["щеток"], _PARAMETERS["толщина"]) == 0
+                          ["щеток"], _PARAMETERS["толщина"]) > 0
 
 
 def test_pressure_question_misses_geometry_norm(store):
