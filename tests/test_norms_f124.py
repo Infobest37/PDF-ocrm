@@ -103,6 +103,28 @@ def test_value_question_kakovo_marker():
     assert any("масл" in obj for obj in objects)
 
 
+def test_value_question_geometric_parameters():
+    """Ф1.29: геометрические параметры — вопрос-значение.
+
+    Живой вопрос третьего замера: «какой минимальный размер щётки
+    на МВ-1200» (эталон — РТЭ кн.3 л.64, 13,5 мм).
+    """
+    from pdfgraph.norms import is_value_question
+    ok, parameter, objects = is_value_question(
+        "какой минимальный размер щётки на МВ-1200")
+    assert ok is True
+    assert parameter == "размер"
+    assert any(obj.startswith("щет") for obj in objects)
+    assert "мв-1200" in objects
+    for question, expected in (
+            ("какая величина натяга допускается", "величина"),
+            ("какая длина жгута проводов", "длина"),
+            ("какой диаметр отверстия под болт", "диаметр"),
+            ("какое сечение провода", "сечение")):
+        ok, parameter, _objects = is_value_question(question)
+        assert ok is True and parameter == expected, question
+
+
 # --- norm_candidates ---------------------------------------------------------
 
 
