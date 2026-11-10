@@ -365,6 +365,29 @@ def card_suffix_occurrences(text: str) -> list[tuple[str, str, int]]:
     return found
 
 
+#: Карта-число в тексте листа (Б6/Ф1.36б): «КАРТА № N» (включая
+#: «ТЕХНОЛОГИЧЕСКАЯ КАРТА № N» и падежи «карты/карту»); пробелы и
+#: ведущие нули не значимы; после числа не цифра («№ 7031» — не «703»).
+_CARD_NUMBER_RE = re.compile(
+    r"карт[а-яё]*\s*№\s*0*(\d{2,4})(?!\d)", re.IGNORECASE)
+
+
+def card_number_occurrences(text: str) -> list[str]:
+    """Карты-числа «КАРТА № N» в тексте листа (Б6/Ф1.36б: книга двигателя).
+
+    Возвращает нормализованные номера без повторов: пробелы и ведущие
+    нули не значимы («КАРТА № 0703» — номер «703»). Требуется слово
+    «карта» рядом с «№» (правило Б6: только при наличии слова «карта»):
+    голое «№ 814» — номер таблички, не карта.
+    """
+    found: list[str] = []
+    for match in _CARD_NUMBER_RE.finditer(text):
+        number = match.group(1)
+        if number not in found:
+            found.append(number)
+    return found
+
+
 def _card_suffix_in_text(lowered: str, designator: str) -> bool:
     """Точное совпадение суффикса карты (Ф1.9в, Ф2.8).
 

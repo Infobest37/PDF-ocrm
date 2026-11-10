@@ -46,7 +46,7 @@ from dataclasses import dataclass, replace
 
 from pdfprepare.codes import normalize_code
 from pdfprepare.normalize import normalize_for_search, normalize_part_number
-from pdfgraph.gates import card_suffix_occurrences
+from pdfgraph.gates import card_number_occurrences, card_suffix_occurrences
 from pdfgraph.store import Store
 
 #: Snippet window length in characters of original page text.
@@ -90,6 +90,15 @@ _TECHCARD_EXPR_RE = re.compile(
     r"(?:(?:технологическая\s+)?карт[аы]\s+)?"
     r"(\d{3})[\s.]*(\d{2})[\s.]*(\d{2})\s*"
     r"([a-zа-яё]\d?(?:\s*,\s*[a-zа-яё]\d?)*)?",
+    re.IGNORECASE,
+)
+
+#: Б6/Ф1.36б: карта-число в книгах по двигателю («ТЕХНОЛОГИЧЕСКАЯ
+#: КАРТА № 703»). Слово «карта» или знак «№» обязательны — иначе «703»
+#: в «давление 703»/«страница 703» признавался бы картой; «№», пробелы
+#: и ведущие нули не значимы.
+_TECHCARD_PLAIN_RE = re.compile(
+    r"(?:(?:технологическая\s+)?карт[аы]\s*№?\s*|№\s*)0*(\d{2,4})$",
     re.IGNORECASE,
 )
 
@@ -275,49 +284,62 @@ def search(
     techcard = parse_techcard_query(stripped)
     if techcard is not None:
         base, suffixes = techcard
-        return _search_techcard(store, base, suffixes, aircraft_type, limit)
+        hits = _search_techcard(store, base, suffixes, aircraft_type, limit)
+        if hits or "." in base:
+            return hits
+        # Б6/Ф1.36б: запрос «№ N» без слова «карта» в вопросе — карта,
+        # только если в корпусе она найдена (слово «карта» рядом с «№»
+        # на листе, см. gates.card_number_occurrences); иначе прежняя
+        # number-ветка (номер таблички, страницы и т.п.).
+        return _search_number_query(store, stripped, aircraft_type, limit)
 
     if _TECHCARD_QUERY_RE.fullmatch(stripped):
-        number_query = _TECHCARD_NUMBER_RE.fullmatch(stripped) is not None
-        suffixed_code = (
-            _TECHCARD_CODE_WITH_SUFFIX_RE.fullmatch(stripped) is not None
-        )
-        # Preserve the established exact-code route when an unsuffixed ATA
-        # code already resolves to system-code sheets.
-        if not number_query and not suffixed_code:
-            ordinary = _search_ordinary(store, stripped, aircraft_type, limit)
-            if ordinary:
-                return ordinary
-
-        needle = normalize_for_search(stripped)
-        regulation = _by_fts(
-            store, needle, aircraft_type, limit=1,
-            document_terms=_REGULATION_DOCUMENT_TERMS,
-        )
-        technical_manual = _by_fts(
-            store, needle, aircraft_type, limit=1,
-            document_terms=_TECHNICAL_MANUAL_DOCUMENT_TERMS,
-        )
-        techcards = [
-            replace(fragment, kind="techcard")
-            for fragment in regulation[:1] + technical_manual[:1]
-        ]
-
-        # A bare sheet number is ambiguous: keep ordinary matches too.
-        if number_query:
-            seen = {(fragment.document, fragment.page)
-                    for fragment in techcards}
-            for fragment in _search_ordinary(
-                    store, stripped, aircraft_type, limit):
-                key = (fragment.document, fragment.page)
-                if key not in seen:
-                    seen.add(key)
-                    techcards.append(fragment)
-        elif not techcards:
-            return _search_ordinary(store, stripped, aircraft_type, limit)
-        return techcards
+        return _search_number_query(store, stripped, aircraft_type, limit)
 
     return _search_ordinary(store, stripped, aircraft_type, limit)
+
+
+def _search_number_query(store: Store, stripped: str, aircraft_type: str | None,
+                         limit: int) -> list[Fragment]:
+    """Прежняя number-ветка: «№ N»/«N» без распознанной карты (Б6/Ф1.36б)."""
+    number_query = _TECHCARD_NUMBER_RE.fullmatch(stripped) is not None
+    suffixed_code = (
+        _TECHCARD_CODE_WITH_SUFFIX_RE.fullmatch(stripped) is not None
+    )
+    # Preserve the established exact-code route when an unsuffixed ATA
+    # code already resolves to system-code sheets.
+    if not number_query and not suffixed_code:
+        ordinary = _search_ordinary(store, stripped, aircraft_type, limit)
+        if ordinary:
+            return ordinary
+
+    needle = normalize_for_search(stripped)
+    regulation = _by_fts(
+        store, needle, aircraft_type, limit=1,
+        document_terms=_REGULATION_DOCUMENT_TERMS,
+    )
+    technical_manual = _by_fts(
+        store, needle, aircraft_type, limit=1,
+        document_terms=_TECHNICAL_MANUAL_DOCUMENT_TERMS,
+    )
+    techcards = [
+        replace(fragment, kind="techcard")
+        for fragment in regulation[:1] + technical_manual[:1]
+    ]
+
+    # A bare sheet number is ambiguous: keep ordinary matches too.
+    if number_query:
+        seen = {(fragment.document, fragment.page)
+                for fragment in techcards}
+        for fragment in _search_ordinary(
+                store, stripped, aircraft_type, limit):
+            key = (fragment.document, fragment.page)
+            if key not in seen:
+                seen.add(key)
+                techcards.append(fragment)
+    elif not techcards:
+        return _search_ordinary(store, stripped, aircraft_type, limit)
+    return techcards
 
 
 def parse_techcard_query(query: str) -> tuple[str, list[str]] | None:
@@ -331,6 +353,11 @@ def parse_techcard_query(query: str) -> tuple[str, list[str]] | None:
     """
     match = _TECHCARD_EXPR_RE.fullmatch(query.strip())
     if match is None:
+        # Б6/Ф1.36б: карта-число («карта № 703», «№ 703») — слово «карта»
+        # или знак «№» обязательны, голое число остаётся числом.
+        plain = _TECHCARD_PLAIN_RE.fullmatch(query.strip())
+        if plain is not None:
+            return plain.group(1), []
         return None
     d1, d2, d3, raw_suffixes = match.groups()
     suffixes: list[str] = []
@@ -346,9 +373,64 @@ def parse_techcard_query(query: str) -> tuple[str, list[str]] | None:
     return f"{d1}.{d2}.{d3}", suffixes
 
 
+def _plain_card_matches(store: Store, base: str, aircraft_type: str | None
+                        ) -> list[tuple[str, int, str, str, str]]:
+    """Карты-числа «№ base» в корпусе (Б6/Ф1.36б).
+
+    Кандидаты — листы, чей поисковый текст содержит «№ N» (со пробелом
+    и без, с ведущими нулями); вхождение признаёт
+    :func:`pdfgraph.gates.card_number_occurrences` по исходному тексту
+    листа — с теми же правилами нормализации, что у запроса. Суффикса у
+    карты-числа нет — пятый элемент кортежа пуст. Дубликаты (лист)
+    убираются; мусор и документы-дубли скрыты штатными фильтрами.
+    """
+    variants: list[str] = []
+    for width in range(len(base), 5):
+        padded = base.zfill(width)
+        if padded not in variants:
+            variants.append(padded)
+    # В fts.body «№» после NFKC — «no» (проверено: normalize_for_search
+    # («№ 703») = «no 703»), поэтому кандидаты ищутся в этой форме;
+    # вхождение подтверждается по исходному тексту с настоящим «№».
+    patterns: list[str] = []
+    for padded in variants:
+        for form in (f"%no{padded}%", f"%no {padded}%"):
+            if form not in patterns:
+                patterns.append(form)
+    sql = (
+        "SELECT pg.document, pg.page, pg.system_code, pg.subsystem_code "
+        "FROM pages_fts AS fts "
+        "JOIN pages AS pg ON pg.document = fts.document "
+        "AND pg.page = CAST(fts.page AS INTEGER) WHERE ("
+        + " OR ".join("fts.body LIKE ?" for _ in patterns) + ")"
+    )
+    args: list[object] = list(patterns)
+    if aircraft_type is not None:
+        sql += " AND pg.aircraft_type = ?"
+        args.append(aircraft_type)
+    sql += store._dup_filter("pg.document")
+    sql += store._garbage_filter("pg.")
+    sql += " ORDER BY pg.document, pg.page"
+    matches: list[tuple[str, int, str, str, str]] = []
+    seen: set[tuple[str, int]] = set()
+    for document, page, system_code, subsystem_code \
+            in store._connection.execute(sql, args):
+        if (document, page) in seen:
+            continue
+        text = store.page_text(document, page) or ""
+        if base not in card_number_occurrences(text):
+            continue
+        seen.add((document, page))
+        matches.append((document, page, system_code, subsystem_code, ""))
+    return matches
+
+
 def _techcard_matches(store: Store, base: str, aircraft_type: str | None
                       ) -> list[tuple[str, int, str, str, str]]:
     """Карты базы ``base`` в корпусе: (документ, лист, коды, суффикс).
+
+    Б6/Ф1.36б: база без точки — карта-число («703»); ветка
+    :func:`_plain_card_matches`.
 
     Кандидаты — листы, чей нормализованный текст содержит номер в любой из
     форм (с точками, пробелами, слитно); точный суффикс (буква, двойники,
@@ -358,6 +440,8 @@ def _techcard_matches(store: Store, base: str, aircraft_type: str | None
     посчитать (Ф2.8). Дубликаты (суффикс, лист) убираются; мусор и
     документы-дубли скрыты штатными фильтрами хранилища.
     """
+    if "." not in base:
+        return _plain_card_matches(store, base, aircraft_type)
     sql = (
         "SELECT pg.document, pg.page, pg.system_code, pg.subsystem_code, "
         "fts.body FROM pages_fts AS fts "
@@ -408,6 +492,18 @@ def _search_techcard(store: Store, base: str, suffixes: list[str],
     by_suffix: dict[str, list[tuple[str, int, str, str, str]]] = {}
     for row in matches:
         by_suffix.setdefault(row[4], []).append(row)
+    if "." not in base:
+        # Б6/Ф1.36б: у карты-числа суффиксов нет — каждый найденный лист
+        # отдельным результатом, как лист запрошенной карты; порядок —
+        # руководства выше регламента, затем документ/лист (Ф1.9б).
+        plain_fragments = [
+            _fragment(store, document, page, system_code, subsystem_code,
+                      1.0, "techcard", f"№ {base}",
+                      role=document_role(store, document))
+            for document, page, system_code, subsystem_code, _suffix
+            in sorted(matches, key=lambda row: _role_row_key(store, row))
+        ]
+        return plain_fragments[:max(limit, 0)]
     if suffixes:
         # Ф1.9б: внутри карты руководства выше регламента, затем документ/лист.
         fragments: list[Fragment] = []

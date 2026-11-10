@@ -27,11 +27,21 @@ import re
 from dataclasses import dataclass, field
 
 from pdfgraph import documents as documents_table
-from pdfgraph.gates import _card_suffix_in_text, card_suffix_occurrences
+from pdfgraph.gates import (_card_suffix_in_text, card_number_occurrences,
+                            card_suffix_occurrences)
 from pdfgraph.query import (ROLE_MANUAL, _techcard_matches, document_role,
                             parse_techcard_query)
 from pdfgraph.store import Store
 
+#: Диапазон листов карты-числа: «На страницах 709...713/714» (Б6/Ф1.36б).
+#: Между числами — две и более точки или «…» (OCR), после последнего —
+#: дробь «/714» игнорируется; берутся первый и последний листы.
+_PAGE_RANGE_RE = re.compile(
+    r"на\s+страницах\s+0*(\d{2,4})\s*[.…]{2,}\s*0*(\d{2,4})(?:\s*/\s*\d+)?",
+    re.IGNORECASE)
+#: Код раздела в правом нижнем углу листа: ATA-код в последних строках
+#: (Б6/Ф1.36б: у карт-чисел кода в шапке нет — только в углу).
+_SECTION_CODE_RE = re.compile(r"(?<![\d.])(\d{2,3}\.\d{2}\.\d{2})(?![\d.])")
 #: Маркер наименования работы: регистр не важен, ё/е эквивалентны,
 #: двоеточие после маркера опционально (OCR его теряет и добавляет).
 _TITLE_MARKER_RE = re.compile(r"наименование\s+работы\s*:?\s*", re.IGNORECASE)
@@ -80,6 +90,9 @@ class TechCard:
     number: str
     title: str = ""
     labor: str = ""
+    #: Б6/Ф1.36б: код раздела из правого нижнего угла листа шапки;
+    #: у карт РТЭ с кодом в шапке пусто (код и так в номере).
+    section: str = ""
     sheets: list[CardSheet] = field(default_factory=list)
     #: Ф2.8: пометка применимости для карты, найденной только в
     #: дополнении; пустая строка — обычная карта основной книги.
@@ -106,6 +119,31 @@ def _segment_after_marker(text: str, marker: re.Pattern[str]) -> str:
 def extract_title(page_text: str) -> str:
     """Наименование работы с листа; маркера нет — пусто."""
     return _segment_after_marker(page_text, _TITLE_MARKER_RE)
+
+
+def extract_page_range(page_text: str) -> tuple[int, int] | None:
+    """Диапазон листов карты из «На страницах N...M» (Б6/Ф1.36б).
+
+    Возвращает (первый, последний); маркера или чисел нет — None, не
+    выдумывается.
+    """
+    match = _PAGE_RANGE_RE.search(page_text)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def extract_section_code(page_text: str) -> str:
+    """Код раздела из правого нижнего угла листа (Б6/Ф1.36б).
+
+    Ищется ATA-код в последних трёх строках листа — у карт-чисел кода
+    в шапке нет; при нескольких вхождених берётся последнее (ниже —
+    правее). Кода нет — пустая строка.
+    """
+    lines = [line for line in page_text.splitlines() if line.strip()]
+    tail = "\n".join(lines[-3:])
+    found = _SECTION_CODE_RE.findall(tail)
+    return found[-1] if found else ""
 
 
 def extract_labor(page_text: str) -> str:
@@ -257,11 +295,16 @@ def collect_techcards(store: Store, question: str, fragments: list
     карты», следующие подряд — «продолжение».
     """
     parsed = parse_techcard_query(question)
-    if parsed is None or not parsed[1] or not fragments:
+    if parsed is None or not fragments:
         return []
     base, suffixes = parsed
     tech_fragments = [fragment for fragment in fragments
                       if fragment.kind == "techcard"]
+    if "." not in base:
+        # Б6/Ф1.36б: карта-число книги по двигателю — без суффиксов.
+        return _plain_cards(store, base, tech_fragments)
+    if not suffixes or not tech_fragments:
+        return []
     # Сначала все листы всех запрошенных карт — занятые ими листы не
     # приклеиваются к чужим карточкам как продолжения.
     found: dict[str, list[tuple[str, int, str]]] = {}
@@ -289,4 +332,52 @@ def collect_techcards(store: Store, question: str, fragments: list
         cards.append(build_card(
             f"{base}{suffix}", store, sheets,
             applicability=_applicability_note(store, base, suffix, sheets)))
+    return cards
+
+
+def _plain_cards(store: Store, number: str, tech_fragments: list
+                 ) -> list[TechCard]:
+    """Карточки карт-чисел «№ number» (Б6/Ф1.36б), по книге на карточку.
+
+    Лист шапки несёт «Наименование работы: …» и «На страницах
+    N...M/…»; листы карточки — весь диапазон [N..M], присутствующий в
+    хранилище, с метками «начало карты»/«продолжение» (Ф2.9). Код
+    раздела — из правого нижнего угла листа шапки. Диапазона нет —
+    единственный найденный лист, не выдумывается.
+    """
+    cards: list[TechCard] = []
+    seen_documents: set[str] = set()
+    for fragment in tech_fragments:
+        if fragment.document in seen_documents:
+            continue
+        text = store.page_text(fragment.document, fragment.page) or ""
+        if number not in card_number_occurrences(text):
+            continue
+        seen_documents.add(fragment.document)
+        card_range = extract_page_range(text)
+        role = fragment.role or ROLE_MANUAL
+        if card_range is None:
+            entries = [(fragment.document, fragment.page, role)]
+        else:
+            first, last = card_range
+            entries = [(fragment.document, page, role)
+                       for page in range(first, last + 1)
+                       if store.page_text(fragment.document, page)]
+        parts = _sheet_parts(entries)
+        sheets = [
+            CardSheet(document=document, page=page, role=role_, part=part)
+            for (document, page, role_), part in zip(entries, parts)
+        ]
+        title = extract_title(text)
+        # У карты-числа заголовок — до «На страницах N...M/…»: маркер
+        # диапазона стоит в той же шапке; дальше идёт угол с кодом.
+        range_in_title = _PAGE_RANGE_RE.search(title)
+        if range_in_title is not None:
+            title = title[:range_in_title.start()].strip()
+        cards.append(TechCard(
+            number=number,
+            title=title,
+            labor=extract_labor(text),
+            section=extract_section_code(text),
+            sheets=sheets))
     return cards
