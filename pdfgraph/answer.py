@@ -515,7 +515,8 @@ def _build_answer_core(
                                     limit=10,
                                     spec_fn=make_specificity_fn(
                                         store, question),
-                                    store=store, question=question)
+                                    store=store, question=question,
+                                    aircraft_type=aircraft_type)
     # Лист-продолжение таблицы расширяется предыдущим листом: дословный
     # кусок с kind="continuation" (Ф1.0). Вызывается после любой ветки
     # поиска — к отказу (пустой список) ничего не добавляет.

@@ -404,7 +404,8 @@ def fuse_hybrid(lexical: list[Fragment], vector: list[Fragment],
                 limit: int = 10,
                 spec_fn: SpecificityFn | None = None, *,
                 store: Store | None = None,
-                question: str | None = None) -> list[Fragment]:
+                question: str | None = None,
+                aircraft_type: str | None = None) -> list[Fragment]:
     """RRF-слияние лексического и векторного каналов до отсечения (Ф1.1).
 
     Лексический список — ранги :func:`pdfgraph.query.search`, векторный —
@@ -436,6 +437,7 @@ def fuse_hybrid(lexical: list[Fragment], vector: list[Fragment],
         return []
     rankings: list[list[Fragment]] = [list(lexical), list(vector)]
     norms_added = False
+    terms_added = False
     # Ф1.23а: третий канал — FTS по чанкам (chunks_fts, флаг
     # PDFGRAPH_CHUNK_CHANNEL, по умолчанию выключен). Флаг выключен или
     # нет store/question — канал не добавляется, поведение байт-в-байт.
@@ -455,9 +457,29 @@ def fuse_hybrid(lexical: list[Fragment], vector: list[Fragment],
             rankings.append(norm_search_fragments(
                 store, question, FUSION_CHANNEL_DEPTH))
             norms_added = True
+        # Ф1.32: пятый канал — подстановка алиасов (обозначение →
+        # расшифровка; флаг PDFGRAPH_TERMS, по умолчанию выключен).
+        # Второй лексический поиск по РАСШИРЕННОМУ вопросу; сам вопрос
+        # не переписывается — гейты, verify и humanize работают по
+        # оригиналу. Вес канала 0.7 — через ranking_weights RRF.
+        from pdfgraph.terms import TERMS_WEIGHT, effective_terms_enabled
+        from pdfgraph.terms import expand_question
+        if effective_terms_enabled():
+            expanded = expand_question(question)
+            if expanded is not None:
+                rankings.append(search(store, expanded, aircraft_type,
+                                       FUSION_CHANNEL_DEPTH))
+                terms_added = True
     ranking_weights = None
-    if norms_added:
-        ranking_weights = [1.0] * (len(rankings) - 1) + [NORMS_WEIGHT]
+    if norms_added or terms_added:
+        # Ф1.32: веса по индексам каналов — базовые 1.0, канал норм 2.0,
+        # канал алиасов 0.7; ни одного канала — None (порядок прежний
+        # байт-в-байт).
+        ranking_weights = [1.0] * len(rankings)
+        if norms_added:
+            ranking_weights[-1] = NORMS_WEIGHT
+        if terms_added:
+            ranking_weights[-1] = TERMS_WEIGHT
     fused = rrf_fuse(rankings,
                      k=effective_fusion_k(), boost=effective_exact_boost(),
                      boost_kinds=EXACT_KINDS,
