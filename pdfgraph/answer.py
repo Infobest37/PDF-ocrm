@@ -455,13 +455,6 @@ def param_norm_verdict(store: Store, question: str, fragments: list) -> str:
 MENTION_NOTE_TEMPLATE = ("Найден лист с упоминанием {what}, "
                          "но числовое значение на нём не указано")
 
-#: Ф1.34: глубина перебора листов в поиске валидного окна нормы.
-#: Карточка Ф1.29 говорила «до 10-го», но для вопроса «размер щётки»
-#: лист со значением («высота щеток…13,5 мм») стоит глубже десятого —
-#: разные слова об одном узле хуже ранжируются. Отступление от буквы
-#: Ф1.29 задокументировано; замер golden обязателен.
-VALUE_SCAN_LIMIT = 20
-
 
 def _mention_note(question: str, parameter: str) -> str:
     """Честная фраза «mention»: кого упомянули, значения нет.
@@ -647,8 +640,6 @@ def _value_leader_state(store: Store, question: str,
         не трогается), перебор по этому уровню не ведётся — иначе
         процедуры («увеличивайте давление…») и пороги сигнализации
         вытесняют эталонных лидеров. Латин-фикс единиц — см. выше.
-        Ф1.34: если вхождений якоря на листе нет — fallback по стемам
-        класса параметра (как в :func:`pdfgraph.norms._valid_windows`).
         """
         try:
             text = store.page_text(fragment.document, fragment.page)
@@ -660,28 +651,14 @@ def _value_leader_state(store: Store, question: str,
         if substitute_stems and not any(stem in text_norm
                                         for stem in substitute_stems):
             return False
-
-        def _find(stem: str) -> bool:
-            """Число с единицей у параметра в окне вхождения стема."""
-            for match in re.finditer(re.escape(stem), text_norm):
-                start = max(0, match.start() - WINDOW_BACK)
-                end = match.end() + WINDOW_FORWARD
-                window_ext = text_norm[start:end + WINDOW_OBJECT_EXT]
-                if not primary_stem or primary_stem not in window_ext:
-                    continue
-                if unit_re.search(text_norm[start:end]):
-                    return True
-            return False
-
-        if _find(anchor):
-            return True
-        # Ф1.34: якоря на листе нет — fallback по классу параметра.
-        if not any(re.finditer(re.escape(anchor), text_norm)):
-            from pdfgraph.norms import _class_stems
-
-            for stem in _class_stems(parameter_stem):
-                if stem != anchor and _find(stem):
-                    return True
+        for match in re.finditer(re.escape(anchor), text_norm):
+            start = max(0, match.start() - WINDOW_BACK)
+            end = match.end() + WINDOW_FORWARD
+            window_ext = text_norm[start:end + WINDOW_OBJECT_EXT]
+            if not primary_stem or primary_stem not in window_ext:
+                continue
+            if unit_re.search(text_norm[start:end]):
+                return True
         return False
 
     def _windows(fragment: Fragment) -> tuple[bool, bool]:
@@ -704,8 +681,7 @@ def _value_leader_state(store: Store, question: str,
 
     def _first_with(index: int, position: int) -> int | None:
         """Позиция первого фрагмента с ``windows[position]`` истинным."""
-        for offset, fragment in enumerate(fragments[index:VALUE_SCAN_LIMIT],
-                                          start=index):
+        for offset, fragment in enumerate(fragments[index:10], start=index):
             full, tabular = _windows(fragment)
             if (full, tabular)[position]:
                 return offset
