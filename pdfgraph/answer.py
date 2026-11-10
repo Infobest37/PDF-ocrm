@@ -25,6 +25,7 @@ from pdfgraph.query import (
 )
 from pdfgraph.techcard_card import TechCard, collect_techcards
 from pdfgraph.store import Store
+from pdfprepare.normalize import normalize_for_search
 
 #: Stage-2 diagnostics: the question→branch→SQL→count chain is logged in
 #: query.search/_by_fts and store.search_pages; here we log the verdict.
@@ -80,6 +81,12 @@ class Answer:
     #: температура, …): где искал и что нашлось вместо нормы. Строка,
     #: не цитата — в claims, verify и проверку цитат не попадает.
     param_norm_missing: str = ""
+    #: Ф1.29: состояние ответа по вопросу-значению — «full» (лидер
+    #: имеет валидное окно нормы: был первым или поднят в топ),
+    #: «mention» (валидного окна нет ни у кого из топ-10: лидер —
+    #: лист с упоминанием параметра, честная фраза в
+    #: ``param_norm_missing``), «» (вопрос не о параметре или отказ).
+    answer_state: str = ""
 
 
 class Answerer(Protocol):
@@ -443,6 +450,175 @@ def param_norm_verdict(store: Store, question: str, fragments: list) -> str:
             f"не про {wanted_str}")
 
 
+#: Ф1.29: честная фраза статуса «mention» — в ``param_norm_missing``
+#: (строка-статус, не цитата; CLI и веб её уже печатают).
+MENTION_NOTE_TEMPLATE = ("Найден лист с упоминанием {what}, "
+                         "но числовое значение на нём не указано")
+
+
+def _mention_note(question: str, parameter: str) -> str:
+    """Честная фраза «mention»: кого упомянули, значения нет.
+
+    «Что» — обозначение техники из исходного вопроса (первый токен
+    с цифрой, исходный регистр), иначе имя параметра; без конкретики
+    — «узла».
+    """
+    designator = next(iter(re.findall(
+        r"[A-Za-zА-Яа-яЁё0-9-]*\d[A-Za-zА-Яа-яЁё0-9-]*", question)), "")
+    what = designator or parameter or "узла"
+    return MENTION_NOTE_TEMPLATE.format(what=what)
+
+
+def _value_leader_state(store: Store, question: str,
+                        fragments: list[Fragment],
+                        ) -> tuple[list[Fragment], str, str]:
+    """Ф1.29: лидер ответа — лист со значением, не с упоминанием.
+
+    Гейт — :func:`pdfgraph.norms.is_value_question` (вопрос-значение
+    с параметром из словаря норм; «высота», «износ», «толщина»,
+    «натяг» там есть, в отличие от словаря Ф2.10 — поэтому не
+    ``_param_question``). Два уровня проверки окна по
+    нормализованному очищенному тексту (та же нормализация, что в
+    :func:`pdfgraph.norms.norm_candidates`):
+
+    - ПОЛНОЕ окно нормы — :func:`pdfgraph.norms._valid_windows`:
+      объект вопроса в окне, число с единицей, нормативная
+      конструкция, нет процедурного маркера. Достаточно для
+      состояния ``"full"``.
+    - ОКНО ЗНАЧЕНИЯ — то же без нормативной конструкции и без
+      отсечения процедурных маркеров: параметр рядом с объектом и
+      числом с единицей. Норма часто записана без «не менее»
+      («давление 155 кгс/см²» в шапке таблицы) — это значение, а не
+      упоминание; «mention» ставится только когда числа с единицей
+      у параметра нет ни у одного листа топ-10 (как на л.141:
+      «при измерении — +», числа нет).
+
+    Объектные основы вопроса обязаны быть в окне — окно «про другой
+    объект» отсекается; дизайнаторы техники в окне не требуются (на
+    листе с нормой их как раз нет — это суть подстановки Ф1.32).
+
+    Возвращает (фрагменты, состояние, фраза-статус): у лидера полное
+    окно или окно значения → список прежний и ``"full"``; у кого-то
+    из позиций 2–10 окно (сначала ищется полное, потом значение) →
+    он поднимается на первое место (остальные — в прежнем порядке)
+    и ``"full"``; окон нет ни у кого → список прежний, ``"mention"``
+    и честная фраза :func:`_mention_note`. Не вопрос-значение или
+    пустая выдача → (список, ``""``, ``""``) — поведение прежнее.
+    Поиск, гейты, verify и веса слияния не затрагиваются:
+    перестановка происходит ПОСЛЕ гейтов отказа/уточнения и отсечения
+    по ``min_score``.
+    """
+    from pdfgraph.norms import (_NUMBER_BEFORE, _PARAMETERS, _stem,
+                                _unit_regex, _valid_windows,
+                                WINDOW_BACK, WINDOW_FORWARD,
+                                WINDOW_OBJECT_EXT)
+    from pdfgraph.norms import is_value_question
+    from pdfgraph.textclean import clean_search_text
+
+    # Ф1.32-связка: если подстановка алиаса сработала, объектные основы
+    # берутся из РАСШИРЕННОГО вопроса — расшифровка («электродвигатель
+    # вентилятора…») отличает лист со значением по этому узлу от листа
+    # со значением по другому объекту с тем же параметром (живой
+    # случай: щётки генераторов л.568 против щёток электродвигателя
+    # л.64 при вопросе про МВ-1200). Без подстановки — исходный вопрос.
+    from pdfgraph.terms import effective_terms_enabled, expand_question
+    expanded = ""
+    if effective_terms_enabled():
+        expanded = expand_question(question) or ""
+    target = expanded or question
+    ok, parameter, objects = is_value_question(target)
+    if not ok or not fragments:
+        return fragments, "", ""
+    parameter_stem = _PARAMETERS.get(parameter, "")
+    if not parameter_stem:
+        # Параметра из словаря норм в вопросе нет: правило «лидер —
+        # лист со значением» не применяется (иначе «какой»-маркер
+        # без параметра даёт ложные перестановки на процедурах и
+        # «какой элемент»-вопросах — подтверждено аудитом Ф1.29).
+        return fragments, "", ""
+    object_stems = [
+        (_stem(normalize_for_search(word))
+         if not word.isdigit() and "-" not in word else word)
+        for word in objects
+    ]
+    anchor = parameter_stem
+    unit_re = re.compile(_NUMBER_BEFORE
+                         + "(" + _unit_regex(parameter_stem) + ")")
+    # Стемы расшифровки (Ф1.29 + Ф1.32): слова расширенного вопроса,
+    # которых нет в исходном («электродвигатель», «вентилятор», …),
+    # обязаны присутствовать на ЛИСТЕ-кандидате. Без этого общий
+    # объектный стем вопроса («щеток») признаёт валидными окна
+    # листов других узлов с тем же параметром (живой случай: щётки
+    # генераторов л.568 и преобразователя ПТ-200Ц л.116 при вопросе
+    # про щётки МВ-1200). На листе с нормой расшифровка может стоять
+    # далеко от окна («Замена щеток электродвигателя…» выше нормы
+    # л.64) — поэтому проверка по всему листу, не по окну.
+    substitute_stems: set[str] = set()
+    if expanded:
+        expanded_tokens = set(normalize_for_search(expanded).split())
+        original_tokens = set(normalize_for_search(question).split())
+        substitute_stems = {
+            (_stem(token) if not token.isdigit() and "-" not in token
+             else token)
+            for token in expanded_tokens - original_tokens
+            if len(token) >= 4
+        }
+
+    def _windows(fragment: Fragment) -> tuple[bool, bool]:
+        """(полное окно нормы, окно значения) на листе фрагмента."""
+        try:
+            text = store.page_text(fragment.document, fragment.page)
+        except (sqlite3.Error, TypeError, ValueError, AttributeError):
+            return False, False
+        if not text:
+            return False, False
+        text_norm = normalize_for_search(clean_search_text(text))
+        if substitute_stems and not any(stem in text_norm
+                                        for stem in substitute_stems):
+            return False, False
+        full = _valid_windows(text_norm, anchor, object_stems,
+                              parameter_stem) > 0
+        if full:
+            return True, True
+        # Окно значения: параметр + объект + число с единицей,
+        # без требования нормативной конструкции (см. докстринг).
+        for match in re.finditer(re.escape(anchor), text_norm):
+            start = max(0, match.start() - WINDOW_BACK)
+            end = match.end() + WINDOW_FORWARD
+            window_ext = text_norm[start:end + WINDOW_OBJECT_EXT]
+            if object_stems and not any(stem in window_ext
+                                        for stem in object_stems):
+                continue
+            if not unit_re.search(text_norm[start:end]):
+                continue
+            return False, True
+        return False, False
+
+    def _first_with(index: int, position: int) -> int | None:
+        """Позиция первого фрагмента с ``windows[position]`` истинным."""
+        for offset, fragment in enumerate(fragments[index:10], start=index):
+            full, value = _windows(fragment)
+            if (full, value)[position]:
+                return offset
+        return None
+
+    # Лидер: полное окно или хотя бы окно значения → "full" без
+    # перестановки.
+    leader_full, leader_value = _windows(fragments[0])
+    if leader_full or leader_value:
+        return fragments, "full", ""
+    # Перестановка: сначала полный лист нормы, затем лист значения.
+    candidate = _first_with(1, 0)
+    if candidate is None:
+        candidate = _first_with(1, 1)
+    if candidate is not None:
+        picked = fragments[candidate]
+        reordered = ([picked]
+                     + [f for f in fragments if f is not picked])
+        return reordered, "full", ""
+    return fragments, "mention", _mention_note(question, parameter)
+
+
 def _build_answer_core(
     store: Store,
     question: str,
@@ -617,6 +793,14 @@ def _build_answer_core(
             reason="нет подтверждений в документах",
         )
 
+    # Ф1.29: лидер ответа — лист со значением, не с упоминанием.
+    # ПОСЛЕ гейтов отказа/уточнения и min_score: refusal/clarify метрики
+    # не меняются; best_score — max по списку, от порядка не зависит;
+    # claims строятся ПОСЛЕ перестановки, Claim.evidence корректен.
+    fragments, answer_state, mention_note = _value_leader_state(
+        store, question, fragments)
+    logger.debug("question=%r -> answer_state=%s", question, answer_state)
+
     if synthesis_enabled:
         from pdfgraph.rag_fusion import synthesize_answer
         synthesis = synthesize_answer(
@@ -666,7 +850,11 @@ def _build_answer_core(
             question=question,
             claims=claims,
             fragments=fragments,
+            answer_state=answer_state,
         )
+        # Ф1.29: честная фраза «mention» — строкой-статусом, не цитатой.
+        if mention_note:
+            synthesized.param_norm_missing = mention_note
         # Verify the source snippets before displaying the LLM prose. The GUI
         # rechecks the same evidence before rendering its verified stamp.
         from pdfgraph.verify import verify_citations
@@ -684,6 +872,11 @@ def _build_answer_core(
 
     selected_answerer = answerer if answerer is not None else ExtractiveAnswerer()
     answer = selected_answerer.answer(question, fragments)
+    answer.answer_state = answer_state
+    # Ф1.29: честная фраза «mention» — строкой-статусом, не цитатой
+    # (CLI и веб печатают param_norm_missing уже существующим путём).
+    if mention_note:
+        answer.param_norm_missing = mention_note
     logger.debug("question=%r -> answer with %d claims",
                  question, len(answer.claims))
     return answer
