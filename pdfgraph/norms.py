@@ -92,6 +92,45 @@ _UNITS: dict[str, str] = {
 #: Общие единицы — для вопросов без параметра из словаря.
 _COMMON_UNITS = r"\bмм\b|\bсм\b|\bм\b|\bкг\b|\bг\b|\bл\b|\bч\b|\bс\b|\bмин\b"
 
+#: Классы параметров (карточка Ф1.34): инженер и книга говорят об одном
+#: и том же разными словами — «размер щётки» против «высота щеток».
+#: Параметры, не попавшие в классы («время», «ресурс», «напряжение»),
+#: ищутся только по точному якорю (прежнее поведение).
+_PARAM_CLASSES: dict[str, list[str]] = {
+    "geometry": ["высот", "размер", "толщин", "диаметр", "длин", "сечен",
+                 "величин", "износ", "зазор", "люфт"],
+    "pressure": ["давлен", "напор", "разрежен"],
+    "temperature": ["температур", "нагрев", "перегрев"],
+    "torque": ["момент", "затяжк"],
+    "flow": ["расход", "утечк"],
+    "frequency": ["частот", "оборот"],
+}
+
+
+def param_class(parameter: str) -> str | None:
+    """Класс параметра по имени из :data:`_PARAMETERS`.
+
+    «высота» → ``geometry``, «давление» → ``pressure``; параметра нет
+    в словаре или он без класса («время», «ресурс», «напряжение») →
+    ``None`` (поиск только по точному якорю).
+    """
+    stem = _PARAMETERS.get(parameter)
+    if not stem:
+        return None
+    return next((name for name, stems in _PARAM_CLASSES.items()
+                 if stem in stems), None)
+
+
+def _class_stems(parameter_stem: str) -> list[str]:
+    """Стемы класса параметра в порядке словаря; без класса — ``[]``.
+
+    Используется как fallback :func:`_valid_windows` и лидера Ф1.29:
+    якоря параметра вопроса на листе нет → окно ищется по любому стему
+    того же класса (единицы класса уже согласованы в :data:`_UNITS`).
+    """
+    return next((list(stems) for stems in _PARAM_CLASSES.values()
+                 if parameter_stem in stems), [])
+
 #: Маркеры значения (проверка по префиксу стема токена вопроса).
 _VALUE_MARKER_STEMS = ("как", "каков", "скольк", "минимал", "максимал",
                        "предел")
@@ -209,6 +248,15 @@ def _valid_windows(text_norm: str, anchor_stem: str,
 
     Каждое вхождение даёт окно [pos-40, pos+200] (объект проверяется
     в окне, расширенном на +40 вперёд — «или рядом»).
+
+    Ф1.34: если вхождений якоря на листе НЕТ вовсе — окно ищется по
+    любому стему того же класса (:func:`_class_stems`): «размер щётки»
+    находит «высота щеток равна 13,5 мм». Единицы проверяются по
+    параметру вопроса — классы согласованы в :data:`_UNITS`, чужой
+    класс отсекается единицей. Якорь есть, но валидных окон нет —
+    fallback НЕ делается (решение владельца Ф1.34: подстановка другого
+    параметра может найти его число — ложный ответ хуже отказа,
+    случай e35).
     """
     if not anchor_stem:
         return 0
@@ -216,28 +264,43 @@ def _valid_windows(text_norm: str, anchor_stem: str,
                          + ")")
     procedural_spans = [(match.start(), match.end())
                         for match in _PROC_WINDOW_RE.finditer(text_norm)]
-    valid = 0
-    for match in re.finditer(re.escape(anchor_stem), text_norm):
-        start = max(0, match.start() - WINDOW_BACK)
-        end = match.end() + WINDOW_FORWARD
-        window = text_norm[start:end]
-        window_ext = text_norm[start:end + WINDOW_OBJECT_EXT]
-        # (а) объект в окне или рядом
-        if object_stems and not any(stem in window_ext
-                                    for stem in object_stems):
-            continue
-        # (б) число с совместимой единицей
-        if not unit_re.search(window):
-            continue
-        # (в) нормативная конструкция
-        if not _NORM_RE.search(window):
-            continue
-        # (г) процедурный маркер ВНУТРИ окна — окно отбрасывается;
-        # маркер в другом месте страницы не мешает
-        if any(p_start < end and p_end > start
-               for p_start, p_end in procedural_spans):
-            continue
-        valid += 1
+
+    def _count(stem: str) -> int:
+        """Валидные окна вокруг вхождений одного стема."""
+        valid = 0
+        for match in re.finditer(re.escape(stem), text_norm):
+            start = max(0, match.start() - WINDOW_BACK)
+            end = match.end() + WINDOW_FORWARD
+            window = text_norm[start:end]
+            window_ext = text_norm[start:end + WINDOW_OBJECT_EXT]
+            # (а) объект в окне или рядом
+            if object_stems and not any(st in window_ext
+                                        for st in object_stems):
+                continue
+            # (б) число с совместимой единицей
+            if not unit_re.search(window):
+                continue
+            # (в) нормативная конструкция
+            if not _NORM_RE.search(window):
+                continue
+            # (г) процедурный маркер ВНУТРИ окна — окно отбрасывается;
+            # маркер в другом месте страницы не мешает
+            if any(p_start < end and p_end > start
+                   for p_start, p_end in procedural_spans):
+                continue
+            valid += 1
+        return valid
+
+    valid = _count(anchor_stem)
+    if valid == 0 and not any(re.finditer(re.escape(anchor_stem),
+                                          text_norm)):
+        # Ф1.34: якоря на листе нет — fallback по классу параметра.
+        for stem in _class_stems(parameter_stem):
+            if stem == anchor_stem:
+                continue
+            valid = _count(stem)
+            if valid:
+                break
     return valid
 
 
