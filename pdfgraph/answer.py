@@ -477,39 +477,40 @@ def _value_leader_state(store: Store, question: str,
     Гейт — :func:`pdfgraph.norms.is_value_question` (вопрос-значение
     с параметром из словаря норм; «высота», «износ», «толщина»,
     «натяг» там есть, в отличие от словаря Ф2.10 — поэтому не
-    ``_param_question``). Два уровня проверки окна по
-    нормализованному очищенному тексту (та же нормализация, что в
-    :func:`pdfgraph.norms.norm_candidates`):
+    ``_param_question``). Значение на листе — два уровня (решение
+    владельца Ф1.29 от 2026-11-10: свободное «окно значения» убрано —
+    на e35 оно признавало значением 1,25 кгс/см² противодавления на
+    листе про температуру масла, ложный ответ хуже отказа):
 
     - ПОЛНОЕ окно нормы — :func:`pdfgraph.norms._valid_windows`:
       объект вопроса в окне, число с единицей, нормативная
-      конструкция, нет процедурного маркера. Достаточно для
-      состояния ``"full"``.
-    - ОКНО ЗНАЧЕНИЯ — то же без нормативной конструкции и без
-      отсечения процедурных маркеров: параметр рядом с объектом и
-      числом с единицей. Норма часто записана без «не менее»
-      («давление 155 кгс/см²» в шапке таблицы) — это значение, а не
-      упоминание; «mention» ставится только когда числа с единицей
-      у параметра нет ни у одного листа топ-10 (как на л.141:
-      «при измерении — +», числа нет).
+      конструкция, нет процедурного маркера.
+    - ТАБЛИЧНАЯ НОРМА — только если полного окна нет: в ОДНОЙ строке
+      исходного текста (строки таблицы, :func:`str.splitlines`)
+      стоят название параметра (с границей слова — «противодавления»
+      не считается «давлением»), число с единицей и объектные основы
+      вопроса; строка короткая (≤ :data:`TABULAR_LINE_MAX`) и без
+      процедурных маркеров. Случай «давление 155 кгс/см²» в шапке
+      таблицы без словесной конструкции.
 
-    Объектные основы вопроса обязаны быть в окне — окно «про другой
-    объект» отсекается; дизайнаторы техники в окне не требуются (на
-    листе с нормой их как раз нет — это суть подстановки Ф1.32).
+    Объектные основы вопроса обязаны быть в окне/строке — окно «про
+    другой объект» отсекается; дизайнаторы техники в окне не
+    требуются (на листе с нормой их как раз нет — это суть
+    подстановки Ф1.32).
 
     Возвращает (фрагменты, состояние, фраза-статус): у лидера полное
-    окно или окно значения → список прежний и ``"full"``; у кого-то
-    из позиций 2–10 окно (сначала ищется полное, потом значение) →
-    он поднимается на первое место (остальные — в прежнем порядке)
-    и ``"full"``; окон нет ни у кого → список прежний, ``"mention"``
-    и честная фраза :func:`_mention_note`. Не вопрос-значение или
-    пустая выдача → (список, ``""``, ``""``) — поведение прежнее.
-    Поиск, гейты, verify и веса слияния не затрагиваются:
-    перестановка происходит ПОСЛЕ гейтов отказа/уточнения и отсечения
-    по ``min_score``.
+    окно или табличная норма → список прежний и ``"full"``; у кого-то
+    из позиций 2–10 (сначала ищется полное окно, потом табличная
+    норма) → он поднимается на первое место (остальные — в прежнем
+    порядке) и ``"full"``; значения нет ни у кого → список прежний,
+    ``"mention"`` и честная фраза :func:`_mention_note`. Не
+    вопрос-значение или пустая выдача → (список, ``""``, ``""``) —
+    поведение прежнее. Поиск, гейты, verify и веса слияния не
+    затрагиваются: перестановка происходит ПОСЛЕ гейтов
+    отказа/уточнения и отсечения по ``min_score``.
     """
-    from pdfgraph.norms import (_NUMBER_BEFORE, _PARAMETERS, _stem,
-                                _unit_regex, _valid_windows,
+    from pdfgraph.norms import (_NUMBER_BEFORE, _PARAMETERS, _PROC_WINDOW_RE,
+                                _stem, _unit_regex, _valid_windows,
                                 WINDOW_BACK, WINDOW_FORWARD,
                                 WINDOW_OBJECT_EXT)
     from pdfgraph.norms import is_value_question
@@ -542,8 +543,23 @@ def _value_leader_state(store: Store, question: str,
         for word in objects
     ]
     anchor = parameter_stem
-    unit_re = re.compile(_NUMBER_BEFORE
-                         + "(" + _unit_regex(parameter_stem) + ")")
+    #: Латинские двойники в символьных классах единиц: OCR часто даёт
+    #: «+160 °c» с латинской c (0x63), а словарь единиц norms.py знает
+    #: только кириллическую «с» — живые случаи p17 (л.38 ТВ3-117) и
+    #: p19 (л.40 SafirPG), нормы температуры без единицы не находились
+    #: вовсе. Классы вида «[сс]» расширяются до «[ссcc]»; диапазоны
+    #: («[а-яё]») и символы («[2²?]») не трогаются. norms.py не
+    #: правится (карточка Ф1.29).
+    _LATIN_DUPES = str.maketrans("саеорхувкмнт", "caeorpybkmht")
+
+    def _latinize(match: re.Match) -> str:
+        """Расширить символьный класс единиц латинскими двойниками."""
+        return "[" + match.group(1) + match.group(1).translate(_LATIN_DUPES) \
+            + "]"
+
+    unit_src_latin = re.sub(r"\[([а-яё]+)\]", _latinize,
+                            _unit_regex(parameter_stem))
+    unit_re = re.compile(_NUMBER_BEFORE + "(" + unit_src_latin + ")")
     # Стемы расшифровки (Ф1.29 + Ф1.32): слова расширенного вопроса,
     # которых нет в исходном («электродвигатель», «вентилятор», …),
     # обязаны присутствовать на ЛИСТЕ-кандидате. Без этого общий
@@ -564,8 +580,89 @@ def _value_leader_state(store: Store, question: str,
             if len(token) >= 4
         }
 
+    #: Максимальная длина строки, считающейся строкой таблицы
+    #: (карточка Ф1.29: «только в табличном контексте, не в
+    #: произвольном тексте»).
+    TABULAR_LINE_MAX = 120
+    # Название параметра с границей слова: «противодавления» не
+    # считается «давлением» (живой случай e35 — лист 589).
+    param_word_re = re.compile(r"(?:^|[^а-яё])" + re.escape(anchor))
+
+    #: Порог срабатывания сигнализации / граница запуска в строке —
+    #: не рабочая норма (живые случаи: e35 «при снижении в
+    #: маслосистеме избыточного давления до величины 2,5 кгс/см²» —
+    #: л.102 РЭ Д-1263 ч.3; p17 «запуск всу … при температуре масла
+    #: в маслобаке выше минус 40°c» — л.32 SafirPG).
+    _THRESHOLD_RE = re.compile(
+        r"сигнал|срабатыва|снижени|повышени|уменьшени|увеличени|минус")
+
+    def _tabular_norm(text: str) -> bool:
+        """Число с единицей в строке параметра или следующей строке.
+
+        Форматы таблиц: «давление 155 кгс/см²» — параметр и значение
+        в одной строке; «2.3.14. температура масла на выходе…:» +
+        «максимальная на стоянке +160 °c» — значение на СЛЕДУЮЩЕЙ
+        строке. Проверяются обе строки пары (параметр — в первой,
+        объект — в любой, единица — в любой), без процедурных и
+        пороговых маркеров.
+        """
+        lines = [raw.strip().lower() for raw in text.splitlines()]
+        for index, line in enumerate(lines):
+            if not line or len(line) > TABULAR_LINE_MAX:
+                continue
+            if not param_word_re.search(line):
+                continue
+            pair = [line]
+            if index + 1 < len(lines) and lines[index + 1]:
+                pair.append(lines[index + 1])
+            if any(len(part) > TABULAR_LINE_MAX for part in pair):
+                continue
+            joined = " ".join(pair)
+            if not primary_stem or primary_stem not in joined:
+                continue
+            if (_PROC_WINDOW_RE.search(joined)
+                    or _THRESHOLD_RE.search(joined)):
+                continue
+            if unit_re.search(joined):
+                return True
+        return False
+
+    #: Главный объектный стем вопроса (первый): обязателен в окне/строке.
+    #: ANY-семантика по всем объектам признавала значением окно
+    #: процедуры проверки прибора с «двигателем» без «масла» (живой
+    #: случай e35 — л.232 кн.4 «увеличивайте давление в приемниках…»).
+    primary_stem = object_stems[0] if object_stems else ""
+
+    def _has_value(fragment: Fragment) -> bool:
+        """Лидер с числом с единицей у параметра (без конструкции).
+
+        Только для ЛИДЕРА (решение владельца Ф1.29: лидер со значением
+        не трогается), перебор по этому уровню не ведётся — иначе
+        процедуры («увеличивайте давление…») и пороги сигнализации
+        вытесняют эталонных лидеров. Латин-фикс единиц — см. выше.
+        """
+        try:
+            text = store.page_text(fragment.document, fragment.page)
+        except (sqlite3.Error, TypeError, ValueError, AttributeError):
+            return False
+        if not text:
+            return False
+        text_norm = normalize_for_search(clean_search_text(text))
+        if substitute_stems and not any(stem in text_norm
+                                        for stem in substitute_stems):
+            return False
+        for match in re.finditer(re.escape(anchor), text_norm):
+            start = max(0, match.start() - WINDOW_BACK)
+            end = match.end() + WINDOW_FORWARD
+            window_ext = text_norm[start:end + WINDOW_OBJECT_EXT]
+            if not primary_stem or primary_stem not in window_ext:
+                continue
+            if unit_re.search(text_norm[start:end]):
+                return True
+        return False
+
     def _windows(fragment: Fragment) -> tuple[bool, bool]:
-        """(полное окно нормы, окно значения) на листе фрагмента."""
+        """(полное окно нормы, табличная норма) на листе фрагмента."""
         try:
             text = store.page_text(fragment.document, fragment.page)
         except (sqlite3.Error, TypeError, ValueError, AttributeError):
@@ -576,38 +673,27 @@ def _value_leader_state(store: Store, question: str,
         if substitute_stems and not any(stem in text_norm
                                         for stem in substitute_stems):
             return False, False
-        full = _valid_windows(text_norm, anchor, object_stems,
-                              parameter_stem) > 0
-        if full:
+        if _valid_windows(text_norm, anchor,
+                          [primary_stem] if primary_stem else object_stems,
+                          parameter_stem) > 0:
             return True, True
-        # Окно значения: параметр + объект + число с единицей,
-        # без требования нормативной конструкции (см. докстринг).
-        for match in re.finditer(re.escape(anchor), text_norm):
-            start = max(0, match.start() - WINDOW_BACK)
-            end = match.end() + WINDOW_FORWARD
-            window_ext = text_norm[start:end + WINDOW_OBJECT_EXT]
-            if object_stems and not any(stem in window_ext
-                                        for stem in object_stems):
-                continue
-            if not unit_re.search(text_norm[start:end]):
-                continue
-            return False, True
-        return False, False
+        return False, _tabular_norm(text)
 
     def _first_with(index: int, position: int) -> int | None:
         """Позиция первого фрагмента с ``windows[position]`` истинным."""
         for offset, fragment in enumerate(fragments[index:10], start=index):
-            full, value = _windows(fragment)
-            if (full, value)[position]:
+            full, tabular = _windows(fragment)
+            if (full, tabular)[position]:
                 return offset
         return None
 
-    # Лидер: полное окно или хотя бы окно значения → "full" без
-    # перестановки.
-    leader_full, leader_value = _windows(fragments[0])
-    if leader_full or leader_value:
+    # Лидер: полное окно, табличная норма или значение у параметра →
+    # "full" без перестановки (лидер со значением не трогается).
+    leader_full, leader_tabular = _windows(fragments[0])
+    if leader_full or leader_tabular or _has_value(fragments[0]):
         return fragments, "full", ""
-    # Перестановка: сначала полный лист нормы, затем лист значения.
+    # Перестановка: сначала полный лист нормы, затем табличная норма;
+    # по value-уровню перебора нет (см. докстринг _has_value).
     candidate = _first_with(1, 0)
     if candidate is None:
         candidate = _first_with(1, 1)
