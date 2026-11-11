@@ -1,3 +1,4 @@
+import logging
 import os
 
 import pytesseract
@@ -6,6 +7,8 @@ from pytesseract import Output
 
 from pdfprepare.bundle import tesseract_cmd, tessdata_dir
 from pdfprepare.models import Word
+
+logger = logging.getLogger(__name__)
 
 
 def ocr_image(img: Image.Image, lang: str = "rus+eng") -> list[Word]:
@@ -34,6 +37,28 @@ def ocr_image(img: Image.Image, lang: str = "rus+eng") -> list[Word]:
         y1 = y0 + float(data["height"][i])
         words.append(Word(text=text, x0=x0, y0=y0, x1=x1, y1=y1, conf=conf / 100.0))
     return words
+
+
+def detect_orientation(img: Image.Image) -> int:
+    """Determine the clockwise rotation needed to straighten ``img``.
+
+    Uses Tesseract OSD (requires ``osd.traineddata`` in the bundled
+    ``tessdata/``). Returns 0/90/180/270 — the clockwise angle to apply
+    (e.g. with :func:`pdfprepare.preprocess.rotate_expand`) so the text
+    becomes upright. On any OSD failure (missing data, blank page, too
+    few characters) returns 0 — the page is left as is; the failure is
+    logged, not silenced.
+    """
+    pytesseract.pytesseract.tesseract_cmd = tesseract_cmd()
+    os.environ["TESSDATA_PREFIX"] = tessdata_dir()
+
+    try:
+        data = pytesseract.image_to_osd(img, output_type=Output.DICT)
+        rotate = int(data["rotate"])
+    except Exception as exc:  # noqa: BLE001 — OSD fail => page stays as is
+        logger.warning("OSD orientation detection failed: %s", exc)
+        return 0
+    return rotate if rotate in (0, 90, 180, 270) else 0
 
 
 def ocr_available() -> bool:

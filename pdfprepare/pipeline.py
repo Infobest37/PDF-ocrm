@@ -8,10 +8,15 @@ import fitz
 from pdfprepare.codes import extract_codes, system_of
 from pdfprepare.figures import extract_figures
 from pdfprepare.models import DocResult, PageInfo, QualityFlag, Table, Word
-from pdfprepare.ocr import ocr_image
+from pdfprepare.ocr import detect_orientation, ocr_image
 from pdfprepare.output import write_json, write_searchable_pdf
 from pdfprepare.page import has_native_text, is_blank, render
-from pdfprepare.preprocess import invert_deskew, prepare_with_angle
+from pdfprepare.preprocess import (
+    invert_deskew,
+    invert_rotation_deskew,
+    prepare_with_angle,
+    rotate_expand,
+)
 from pdfprepare.quality import flag_pages
 from pdfprepare.refs import extract_references
 from pdfprepare.tables import extract_tables
@@ -150,7 +155,11 @@ def process_file(
                 tables: list[Table] = []
             else:
                 rendered = render(page)
-                prepared, angle = prepare_with_angle(rendered)
+                # Orientation: OSD decides whether the page image must be
+                # rotated (multiples of 90°) before the usual deskew pass.
+                rot = detect_orientation(rendered)
+                oriented = rotate_expand(rendered, rot) if rot else rendered
+                prepared, angle = prepare_with_angle(oriented)
                 words = ocr_image(prepared)
 
                 # Table detection works in *prepared*-image pixels (the
@@ -161,20 +170,42 @@ def process_file(
                 raw_tables = extract_tables(prepared, words, page_index)
 
                 # OCR returns boxes in *prepared*-image pixels. Invert
-                # prepare's transform (deskew rotation, then upscale) to map
-                # them to PDF points: un-rotate about the deskew center, then
+                # prepare's transform to map them to PDF points. With an
+                # orientation fix the chain is un-deskew -> un-upscale ->
+                # un-rotate, ending in *rendered*-image pixels scaled by
+                # page_rect / rendered_image_size; without one it is the
+                # original path: un-rotate about the deskew center, then
                 # scale by page_rect / prepared_image_size (not the rendered
                 # image size, which may differ after upscaling).
-                factor_x = rect.width / prepared.width
-                factor_y = rect.height / prepared.height
+                if rot:
+                    factor_x = rect.width / rendered.width
+                    factor_y = rect.height / rendered.height
+                else:
+                    factor_x = rect.width / prepared.width
+                    factor_y = rect.height / prepared.height
+
+                def _to_rendered(
+                    x0: float, y0: float, x1: float, y1: float
+                ) -> tuple[float, float, float, float]:
+                    """Prepared-image pixel box -> rendered-image pixel box."""
+                    if rot:
+                        return invert_rotation_deskew(
+                            (x0, y0, x1, y1),
+                            angle=angle,
+                            prepared_size=prepared.size,
+                            rot=rot,
+                            oriented_size=oriented.size,
+                            rendered_size=rendered.size,
+                        )
+                    if angle:
+                        return invert_deskew(
+                            x0, y0, x1, y1, angle, prepared.size
+                        )
+                    return x0, y0, x1, y1
+
                 converted = []
                 for w in words:
-                    if angle:
-                        x0, y0, x1, y1 = invert_deskew(
-                            w.x0, w.y0, w.x1, w.y1, angle, prepared.size
-                        )
-                    else:
-                        x0, y0, x1, y1 = w.x0, w.y0, w.x1, w.y1
+                    x0, y0, x1, y1 = _to_rendered(w.x0, w.y0, w.x1, w.y1)
                     converted.append(
                         Word(
                             text=w.text,
@@ -188,11 +219,7 @@ def process_file(
                 words = converted
                 tables = []
                 for t in raw_tables:
-                    x0, y0, x1, y1 = t.bbox
-                    if angle:
-                        x0, y0, x1, y1 = invert_deskew(
-                            x0, y0, x1, y1, angle, prepared.size
-                        )
+                    x0, y0, x1, y1 = _to_rendered(*t.bbox)
                     tables.append(
                         Table(
                             page_index=t.page_index,
