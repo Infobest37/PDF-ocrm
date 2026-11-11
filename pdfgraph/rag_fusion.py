@@ -448,8 +448,8 @@ def fuse_hybrid(lexical: list[Fragment], vector: list[Fragment],
             rankings.append(chunk_search(store, question,
                                          FUSION_CHANNEL_DEPTH))
         # Ф1.24: четвёртый канал — нормы (лист со значением, а не с
-        # описанием; флаг PDFGRAPH_NORMS, по умолчанию выключен). Вес
-        # канала 2.0 — через ranking_weights RRF, не множитель к
+        # описанием; флаг PDFGRAPH_NORMS, по умолчанию включён — Б9).
+        # Вес канала 2.0 — через ranking_weights RRF, не множитель к
         # Fragment.score (скор используется гейтами).
         from pdfgraph.norms import NORMS_WEIGHT, effective_norms_enabled
         if effective_norms_enabled():
@@ -458,7 +458,7 @@ def fuse_hybrid(lexical: list[Fragment], vector: list[Fragment],
                 store, question, FUSION_CHANNEL_DEPTH))
             norms_added = True
         # Ф1.32: пятый канал — подстановка алиасов (обозначение →
-        # расшифровка; флаг PDFGRAPH_TERMS, по умолчанию выключен).
+        # расшифровка; флаг PDFGRAPH_TERMS, по умолчанию включён — Б9).
         # Второй лексический поиск по РАСШИРЕННОМУ вопросу; сам вопрос
         # не переписывается — гейты, verify и humanize работают по
         # оригиналу. Вес канала 0.7 — через ranking_weights RRF.

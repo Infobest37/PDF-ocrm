@@ -18,8 +18,8 @@
 - Вес канала 2.0 — параметр ``ranking_weights`` в :func:`rrf_fuse`
   (default None → все существующие вызовы байт-в-байт), НЕ множитель
   к ``Fragment.score``.
-- Выключатель ``PDFGRAPH_NORMS``: по умолчанию выключен; ``fuse_hybrid``
-  с флагом выкл — порядок байт-в-байт прежний.
+- Выключатель ``PDFGRAPH_NORMS``: по умолчанию включён (решение Б9,
+  11.11.2026); ``fuse_hybrid`` с флагом выкл — порядок байт-в-байт прежний.
 """
 
 from __future__ import annotations
@@ -215,7 +215,7 @@ def test_flag_off_fuse_unchanged(norms_store, monkeypatch):
     import pdfgraph.rag_fusion as rag_fusion
     from pdfgraph.norms import NORMS_ENV
 
-    monkeypatch.delenv(NORMS_ENV, raising=False)
+    monkeypatch.setenv(NORMS_ENV, "0")
     frag_a = _frag(FX_DOC, 50, 0.9)
     frag_b = _frag(FX_DOC, 60, 0.8)
     expected = rag_fusion.rrf_fuse([[frag_a], [frag_b]],

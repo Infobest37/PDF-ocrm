@@ -117,7 +117,7 @@ def test_expand_no_key_returns_none(monkeypatch, terms_file):
 
 
 def test_expand_flag_off_returns_none(monkeypatch, terms_file):
-    monkeypatch.delenv("PDFGRAPH_TERMS", raising=False)
+    monkeypatch.setenv("PDFGRAPH_TERMS", "0")
     from pdfgraph.terms import expand_question
     assert expand_question(Q_MB) is None
 
@@ -146,7 +146,7 @@ def test_expand_broken_toml_warns_and_none(monkeypatch, tmp_path, caplog):
 
 def test_fuse_no_key_zero_diff(monkeypatch, store, terms_file):
     """Вопрос без ключа: флаг вкл — выдача не отличается от флага выкл."""
-    monkeypatch.delenv("PDFGRAPH_TERMS", raising=False)
+    monkeypatch.setenv("PDFGRAPH_TERMS", "0")
     baseline = _run_fuse(store, Q_NO_KEY)
     monkeypatch.setenv("PDFGRAPH_TERMS", "1")
     with_terms = _run_fuse(store, Q_NO_KEY)
@@ -155,7 +155,7 @@ def test_fuse_no_key_zero_diff(monkeypatch, store, terms_file):
 
 def test_fuse_flag_off_byte_identical(monkeypatch, store, terms_file):
     """Флаг выключен: выдача байт-в-байт как без файла алиасов вовсе."""
-    monkeypatch.delenv("PDFGRAPH_TERMS", raising=False)
+    monkeypatch.setenv("PDFGRAPH_TERMS", "0")
     flag_off = _run_fuse(store, Q_MB)
     monkeypatch.setenv("PDFGRAPH_TERMS", "1")
     monkeypatch.setattr(
@@ -203,7 +203,7 @@ def _capture_weights(monkeypatch):
 def test_weights_norms_only_unchanged(monkeypatch, store):
     """Требование владельца Ф1.32: нормы включены, алиасы выключены —
     веса те же, что до правки: [1.0, 1.0, NORMS_WEIGHT]."""
-    monkeypatch.delenv("PDFGRAPH_TERMS", raising=False)
+    monkeypatch.setenv("PDFGRAPH_TERMS", "0")
     monkeypatch.setenv("PDFGRAPH_NORMS", "1")
     captured = _capture_weights(monkeypatch)
     _run_fuse(store, Q_MB)
@@ -213,7 +213,7 @@ def test_weights_norms_only_unchanged(monkeypatch, store):
 def test_weights_with_terms_channel(monkeypatch, store, terms_file):
     """Алиасы включены: канал получает TERMS_WEIGHT = 0.7, веса остальных
     каналов не меняются."""
-    monkeypatch.delenv("PDFGRAPH_NORMS", raising=False)
+    monkeypatch.setenv("PDFGRAPH_NORMS", "0")
     monkeypatch.setenv("PDFGRAPH_TERMS", "1")
     captured = _capture_weights(monkeypatch)
     _run_fuse(store, Q_MB)

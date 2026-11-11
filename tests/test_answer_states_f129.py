@@ -63,9 +63,15 @@ def store_mention_only(tmp_path):
     store.close()
 
 
-def test_answer_built_from_value_page(store_both):
-    """Ответ строится по л.64 со значением, не по упоминанию."""
+def test_answer_built_from_value_page(store_both, monkeypatch):
+    """Ответ строится по л.64 со значением, не по упоминанию.
+
+    Каналы норм/алиасов выключены явно (Б9: по умолчанию они включены);
+    тест проверяет механику Ф1.29 в изоляции от каналов.
+    """
     from pdfgraph.answer import build_answer
+    monkeypatch.setenv("PDFGRAPH_NORMS", "0")
+    monkeypatch.setenv("PDFGRAPH_TERMS", "0")
     answer = build_answer(store_both, Q_MB)
     assert answer.refusal is False
     assert (answer.fragments[0].document, answer.fragments[0].page) == \
