@@ -175,8 +175,36 @@ function renderAnswer(message, payload) {
     }
     return;
   }
-  for (const claim of payload.claims) {
-    message.append(el("p", "answer-text", claim.text));
+  const display = payload.value_display;
+  if (display) {
+    /* Г1: вопрос-значение — пункты норм, источник с двумя нумерациями,
+       дословная цитата свёрнута (<details>, по умолчанию закрыт). */
+    if (display.items && display.items.length) {
+      for (const item of display.items) {
+        message.append(el("p", "answer-text", "• " + item));
+      }
+    } else {
+      message.append(el("p", "answer-text",
+        "Нормы на листе не нашёл. Ближайшие листы — ниже."));
+    }
+    const source = el("p", "answer-source", display.source + " ");
+    if (display.source_url) {
+      const open = el("a", "sheet-link", "→ открыть лист");
+      open.href = display.source_url;
+      open.target = "_blank";
+      source.append(open);
+    }
+    message.append(source);
+    const details = document.createElement("details");
+    details.className = "quote-fold";
+    details.append(el("summary", "quote-toggle",
+      "▸ Показать цитату с листа"));
+    details.append(el("pre", "citation-raw", display.quote));
+    message.append(details);
+  } else {
+    for (const claim of payload.claims) {
+      message.append(el("p", "answer-text", claim.text));
+    }
   }
   for (const citation of payload.citations) {
     message.append(citationNode(citation));

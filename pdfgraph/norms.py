@@ -301,6 +301,61 @@ def norm_candidates(store: Store, question: str, parameter: str,
     return scores[:max(limit, 0)]
 
 
+def norm_window_texts(store: Store, document: str, page: int,
+                      question: str) -> list[str]:
+    """Валидные окна нормы на листе — вырезки для показа (Г1).
+
+    Ровно тот же расчёт, что у канала (``_valid_windows`` по
+    ``normalize_for_search(clean_search_text(text))``: объект в окне,
+    число с единицей, нормативная конструкция, процедурный маркер внутри
+    окна отбрасывает) — те же четыре окна на л.38. Вырезка делается из
+    ОЧИЩЕННОГО текста (``clean_search_text``) — показ не обязан быть
+    дословным, дословность держит свёрнутая цитата (``Claim.text``).
+    Колонтитул («Стр. 9 Нояб 15/18») окном нормы не считается — у него
+    нет единицы и нормативной конструкции.
+    """
+    ok, parameter, object_words = is_value_question(question)
+    if not ok:
+        return []
+    parameter_stem = _PARAMETERS.get(parameter, "")
+    object_stems = [
+        (_stem(normalize_for_search(word))
+         if not word.isdigit() and "-" not in word else word)
+        for word in object_words
+    ]
+    anchor_stem = parameter_stem or (object_stems[0] if object_stems else "")
+    if not anchor_stem:
+        return []
+    text = store.page_text(document, page)
+    if not text:
+        return []
+    cleaned = clean_search_text(text)
+    text_norm = normalize_for_search(cleaned)
+    unit_re = re.compile(_NUMBER_BEFORE + "(" + _unit_regex(parameter_stem)
+                         + ")")
+    procedural_spans = [(match.start(), match.end())
+                        for match in _PROC_WINDOW_RE.finditer(text_norm)]
+    windows: list[str] = []
+    for match in re.finditer(re.escape(anchor_stem), text_norm):
+        start = max(0, match.start() - WINDOW_BACK)
+        end = min(match.end() + WINDOW_FORWARD, len(text_norm))
+        window = text_norm[start:end]
+        window_ext = text_norm[start:min(end + WINDOW_OBJECT_EXT,
+                                          len(text_norm))]
+        if object_stems and not any(stem in window_ext
+                                    for stem in object_stems):
+            continue
+        if not unit_re.search(window):
+            continue
+        if not _NORM_RE.search(window):
+            continue
+        if any(p_start < end and p_end > start
+               for p_start, p_end in procedural_spans):
+            continue
+        windows.append(cleaned[start:end])
+    return windows
+
+
 def norm_search_fragments(store: Store, question: str, limit: int,
                           aircraft_type: str | None = None,
                           ) -> list[Fragment]:

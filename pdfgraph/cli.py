@@ -334,6 +334,11 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
         for option in answer.clarification.get("options", []):
             print(f"  {option.get('id', '?')} — {option.get('label', '')}")
         return
+    display = None
+    if store is not None and not answer.refusal and not answer.techcard:
+        from pdfgraph.humanize import value_display
+
+        display = value_display(store, answer)
     if answer.techcard:
         # Ф2.5: карточный ответ — блок карты без сырых сниппетов; цитаты
         # проверяются дальше (блок «Доказательства»).
@@ -353,6 +358,23 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
                 if getattr(sheet, "part", ""):
                     line += f" ({sheet.part})"
                 print(line)
+    elif display is not None:
+        # Г1: вопрос-значение — короткий показ: пункты норм → источник
+        # (обе нумерации) → свёрнутая цитата. Claim.text дословный и
+        # проверяется ниже в «Доказательствах», показ его не меняет.
+        print("Ответ:")
+        if display["items"]:
+            for item in display["items"]:
+                _safe_print(f"  - {item}")
+        else:
+            from pdfgraph.humanize import no_norm_message
+
+            _safe_print("  " + no_norm_message(
+                getattr(answer, "neighbors", None)))
+        _safe_print(f"  {display['source']}")
+        _safe_print(f"  → открыть лист: {display['source_url']}")
+        _safe_print("  ▸ Показать цитату с листа")
+        _safe_print(f"    {display['quote']}")
     elif answer.claims:
         print("Ответ:")
         # Ф2.3: человеческий абзац (answer_text) — над цитатой; сам
