@@ -420,6 +420,283 @@ def norm_display_items(store: Store, question: str, document: str,
     return deduped
 
 
+# --- Г2: показ объяснительных вопросов --------------------------------------
+
+#: Маркеры объяснительного вопроса (карточка Г2); сопоставление по
+#: нормализованному тексту вопроса.
+_EXPLAIN_QUESTION_RE = re.compile(
+    r"\b(?:для чего|зачем|что делает|что такое|как устроен\w*|назначение)\b")
+#: Служебные слова вопроса, не являющиеся объектом интереса (Г2).
+_EXPLAIN_SERVICE_WORDS = frozenset((
+    "для", "чего", "зачем", "что", "делает", "делают", "такое", "как",
+    "устроен", "устроена", "устроено", "нужен", "нужна", "нужны", "нужно",
+    "назначение", "это", "чем", "отличается", "каким", "образом", "был",
+    "была", "было", "быть", "есть", "зачем-то",
+))
+#: Глаголы назначения (карточка Г2 и дополнение владельца): формы по
+#: основе, вхождение проверяется в нормализованном предложении.
+_PURPOSE_VERB_RE = re.compile(
+    r"\b(?:предназнач\w*|служ(?:ит|ат|ил\w*|ащ\w*)|обеспечива\w*|явля\w*|"
+    r"использу\w*|включа\w*|применя\w*)\b")
+#: Фразы назначения, не сводящиеся к стему глагола («входит/входят
+#: в состав», «выполняет функцию/роль», «относится к»).
+_PURPOSE_PHRASE_RE = re.compile(
+    r"в состав|выполня\w*\s+(?:функци\w*|роль)|относится к")
+#: Процедурные признаки (Г2): императивы/инфинитивы осмотра и замены,
+#: ссылки на позиции таблицы. Такие предложения в показ не идут, даже
+#: если в них есть объект вопроса.
+_PROCEDURE_RE = re.compile(
+    r"\b(?:снимите|снять|отверните|отвернуть|замените|заменить|"
+    r"проверьте|проверить|проверяется|убедитесь|убедиться|установите|"
+    r"установить|осмотрите|осмотреть|отсоедините|отсоединить|"
+    r"подсоедините|подсоединить|свинтите|свинтить|разъедините|"
+    r"разъединить|слейте|слить|заправьте|заправить|включите|включить)\b"
+    r"|\bпоз\.", re.I)
+#: Табличные обломки (Г2): строки с крепёжными словами — в показ не идут.
+_TABLE_ROW_RE = re.compile(
+    r"\b(?:болт|шайб\w*|гайк\w*|винт\w*|заклепк\w*|заклёпк\w*|кольцо|"
+    r"подшипник\w*|крепеж\w*|крепёж\w*)\b", re.I)
+#: Лимиты показа Г2: предложений в пункте и символов на весь показ.
+MAX_EXPLAIN_SENTENCES = 4
+MAX_EXPLAIN_CHARS = 400
+
+
+def is_explain_question(question: str) -> bool:
+    """Объяснительный вопрос? (карточка Г2).
+
+    Маркеры — «для чего», «зачем», «что делает», «что такое», «как
+    устроен», «назначение» — решают сами. Приоритет is_value_question
+    здесь не проверяется: стем «как» в _VALUE_MARKER_STEMS ложнополжи-
+    тельно ловит «как устроен автопилот»; настоящие вопрос-значения
+    («какое давление») маркеров explain не содержат, а порядок диспет-
+    чера показа (value → explain) защищает Г1. Процедурные («как
+    заменить») маркерами не ловятся — это не explain.
+    """
+    return bool(_EXPLAIN_QUESTION_RE.search(
+        normalize_for_search(question)))
+
+
+def _explain_object_terms(question: str) -> list[str]:
+    """Основы объекта вопроса (Г2): обозначения как есть, слова — стемы.
+
+    Служебные слова маркеров и «нужен/назначение» вырезаются: объект
+    интереса — «ИМ-47», «автопилот», не «делает». Не более трёх терминов.
+    """
+    from pdfgraph.norms import _stem
+
+    terms: list[str] = []
+    for token in normalize_for_search(question).split():
+        if token in _EXPLAIN_SERVICE_WORDS or len(token) < 3:
+            continue
+        term = token if (token.isdigit() or "-" in token) else _stem(token)
+        if term not in terms:
+            terms.append(term)
+    return terms[:3]
+
+
+def _is_purpose_sentence(sentence: str) -> bool:
+    """Предложение-назначение: глагол назначения или фраза из списка."""
+    normalized = normalize_for_search(sentence)
+    return bool(_PURPOSE_VERB_RE.search(normalized)
+                or _PURPOSE_PHRASE_RE.search(normalized))
+
+
+def _explain_flow_lines(cleaned: str) -> list[str]:
+    """Строки потока без табличных обломков и перечней (Г2).
+
+    Строки с крепёжными словами («болт», «шайба», «поз.»), процедуры
+    («Снимите…»), перечни и короткие цифровые обломки вырезаются до
+    нарезки на предложения — таблица не склеивается с описанием.
+    """
+    keep: list[str] = []
+    for raw in cleaned.splitlines():
+        line = raw.strip()
+        if not line or len(line) < 12:
+            continue
+        if _DIGITS_ONLY_RE.match(line):
+            continue
+        if _ENUM_RE.match(line) or _PROCEDURE_RE.search(line):
+            continue
+        if _TABLE_ROW_RE.search(line):
+            continue
+        keep.append(line)
+    return keep
+
+
+def explain_display_items(store: Store, question: str, document: str,
+                          page: int) -> tuple[list[str], bool]:
+    """Пункты показа Г2: связки предложений назначения (карточка Г2 п.2).
+
+    Якорь — предложение с глаголом назначения («предназначен», «служит»,
+    «обеспечивает», «является», «входит в состав», «используется для»,
+    «включает», «выполняет функцию/роль», «применяется», «относится к»).
+    Пункт — до 4 идущих подряд содержательных предложения, в которых
+    есть и якорь, и объект вопроса; объект может стоять в соседнем
+    предложении (л.198 РТЭ кн.4: «предназначен» — про РТ-12-6, «ИМ-47» —
+    в следующем предложении той же связки). Процедурные предложения не
+    проходят фильтр даже при объекте вопроса: назначение и процедура на
+    одном листе не конфликтуют — показывается только назначение. Весь
+    показ ≤ 400 символов. Без связки «глагол + объект» — первый
+    содержательный кусок текста (fallback, карточка Г2 п.4). Чистка и
+    нормализация — те же, что в Г1. Возвращает ``(items, purpose_found)``.
+    """
+    text = store.page_text(str(document), int(page))
+    cleaned = display_normalize(clean_display_text(text or ""), question)
+    flow = re.sub(r"\s{2,}", " ",
+                  " ".join(_explain_flow_lines(cleaned))).strip()
+    if not flow:
+        return [], False
+    objects = _explain_object_terms(question)
+    sentences = _sentences(flow)
+
+    def _content(sentence: str) -> bool:
+        return (len(sentence) >= 12 and not _ENUM_RE.match(sentence)
+                and not _PROCEDURE_RE.search(sentence))
+
+    flags = [(
+        _content(sentence.strip()),
+        _is_purpose_sentence(sentence),
+        any(_contains_term(sentence, term) for term in objects),
+    ) for _position, sentence in sentences]
+
+    # Связки подряд идущих содержательных предложений; якорь и объект
+    # обязаны быть в одной связке (разрыв чужим предложением закрывает
+    # пункт, как буфер в norm_display_items).
+    items: list[str] = []
+    total = 0
+    start = 0
+    count = len(sentences)
+    while start < count:
+        if not flags[start][0]:
+            start += 1
+            continue
+        end = start
+        while end + 1 < count and flags[end + 1][0]:
+            end += 1
+        verbs = [k for k in range(start, end + 1) if flags[k][1]]
+        objects_idx = [k for k in range(start, end + 1) if flags[k][2]]
+        if verbs and objects_idx:
+            anchor = verbs[0]
+            nearest = min(objects_idx, key=lambda k: abs(k - anchor))
+            lo = min(anchor, nearest)
+            hi = max(anchor, nearest)
+            # Окно ≤ 4 предложений обязано накрывать якорь и объект.
+            if hi - lo <= MAX_EXPLAIN_SENTENCES - 1:
+                window = [sentences[k][1].strip()
+                          for k in range(lo, min(lo + MAX_EXPLAIN_SENTENCES,
+                                                 end + 1))]
+                candidate = re.sub(r"\s{2,}", " ", " ".join(window)).strip()
+                if len(candidate) > MAX_EXPLAIN_CHARS:
+                    candidate = (candidate[:MAX_EXPLAIN_CHARS - 1]
+                                 .rstrip() + "…")
+                if items and total + len(candidate) > MAX_EXPLAIN_CHARS:
+                    break
+                items.append(candidate)
+                total += len(candidate)
+                if total >= MAX_EXPLAIN_CHARS:
+                    break
+        start = end + 1
+    if items:
+        return items, True
+
+    # Fallback (Г2 п.4): ни одной связки назначения — первый
+    # содержательный кусок, не весь лист.
+    first = next((k for k in range(count)
+                  if flags[k][0]
+                  and len(sentences[k][1].strip()) >= MIN_MEANINGFUL_CHARS),
+                 None)
+    if first is None:
+        return [], False
+    chunk: list[str] = []
+    for index in range(first, min(count, first + MAX_EXPLAIN_SENTENCES)):
+        if not flags[index][0]:
+            break
+        chunk.append(sentences[index][1].strip())
+    item = re.sub(r"\s{2,}", " ", " ".join(chunk)).strip()
+    if not item:
+        return [], False
+    if len(item) > MAX_EXPLAIN_CHARS:
+        item = item[:MAX_EXPLAIN_CHARS - 1].rstrip() + "…"
+    return [item], False
+
+
+def no_description_message(neighbors: list[dict] | None,
+                           limit: int = 3) -> str:
+    """«На этом листе описание не нашёл. Ближайшие листы: …» (Г2 п.5)."""
+    refs = []
+    for item in list(neighbors or [])[:limit]:
+        ref = f"лист {item.get('page', '?')}"
+        if item.get("label"):
+            ref += f" ({item['label']})"
+        refs.append(ref)
+    tail = "; ".join(refs)
+    return ("На этом листе описание не нашёл."
+            + (f" Ближайшие листы: {tail}." if tail else ""))
+
+
+def _claim_quote_for(answer, fragment_index: int) -> str:
+    """Дословный текст цитаты, подтверждающей фрагмент (Claim.evidence)."""
+    for claim in answer.claims:
+        if fragment_index in (claim.evidence or []):
+            return claim.text
+    return ""
+
+
+def explain_display(store: Store, answer) -> dict | None:
+    """Словарь показа Г2 для объяснительных вопросов; None — не explain.
+
+    Ключи как у Г1 (items/source/source_url/quote) плюс ``note``:
+    пометка fallback («Точного описания назначения на листе не нашёл.
+    Вот что там есть:») или честная фраза при пустом листе (Г2 п.5).
+    Лидер приоритетен; если на нём связки назначения нет, слой показа
+    берёт назначение с другого фрагмента топ-5 — с того же листа и его
+    цитатой (ранжирование и поиск не затронуты; цитата того же листа,
+    что пункты показа — честность источника). Claim.text дословный.
+    """
+    from urllib.parse import quote as url_quote
+
+    if answer.refusal or not answer.fragments:
+        return None
+    if not is_explain_question(answer.question):
+        return None
+    chosen: tuple[int, object, list[str]] | None = None
+    leader_items: list[str] = []
+    for index, fragment in enumerate(answer.fragments[:5]):
+        items, purpose_found = explain_display_items(
+            store, answer.question, fragment.document, fragment.page)
+        if purpose_found and items:
+            chosen = (index, fragment, items)
+            break
+        if index == 0:
+            leader_items = items
+    if chosen is not None:
+        index, fragment, items = chosen
+        quote = _claim_quote_for(answer, index)
+        note = ""
+    else:
+        fragment = answer.fragments[0]
+        items = leader_items
+        quote = answer.claims[0].text if answer.claims else ""
+        note = ("Точного описания назначения на листе не нашёл. "
+                "Вот что там есть:") if items else \
+            no_description_message(getattr(answer, "neighbors", []))
+    page_text = store.page_text(str(fragment.document), int(fragment.page))
+    mark = printed_page_mark(page_text)
+    source = (f"Источник: {short_document_name(fragment.document)}, "
+              f"лист {fragment.page}")
+    if mark:
+        source += f" (по книге стр. {mark})"
+    return {
+        "items": items,
+        "note": note,
+        "source": source,
+        "source_url": f"/doc/{url_quote(fragment.document)}"
+                      f"/page/{fragment.page}",
+        "quote": quote,
+        "page_mark": mark,
+    }
+
+
 def value_display(store: Store, answer) -> dict | None:
     """Словарь показа Г1 для вопрос-значений; None — не вопрос-значение.
 

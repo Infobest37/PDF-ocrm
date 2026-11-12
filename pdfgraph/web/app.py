@@ -45,7 +45,8 @@ from pydantic import BaseModel
 
 from pdfgraph.answer import Answer, build_answer
 from pdfgraph.cli import _base_aircraft_type, _evidence_rows
-from pdfgraph.humanize import value_display
+from pdfgraph.humanize import (explain_display, is_explain_question,
+                               value_display)
 from pdfgraph.query import ROLE_LABELS
 from uuid import uuid4
 
@@ -329,10 +330,14 @@ def create_app(store_path: str, pdf_dir: str | None = None,
                 "answer_state": getattr(answer, "answer_state", ""),
                 # Г1: показ вопрос-значений — пункты норм, источник с
                 # двумя нумерациями, дословная цитата для свёрнутого
-                # блока. None — не вопрос-значение (старый рендер).
+                # блока. Г2: ветку показа выбирают explain-маркеры
+                # вопроса (те же ключи + note). None — не тот и не
+                # другой (старый рендер).
                 "value_display": (
                     None if answer.refusal
-                    else value_display(store, answer)),
+                    else (explain_display(store, answer)
+                          if is_explain_question(answer.question)
+                          else value_display(store, answer))),
                 "options": options,
             }
         finally:

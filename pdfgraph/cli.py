@@ -336,9 +336,16 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
         return
     display = None
     if store is not None and not answer.refusal and not answer.techcard:
-        from pdfgraph.humanize import value_display
+        from pdfgraph.humanize import (explain_display, is_explain_question,
+                                       value_display)
 
-        display = value_display(store, answer)
+        # Г2: ветку показа выбирают explain-маркеры вопроса. Стем «как»
+        # в value-маркерах ловит и «как устроен», поэтому порядок
+        # value→explain тут не годится: вопрос-значение («какое
+        # давление») explain-маркеров не содержит.
+        display = (explain_display(store, answer)
+                   if is_explain_question(answer.question)
+                   else value_display(store, answer))
     if answer.techcard:
         # Ф2.5: карточный ответ — блок карты без сырых сниппетов; цитаты
         # проверяются дальше (блок «Доказательства»).
@@ -360,13 +367,17 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
                 print(line)
     elif display is not None:
         # Г1: вопрос-значение — короткий показ: пункты норм → источник
-        # (обе нумерации) → свёрнутая цитата. Claim.text дословный и
-        # проверяется ниже в «Доказательствах», показ его не меняет.
+        # (обе нумерации) → свёрнутая цитата. Г2: объяснительный вопрос —
+        # та же структура; note — пометка fallback или честная фраза.
+        # Claim.text дословный и проверяется ниже в «Доказательствах»,
+        # показ его не меняет.
         print("Ответ:")
+        if display.get("note"):
+            _safe_print(f"  {display['note']}")
         if display["items"]:
             for item in display["items"]:
                 _safe_print(f"  - {item}")
-        else:
+        elif not display.get("note"):
             from pdfgraph.humanize import no_norm_message
 
             _safe_print("  " + no_norm_message(

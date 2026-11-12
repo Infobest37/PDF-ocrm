@@ -178,12 +178,18 @@ function renderAnswer(message, payload) {
   const display = payload.value_display;
   if (display) {
     /* Г1: вопрос-значение — пункты норм, источник с двумя нумерациями,
-       дословная цитата свёрнута (<details>, по умолчанию закрыт). */
+       дословная цитата свёрнута (<details>, по умолчанию закрыт).
+       Г2: объяснительный вопрос — та же структура; note — пометка
+       fallback («Точного описания… Вот что там есть:») или честная
+       фраза «описание не нашёл». */
+    if (display.note) {
+      message.append(el("p", "applicability-warning", display.note));
+    }
     if (display.items && display.items.length) {
       for (const item of display.items) {
         message.append(el("p", "answer-text", "• " + item));
       }
-    } else {
+    } else if (!display.note) {
       message.append(el("p", "answer-text",
         "Нормы на листе не нашёл. Ближайшие листы — ниже."));
     }
