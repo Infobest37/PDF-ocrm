@@ -431,17 +431,30 @@ _EXPLAIN_SERVICE_WORDS = frozenset((
     "для", "чего", "зачем", "что", "делает", "делают", "такое", "как",
     "устроен", "устроена", "устроено", "нужен", "нужна", "нужны", "нужно",
     "назначение", "это", "чем", "отличается", "каким", "образом", "был",
-    "была", "было", "быть", "есть", "зачем-то",
+    "была", "было", "быть", "есть", "зачем-то", "сер", "сер.",
 ))
-#: Глаголы назначения (карточка Г2 и дополнение владельца): формы по
-#: основе, вхождение проверяется в нормализованном предложении.
-_PURPOSE_VERB_RE = re.compile(
-    r"\b(?:предназнач\w*|служ(?:ит|ат|ил\w*|ащ\w*)|обеспечива\w*|явля\w*|"
-    r"использу\w*|включа\w*|применя\w*)\b")
-#: Фразы назначения, не сводящиеся к стему глагола («входит/входят
-#: в состав», «выполняет функцию/роль», «относится к»).
-_PURPOSE_PHRASE_RE = re.compile(
-    r"в состав|выполня\w*\s+(?:функци\w*|роль)|относится к")
+#: Тир-1 (карточка Г2в п.3): высший приоритет — «предназначен».
+#: Формы единственного числа и причастие («предназначенный»);
+#: множественное «предназначены» исключено — в корпусе это признак
+#: перечисления каналов/элементов («6 каналов предназначены…»), не
+#: назначения объекта вопроса (замер Г2в, л.699 РТЭ кн.7).
+_PURPOSE_TIER1_RE = re.compile(r"\bпредназначен(?!ы)", re.I)
+#: Тир-2: глаголы работы агрегата (карточка Г2в п.2) и прежние глаголы
+#: назначения; проверка в нормализованном предложении (normalize_for_
+#: search сводит «ё» к «е» — «выдаёт» ловится основой «выда»).
+_PURPOSE_TIER2_RE = re.compile(
+    r"\b(?:служ(?:ит|ат|ил\w*|ащ\w*)|обеспечива\w*|явля\w*|использу\w*|"
+    r"включа\w*|применя\w*|провод(?:и|я)\w*|выполня\w*|преобразу\w*|"
+    r"регистрир\w*|измеря\w*|выда(?:е|ю|ва)\w*|формир\w*)\b|"
+    r"выполня\w*\s+(?:функци\w*|роль)|относится к")
+#: Тир-3 (fallback, Г2в п.3): описание состава «входит в состав» —
+#: только если тир-1 и тир-2 на листе пусты.
+_PURPOSE_TIER3_RE = re.compile(r"в состав")
+#: Перечисления состава (Г2в п.4): объект вопроса ПОСЛЕ маркера в том
+#: же предложении — это состав, не назначение; такое вхождение объекта
+#: в спаривание с якорем не идёт.
+_COMPOSITION_MARK_RE = re.compile(
+    r"вход(?:ит|ят)|включа(?:ет|ют)|состоит из")
 #: Процедурные признаки (Г2): императивы/инфинитивы осмотра и замены,
 #: ссылки на позиции таблицы. Такие предложения в показ не идут, даже
 #: если в них есть объект вопроса.
@@ -494,11 +507,45 @@ def _explain_object_terms(question: str) -> list[str]:
     return terms[:3]
 
 
-def _is_purpose_sentence(sentence: str) -> bool:
-    """Предложение-назначение: глагол назначения или фраза из списка."""
+def _purpose_tier(sentence: str) -> int:
+    """Тир глагола назначения (карточка Г2в п.3).
+
+    1 — «предназначен» (высший приоритет); 2 — глаголы работы агрегата
+    («проводит», «выполняет», «преобразует», «регистрирует», «измеряет»,
+    «выдаёт», «формирует», «обеспечивает» и прежние «служит», «является»,
+    «используется», «включает», «применяется», «относится к»); 3 — «в
+    состав» (fallback состава); 0 — нет.
+    """
     normalized = normalize_for_search(sentence)
-    return bool(_PURPOSE_VERB_RE.search(normalized)
-                or _PURPOSE_PHRASE_RE.search(normalized))
+    if _PURPOSE_TIER1_RE.search(normalized):
+        return 1
+    if _PURPOSE_TIER2_RE.search(normalized):
+        return 2
+    if _PURPOSE_TIER3_RE.search(normalized):
+        return 3
+    return 0
+
+
+def _object_in_composition(sentence: str, terms: list[str]) -> bool:
+    """Объект вопроса стоит в перечислении состава (Г2в п.4).
+
+    True — все вхождения объекта в предложении стоят ПОСЛЕ маркера
+    состава («входят», «включают», «состоит из»): это состав, спаривать
+    с якорем такое вхождение нельзя. Вхождение объекта ПЕРЕД маркером
+    («Блок БВК-777 включает в себя усилитель») — подлежащее, остаётся
+    валидным. Объекта в предложении нет — False.
+    """
+    normalized = normalize_for_search(sentence)
+    for term in terms:
+        positions = [match.start()
+                     for match in re.finditer(re.escape(term), normalized)]
+        if not positions:
+            continue
+        for position in positions:
+            if _COMPOSITION_MARK_RE.search(normalized, 0, position) is None:
+                return False
+        return True
+    return False
 
 
 def _explain_flow_lines(cleaned: str) -> list[str]:
@@ -524,21 +571,28 @@ def _explain_flow_lines(cleaned: str) -> list[str]:
 
 
 def explain_display_items(store: Store, question: str, document: str,
-                          page: int) -> tuple[list[str], bool]:
-    """Пункты показа Г2: связки предложений назначения (карточка Г2 п.2).
+                          page: int,
+                          tier: int | None = None
+                          ) -> tuple[list[str], bool]:
+    """Пункты показа Г2: связки предложений назначения (Г2 п.2, Г2в).
 
-    Якорь — предложение с глаголом назначения («предназначен», «служит»,
-    «обеспечивает», «является», «входит в состав», «используется для»,
-    «включает», «выполняет функцию/роль», «применяется», «относится к»).
-    Пункт — до 4 идущих подряд содержательных предложения, в которых
-    есть и якорь, и объект вопроса; объект может стоять в соседнем
-    предложении (л.198 РТЭ кн.4: «предназначен» — про РТ-12-6, «ИМ-47» —
-    в следующем предложении той же связки). Процедурные предложения не
-    проходят фильтр даже при объекте вопроса: назначение и процедура на
-    одном листе не конфликтуют — показывается только назначение. Весь
-    показ ≤ 400 символов. Без связки «глагол + объект» — первый
-    содержательный кусок текста (fallback, карточка Г2 п.4). Чистка и
-    нормализация — те же, что в Г1. Возвращает ``(items, purpose_found)``.
+    Якорь — предложение с глаголом назначения; тиры по приоритету
+    (карточка Г2в п.3): 1 — «предназначен», 2 — глаголы работы агрегата
+    («проводит», «выполняет», «преобразует», «регистрирует», «измеряет»,
+    «выдаёт», «формирует», «обеспечивает», «служит», «является»,
+    «используется», «включает», «применяется», «относится к»), 3 — «в
+    состав» (fallback состава). Пункт — до 4 идущих подряд содержатель-
+    ных предложения НАЧИНАЯ С ЯКОРЯ: якорь всегда первое предложение
+    пункта («предназначен показывать первым»), объект вопроса — в якоре
+    или в следующих до 3 предложениях (л.198 РТЭ кн.4: «предназначен» —
+    про РТ-12-6, «ИМ-47» — в следующем предложении той же связки).
+    Вхождение объекта в перечислении состава («входят», «включают»,
+    «состоит из» — Г2в п.4) в спаривание не идёт: это состав, не
+    назначение. Процедурные предложения не проходят фильтр даже при
+    объекте вопроса. Весь показ ≤ 400 символов. Без связки «глагол +
+    объект» ни в одном тире — первый содержательный кусок текста
+    (fallback, карточка Г2 п.4). Чистка и нормализация — те же, что в
+    Г1. Возвращает ``(items, purpose_found)``.
     """
     text = store.page_text(str(document), int(page))
     cleaned = display_normalize(clean_display_text(text or ""), question)
@@ -555,17 +609,16 @@ def explain_display_items(store: Store, question: str, document: str,
 
     flags = [(
         _content(sentence.strip()),
-        _is_purpose_sentence(sentence),
+        _purpose_tier(sentence),
         any(_contains_term(sentence, term) for term in objects),
+        _object_in_composition(sentence, objects),
     ) for _position, sentence in sentences]
 
-    # Связки подряд идущих содержательных предложений; якорь и объект
-    # обязаны быть в одной связке (разрыв чужим предложением закрывает
-    # пункт, как буфер в norm_display_items).
-    items: list[str] = []
-    total = 0
-    start = 0
     count = len(sentences)
+    # Связки подряд идущих содержательных предложений (разрыв чужим
+    # предложением закрывает связку, как буфер в norm_display_items).
+    blocks: list[tuple[int, int]] = []
+    start = 0
     while start < count:
         if not flags[start][0]:
             start += 1
@@ -573,31 +626,57 @@ def explain_display_items(store: Store, question: str, document: str,
         end = start
         while end + 1 < count and flags[end + 1][0]:
             end += 1
-        verbs = [k for k in range(start, end + 1) if flags[k][1]]
-        objects_idx = [k for k in range(start, end + 1) if flags[k][2]]
-        if verbs and objects_idx:
-            anchor = verbs[0]
+        blocks.append((start, end))
+        start = end + 1
+
+    def _select_by_tier(tier: int) -> list[str]:
+        selected: list[str] = []
+        total = 0
+        for block_start, block_end in blocks:
+            anchors = [k for k in range(block_start, block_end + 1)
+                       if flags[k][1] == tier]
+            if not anchors:
+                continue
+            anchor = anchors[0]
+            # Валидность вхождения объекта зависит от расстояния до
+            # якоря (Г2в п.4): в самом якоре — только вне перечисления
+            # состава; в предложении СРАЗУ ПЕРЕД якорем — можно даже из
+            # перечисления (антецедент: «В состав БУР входят… БСПИ-4-2
+            # сер. 2. / 2, проводит преобразование…» — состав назван, а
+            # описание его работы идёт следом); в следующих предложе-
+            # ниях — только вне перечисления.
+            objects_idx = [
+                k for k in range(block_start, block_end + 1) if flags[k][2]
+                and ((k == anchor and not flags[k][3])
+                     or (k == anchor - 1)
+                     or (k != anchor and k != anchor - 1
+                         and not flags[k][3]))]
+            if not objects_idx:
+                continue
             nearest = min(objects_idx, key=lambda k: abs(k - anchor))
-            lo = min(anchor, nearest)
-            hi = max(anchor, nearest)
-            # Окно ≤ 4 предложений обязано накрывать якорь и объект.
-            if hi - lo <= MAX_EXPLAIN_SENTENCES - 1:
+            # Окно строится ВПЕРЁД от якоря: якорь — первое предложение
+            # пункта, объект — в якоре, антецеденте или далее (≤ 4).
+            if abs(nearest - anchor) <= MAX_EXPLAIN_SENTENCES - 1:
                 window = [sentences[k][1].strip()
-                          for k in range(lo, min(lo + MAX_EXPLAIN_SENTENCES,
-                                                 end + 1))]
+                          for k in range(anchor,
+                                         min(anchor + MAX_EXPLAIN_SENTENCES,
+                                             block_end + 1))]
                 candidate = re.sub(r"\s{2,}", " ", " ".join(window)).strip()
                 if len(candidate) > MAX_EXPLAIN_CHARS:
                     candidate = (candidate[:MAX_EXPLAIN_CHARS - 1]
                                  .rstrip() + "…")
-                if items and total + len(candidate) > MAX_EXPLAIN_CHARS:
+                if selected and total + len(candidate) > MAX_EXPLAIN_CHARS:
                     break
-                items.append(candidate)
+                selected.append(candidate)
                 total += len(candidate)
                 if total >= MAX_EXPLAIN_CHARS:
                     break
-        start = end + 1
-    if items:
-        return items, True
+        return selected
+
+    for select_tier in ((tier,) if tier is not None else (1, 2, 3)):
+        items = _select_by_tier(select_tier)
+        if items:
+            return items, True
 
     # Fallback (Г2 п.4): ни одной связки назначения — первый
     # содержательный кусок, не весь лист.
@@ -659,23 +738,28 @@ def explain_display(store: Store, answer) -> dict | None:
         return None
     if not is_explain_question(answer.question):
         return None
+    # Сквозной приоритет тира поверх порядка фрагментов (Г2в п.3):
+    # «предназначен» на дальнем фрагменте перебивает «выполняет» на
+    # ближнем техкарте-листе.
     chosen: tuple[int, object, list[str]] | None = None
-    leader_items: list[str] = []
-    for index, fragment in enumerate(answer.fragments[:5]):
-        items, purpose_found = explain_display_items(
-            store, answer.question, fragment.document, fragment.page)
-        if purpose_found and items:
-            chosen = (index, fragment, items)
+    for tier in (1, 2, 3):
+        for index, fragment in enumerate(answer.fragments[:5]):
+            items, purpose_found = explain_display_items(
+                store, answer.question, fragment.document, fragment.page,
+                tier=tier)
+            if purpose_found and items:
+                chosen = (index, fragment, items)
+                break
+        if chosen is not None:
             break
-        if index == 0:
-            leader_items = items
     if chosen is not None:
         index, fragment, items = chosen
         quote = _claim_quote_for(answer, index)
         note = ""
     else:
         fragment = answer.fragments[0]
-        items = leader_items
+        items, _found = explain_display_items(
+            store, answer.question, fragment.document, fragment.page)
         quote = answer.claims[0].text if answer.claims else ""
         note = ("Точного описания назначения на листе не нашёл. "
                 "Вот что там есть:") if items else \

@@ -157,6 +157,78 @@ def test_explain_display_fallback_note():
     assert "лист 198" in display["source"]
 
 
+def test_purpose_tier_priority_prednaznachen_first():
+    """Г2в п.3: «предназначен» — высший приоритет перед «проводит».
+
+    Объект вопроса в обоих предложениях; окно строится вперёд от якоря,
+    поэтому пункт начинается с предложения «предназначен».
+    """
+    from pdfgraph.humanize import explain_display_items
+
+    text = (
+        "Блок БСПИ-4-2 проводит преобразование параметров полета "
+        "в цифровой код. Блок БСПИ-4-2 предназначен для управления "
+        "краном подачи топлива. Блок установлен на двигателе.")
+    items, purpose_found = explain_display_items(
+        _FakeStore(text), "для чего нужен БСПИ-4-2", "РЭ", 10)
+    assert purpose_found
+    joined = " ".join(items)
+    assert "предназначен" in joined
+    assert "проводит" not in joined.lower()
+
+
+def test_purpose_composition_filter():
+    """Г2в п.4: объект в перечислении («входят», «включают», «состоит
+    из») — состав, не назначение; пункт берётся из глагола работы."""
+    from pdfgraph.humanize import explain_display_items
+
+    # Структура л.138 РЭ.РО Д-1263: составное перечисление и якорь
+    # «проводит преобразование» с разрезом «сер. / 2, проводит…».
+    text = (
+        "Б о р т о в о е устройство. В состав бортового устройства "
+        "регистрации входят следующие блоки и устройства: блок сбора "
+        "полетной информации БСПИ-4-2 сер. "
+        "2, проводит преобразование параметров полета, поступающих "
+        "от датчиков в цифровой код с последующей регистрацией его "
+        "в модуле памяти ЗБН-1-3 сер.")
+    items, purpose_found = explain_display_items(
+        _FakeStore(text), "для чего нужен БСПИ-4-2 сер. 2", "РЭ", 138)
+    assert purpose_found
+    joined = " ".join(items).lower()
+    assert "проводит преобразование" in joined
+    assert "в состав бортового устройства регистрации входят" not in joined
+
+
+def test_purpose_composition_only_not_purpose():
+    """Только перечисление состава — связки назначения нет (Г2в п.1)."""
+    from pdfgraph.humanize import explain_display_items
+
+    text = ("В состав бортового устройства регистрации входят "
+            "следующие блоки: блок сбора полетной информации "
+            "БСПИ-4-2 сер. 2 и пульт управления ПУ-25-1.")
+    _items, purpose_found = explain_display_items(
+        _FakeStore(text), "для чего нужен БСПИ-4-2", "РЭ", 138)
+    assert not purpose_found, "«входят…» — состав, а не назначение"
+
+
+def test_purpose_work_verbs():
+    """Г2в п.2: новые глаголы работы агрегата — тир-2."""
+    from pdfgraph.humanize import explain_display_items
+
+    for tail in ("проводит преобразование сигналов в код.",
+                 "измеряет давление масла на входе.",
+                 "формирует сигнал управления.",
+                 "выдает команду на табло.",
+                 "выдаёт команду на табло.",
+                 "регистрирует параметры полета.",
+                 "преобразует сигнал в код.",
+                 "выполняет функции питания датчиков."):
+        text = f"Прибор А-1 {tail}"
+        items, purpose_found = explain_display_items(
+            _FakeStore(text), "что делает А-1", "РЭ", 5)
+        assert purpose_found, tail
+
+
 def test_explain_display_empty_sheet_honest_message():
     from pdfgraph.humanize import explain_display
 
@@ -319,3 +391,67 @@ def test_live_claim_text_verbatim(store_copy_g2):
     assert answer.claims, "цитата должна быть"
     assert claim_text in page_text, "цитата — дословный фрагмент листа"
     assert checks and all(check.ok for check in checks)
+
+
+def test_live_bspi_display_no_composition(store_copy_g2):
+    """«для чего нужен БСПИ-4-2 сер. 2» → л.138/139, «проводит
+    преобразование», состав «в состав… входят…» в показ не идёт."""
+    from pdfgraph.store import Store
+    from pdfgraph.verify import verify_citations
+
+    store = Store(str(store_copy_g2))
+    try:
+        answer = _answer(store, "для чего нужен БСПИ-4-2 сер. 2")
+        display = _g2_display(store, "для чего нужен БСПИ-4-2 сер. 2")
+        checks = verify_citations(answer, store)
+    finally:
+        store.close()
+    assert display is not None
+    assert ("лист 138" in display["source"]
+            or "лист 139" in display["source"]), "лид — л.138/139"
+    assert display["items"], "назначение должно найтись"
+    joined = " ".join(display["items"]).lower()
+    assert len(joined) <= 400
+    assert "проводит преобразование" in joined
+    assert "параметров полет" in joined
+    assert ("в состав бортового устройства регистрации входят"
+            not in joined)
+    assert checks and all(check.ok for check in checks)
+
+
+def test_live_das_display(store_copy_g2):
+    """«для чего нужен ДАС» — «предназначен для измерения приборной
+    скорости» не сломался (Г2в)."""
+    from pdfgraph.store import Store
+    from pdfgraph.verify import verify_citations
+
+    store = Store(str(store_copy_g2))
+    try:
+        display = _g2_display(store, "для чего нужен ДАС")
+        answer = _answer(store, "для чего нужен ДАС")
+        checks = verify_citations(answer, store)
+    finally:
+        store.close()
+    assert display is not None
+    assert display["items"]
+    joined = " ".join(display["items"]).lower()
+    assert len(joined) <= 400
+    assert "предназначен" in joined
+    assert "приборной скорости" in joined
+    assert checks and all(check.ok for check in checks)
+
+
+def test_live_mu615a_display(store_copy_g2):
+    """«для чего нужен МУ-615А» — не сломалось (Г2в)."""
+    from pdfgraph.store import Store
+
+    store = Store(str(store_copy_g2))
+    try:
+        display = _g2_display(store, "для чего нужен МУ-615А")
+    finally:
+        store.close()
+    assert display is not None
+    joined = " ".join(display["items"]).lower()
+    assert len(joined) <= 400
+    if display["items"]:
+        assert "проверьте" not in joined, "процедуры не в показе"
