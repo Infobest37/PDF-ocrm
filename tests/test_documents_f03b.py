@@ -71,7 +71,7 @@ def test_migration_creates_documents_table(tmp_path):
         version = int(store._connection.execute(
             "SELECT value FROM meta WHERE key = 'schema_version'"
         ).fetchone()[0])
-        assert version == SCHEMA_VERSION == 7
+        assert version == SCHEMA_VERSION == 8
     finally:
         store.close()
 

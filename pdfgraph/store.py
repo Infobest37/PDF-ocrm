@@ -19,7 +19,13 @@ logger = logging.getLogger(__name__)
 #: (base/supplement/change) и применимость (scope/serials/source);
 #: аддитивная, существующие таблицы не меняются; заполнение —
 #: pdfgraph/documents.fill_missing, правки — CLI docs-set/docs-unset.
-SCHEMA_VERSION = 7
+#: v7 (карточка Ф1.23а, 05.11.2026): chunks_fts — чанковый FTS-индекс
+#: третьего канала поиска.
+#: v8 (карточка Д1а, 14.11.2026): pages.page_kind — тип листа
+#: (purpose/techcard/contents/table/list/scheme/blank/other);
+#: аддитивная колонка, существующие строки получают ''; заполнение —
+#: tools/mark_page_kind_d1.py, классификатор — pdfgraph/page_kind.py.
+SCHEMA_VERSION = 8
 
 
 @dataclasses.dataclass(frozen=True)
@@ -163,6 +169,8 @@ class Store:
         # Пометки листов 0.2 (миграция 3→4): аддитивные колонки на pages —
         # needs_rescan (повреждённый OCR) и is_service (служебная страница),
         # каждая с причиной и score; вручную и авто управляются методами ниже.
+        # Д1а (миграция 7→8): page_kind — тип листа, заполняется отдельным
+        # проходом tools/mark_page_kind_d1.py, не при build.
         page_columns = {row[1] for row in self._connection.execute(
             "PRAGMA table_info(pages)")}
         for column, decl in (
@@ -172,6 +180,7 @@ class Store:
             ("is_service", "INTEGER NOT NULL DEFAULT 0"),
             ("is_service_reason", "TEXT NOT NULL DEFAULT ''"),
             ("is_service_score", "REAL NOT NULL DEFAULT 0.0"),
+            ("page_kind", "TEXT NOT NULL DEFAULT ''"),
         ):
             if column not in page_columns:
                 self._connection.execute(
@@ -792,6 +801,36 @@ class Store:
                 "WHERE document = ? AND page = ?",
                 (int(bool(value)), document, page),
             )
+
+    def page_kind(self, document: str, page: int) -> str:
+        """Тип листа (Д1а), пустая строка — ещё не размечен."""
+        row = self._connection.execute(
+            "SELECT page_kind FROM pages WHERE document = ? AND page = ?",
+            (document, page),
+        ).fetchone()
+        return str(row[0]) if row is not None else ""
+
+    def set_page_kind(self, document: str, page: int, kind: str) -> None:
+        """Проставить тип листа (Д1а); идемпотентно."""
+        with self._connection:
+            self._connection.execute(
+                "UPDATE pages SET page_kind = ? "
+                "WHERE document = ? AND page = ?",
+                (kind, document, page),
+            )
+
+    def set_page_kinds(self, rows: list[tuple[str, int, str]]) -> int:
+        """Проставить типы листов одной транзакцией (Д1а).
+
+        ``rows`` — ``(document, page, kind)``; возвращает число строк.
+        """
+        with self._connection:
+            self._connection.executemany(
+                "UPDATE pages SET page_kind = ? "
+                "WHERE document = ? AND page = ?",
+                [(kind, document, page) for document, page, kind in rows],
+            )
+        return len(rows)
 
     def sheets_by_code(
         self,
