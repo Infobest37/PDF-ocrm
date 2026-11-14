@@ -12,6 +12,14 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from pdfgraph.page_kind import (
+    PAGE_KIND_FOR_INTENT,
+    classify_page,
+    page_kind_absent_phrase,
+    page_kind_label,
+    page_kind_refusal_label,
+    question_intent,
+)
 from pdfgraph.query import (
     SNIPPET_CHARS,
     Fragment,
@@ -87,6 +95,10 @@ class Answer:
     #: лист с упоминанием параметра, честная фраза в
     #: ``param_norm_missing``), «» (вопрос не о параметре или отказ).
     answer_state: str = ""
+    #: Д1б: честная пометка «Описания назначения не нашёл. Ближайшее — …»
+    #: когда лидер ответа — каталог/титул/содержание. Строка-статус, не
+    #: цитата; ответ при этом выдаётся, отказом не является.
+    page_kind_missing: str = ""
 
 
 class Answerer(Protocol):
@@ -467,6 +479,362 @@ def _mention_note(question: str, parameter: str) -> str:
         r"[A-Za-zА-Яа-яЁё0-9-]*\d[A-Za-zА-Яа-яЁё0-9-]*", question)), "")
     what = designator or parameter or "узла"
     return MENTION_NOTE_TEMPLATE.format(what=what)
+
+
+# --- Д1б: интент вопроса ↔ тип листа ---------------------------------------
+
+#: Вопрос уточнения для неполного вопроса (типы листов вместо темы).
+PAGE_KIND_CLARIFY_QUESTION = "Уточните, что именно нужно найти:"
+#: Последний вариант уточнения — отказ от предложенных типов.
+PAGE_KIND_CLARIFY_NONE = "▸ Ни один не подходит — уточнить вопрос"
+#: Служебные типы в уточнении не предлагаются.
+PAGE_KIND_CLARIFY_SKIP = ("", "blank", "service", "other")
+#: Сколько разных типов листов показывать в уточнении (3–5).
+PAGE_KIND_CLARIFY_MIN = 3
+PAGE_KIND_CLARIFY_MAX = 5
+#: Сколько верхних фрагментов рассматривает вердикт типа листа.
+PAGE_KIND_TOP_FRAGMENTS = 10
+#: Типы, которые не могут быть лидером ответа о назначении (Д1б).
+PAGE_KIND_FORBIDDEN_LEADER = ("catalog", "title", "contents")
+
+
+@dataclass
+class PageKindOutcome:
+    """Итог вердикта «интент ↔ тип листа» (Д1б).
+
+    ``decision`` — ``"ok"`` (ответ не меняется), ``"promote"`` (нужный
+    тип найден в топ-10, лист поднят), ``"refuse"`` (нужного типа нет)
+    или ``"clarify"`` (неполный вопрос). ``fragments`` — выдача в новом
+    порядке; ``clarification`` заполнен только для ``clarify``.
+    """
+
+    decision: str = "ok"
+    intent: str = ""
+    fragments: list = field(default_factory=list)
+    reason: str = ""
+    clarification: dict | None = None
+
+
+def _fragment_page_kind(store: Store, fragment: object) -> str:
+    """Тип листа фрагмента; пустая разметка — классификатор по тексту.
+
+    Читает ``pages.page_kind`` (Д1а). Если база не размечена, тип
+    восстанавливается из полного текста листа; недоступный текст —
+    пустая строка (правило молчит, безопасная сторона).
+    """
+    document = str(getattr(fragment, "document", "") or "")
+    page = getattr(fragment, "page", None)
+    if not document or page is None:
+        return ""
+    try:
+        kind = store.page_kind(document, int(page))
+    except (sqlite3.Error, TypeError, ValueError, AttributeError) as error:
+        logger.warning("page_kind: тип листа %s:%s недоступен: %s",
+                       document, page, error)
+        return ""
+    if kind:
+        return kind
+    text = _param_page_text(store, document, int(page))
+    if not text:
+        return ""
+    # Неразмеченная база: «other» у синтетического текста — не метка, а
+    # отсутствие маркера. Неизвестный тип не участвует в отказе Д1б.
+    classified = classify_page(text)
+    return "" if classified in ("other", "") else classified
+
+
+def _page_kind_marked(store: Store) -> bool:
+    """Размечена ли база типами листов (Д1а).
+
+    Без ``--write`` колонка ``pages.page_kind`` пуста: Д1б не должен
+    менять прежнее поведение такой базы. Ошибка/подделка store — «нет
+    разметки» с записью в лог.
+    """
+    try:
+        row = store._connection.execute(
+            "SELECT 1 FROM pages WHERE page_kind <> '' LIMIT 1").fetchone()
+    except (sqlite3.Error, AttributeError, TypeError) as error:
+        logger.warning("page_kind: разметка базы недоступна: %s", error)
+        return False
+    return row is not None
+
+
+def _page_kind_in_corpus(store: Store, kinds: tuple[str, ...]) -> bool:
+    """Есть ли в базе хоть один лист одного из ``kinds``.
+
+    Сначала — по колонке ``pages.page_kind`` (Д1а). Если совпадений нет,
+    листы с пустой разметкой проверяются классификатором: старая база
+    без ``--write`` не должна давать ложный отказ «в базе нет».
+    Ошибка SQLite — безопасная сторона (True: не отказывать по типу).
+    """
+    if not kinds:
+        return False
+    placeholders = ", ".join("?" for _ in kinds)
+    try:
+        row = store._connection.execute(
+            f"SELECT 1 FROM pages WHERE page_kind IN ({placeholders}) "
+            "LIMIT 1",
+            tuple(kinds),
+        ).fetchone()
+        if row is not None:
+            return True
+        rows = store._connection.execute(
+            "SELECT document, page FROM pages "
+            "WHERE page_kind = '' OR page_kind IS NULL").fetchall()
+    except sqlite3.Error as error:
+        logger.warning("page_kind: корпус недоступен: %s", error)
+        return True
+    for document, page in rows:
+        text = _param_page_text(store, document, int(page))
+        if text and classify_page(text) in kinds:
+            return True
+    return False
+
+
+def _nearest_kind(kinds: list[str]) -> tuple[str, int]:
+    """Ближайший содержательный тип в выдаче и его индекс.
+
+    Лидер без метки или служебного типа пропускается: инженеру полезнее
+    «Ближайшее — технологическая карта, лист 2», чем «прочее, лист 1».
+    """
+    for index, kind in enumerate(kinds):
+        if kind and kind not in ("blank", "service"):
+            return kind, index
+    return "other", 0
+
+
+def _page_kind_clarify_options(store: Store, fragments: list
+                               ) -> tuple[list[str], list[dict]]:
+    """Варианты уточнения по типам листов: (выбранные типы, options).
+
+    Группировка по ``page_kind`` верхних фрагментов, порядок — по сумме
+    весов; служебные типы (пусто, blank, service, other) не предлагаются.
+    Последний вариант — «Ни один не подходит» без ``fragment_ids``.
+    """
+    groups: dict[str, dict] = {}
+    order: list[str] = []
+    for index, fragment in enumerate(fragments[:PAGE_KIND_TOP_FRAGMENTS]):
+        kind = _fragment_page_kind(store, fragment)
+        if kind in PAGE_KIND_CLARIFY_SKIP:
+            continue
+        if kind not in groups:
+            groups[kind] = {"ids": [], "score": 0.0}
+            order.append(kind)
+        groups[kind]["ids"].append(index)
+        groups[kind]["score"] += float(
+            getattr(fragment, "score", 0.0) or 0.0)
+    ranked = sorted(enumerate(order),
+                    key=lambda item: (-groups[item[1]]["score"], item[0]))
+    chosen = [kind for _, kind in ranked[:PAGE_KIND_CLARIFY_MAX]]
+    options = [
+        {
+            "id": str(position),
+            "label": page_kind_label(kind),
+            "fragment_ids": list(groups[kind]["ids"]),
+            "query_terms": [],
+        }
+        for position, kind in enumerate(chosen, start=1)
+    ]
+    options.append({
+        "id": str(len(options) + 1),
+        "label": PAGE_KIND_CLARIFY_NONE,
+        "fragment_ids": [],
+        "query_terms": [],
+    })
+    return chosen, options
+
+
+def page_kind_verdict(store: Store, question: str, fragments: list
+                      ) -> PageKindOutcome:
+    """Д1б: сверить интент вопроса с типом листа в готовой выдаче.
+
+    Порядок решений детерминированный, без модели:
+
+    1. пустая выдача или интент не определён — ответ не меняется;
+    2. ``неполный`` — уточнение по типам листов (3–5 вариантов и
+       «Ни один не подходит»); меньше трёх разных типов — нечем
+       уточнять, ответ не меняется;
+    3. лидер нужного типа — ответ не меняется;
+    4. нужный тип есть в топ-10 — лист поднимается (``promote``);
+    5. для ``обозначение`` каталог ищется прямо по листам-каталогам
+       (:mod:`pdfgraph.catalog`): нашлось — лист каталога становится
+       лидером, нет — отказ «в каталоге не нашёл»;
+    6. нужного типа в топ-10 нет, но он есть в корпусе — отказ
+       «… в найденных листах нет. Ближайшее — <тип>, лист N»;
+    7. нужного типа в корпусе нет вовсе — отказ «… в базе нет».
+
+    Поиск, гейты Ф1.3б/Ф1.4, веса и проверка цитат не затрагиваются:
+    решение принимается поверх собранной выдачи. Пустой ``page_kind``
+    восстанавливается классификатором по тексту листа.
+    """
+    intent = question_intent(question)
+    if not fragments or not intent:
+        return PageKindOutcome("ok", intent, list(fragments))
+    if not hasattr(store, "page_kind") or not _page_kind_marked(store):
+        return PageKindOutcome("ok", intent, list(fragments))
+    if intent == "неполный":
+        chosen, options = _page_kind_clarify_options(store, fragments)
+        if len(chosen) < PAGE_KIND_CLARIFY_MIN:
+            return PageKindOutcome("ok", intent, list(fragments))
+        reason = "вопрос неполный: " + ", ".join(
+            page_kind_label(kind) for kind in chosen)
+        return PageKindOutcome(
+            "clarify", intent, list(fragments)[:PAGE_KIND_TOP_FRAGMENTS],
+            reason,
+            {
+                "decision": "clarify",
+                "question": PAGE_KIND_CLARIFY_QUESTION,
+                "reason": reason,
+                "options": options,
+            },
+        )
+    allowed = PAGE_KIND_FOR_INTENT.get(intent)
+    if not allowed:
+        return PageKindOutcome("ok", intent, list(fragments))
+    kinds = [_fragment_page_kind(store, fragment) for fragment in fragments]
+    if intent == "обозначение":
+        # Каталог: ищем деталь прямо по листам-каталогам и берём дословный
+        # срез строки обозначения (окно поиска часто режет имя и номер).
+        from pdfgraph.catalog import catalog_fragment, lookup_catalog
+        lookup = lookup_catalog(store, question)
+        if lookup.found:
+            fragment = catalog_fragment(store, lookup)
+            rest = [candidate for candidate in fragments
+                    if (candidate.document, candidate.page)
+                    != (lookup.document, lookup.page)]
+            reason = (f"каталог: лист {lookup.page}, "
+                      f"обозначение {lookup.designator or '—'}")
+            return PageKindOutcome("promote", intent,
+                                   [fragment] + rest, reason)
+        from pdfgraph.page_kind import extract_designator
+        if extract_designator(question):
+            # Строгий номер/стандарт — поисковый ключ по всему корпусу:
+            # деталь может жить в техкарте или таблице, не в каталоге.
+            return PageKindOutcome("ok", intent, list(fragments))
+        return PageKindOutcome("refuse", intent, list(fragments),
+                               "в каталоге не нашёл")
+    if kinds and kinds[0] in allowed:
+        return PageKindOutcome("ok", intent, list(fragments))
+    if intent == "значение":
+        # У значения три допустимых типа, и лидер-значение уже выбран
+        # Ф1.29; норму проверяет Ф2.10. Не переставляем выдачу ради
+        # «первого подходящего» типа и отказываем только тогда, когда
+        # ни одного такого типа в корпусе нет.
+        if any(kind in allowed for kind in kinds):
+            return PageKindOutcome("ok", intent, list(fragments))
+        if _page_kind_in_corpus(store, allowed):
+            return PageKindOutcome("ok", intent, list(fragments))
+        labels = ", ".join(page_kind_refusal_label(kind) for kind in allowed)
+        return PageKindOutcome(
+            "refuse", intent, list(fragments),
+            f"листов типа {labels} в базе нет")
+    if any(not kind for kind in kinds):
+        # Неразмеченная база: тип части листов неизвестен — правило молчит,
+        # поведение прежнее (отказ по типу требует положительной метки).
+        return PageKindOutcome("ok", intent, list(fragments))
+    if intent == "назначение":
+        # Решение владельца (Д1б): каталог, титул и содержание не могут
+        # быть лидером ответа о назначении. Если подходящего листа нет,
+        # показываем найденное с явной пометкой — это не пустой отказ.
+        leader_kind = kinds[0] if kinds else ""
+        if leader_kind not in PAGE_KIND_FORBIDDEN_LEADER:
+            # Лидер не запрещён: показываем что нашли, без перестановки.
+            if _page_kind_in_corpus(store, allowed):
+                return PageKindOutcome("ok", intent, list(fragments))
+            labels = ", ".join(
+                page_kind_refusal_label(kind) for kind in allowed)
+            return PageKindOutcome("refuse", intent, list(fragments),
+                                   f"листов типа {labels} в базе нет")
+        for index, kind in enumerate(kinds):
+            if kind in allowed:
+                promoted = [fragments[index]] + [
+                    fragment for position, fragment
+                    in enumerate(fragments) if position != index]
+                reason = (f"лидер не того типа: поднят лист "
+                          f"{fragments[index].page} "
+                          f"({page_kind_label(kind)})")
+                return PageKindOutcome("promote", intent, promoted, reason)
+        if not _page_kind_in_corpus(store, allowed):
+            labels = ", ".join(
+                page_kind_refusal_label(kind) for kind in allowed)
+            return PageKindOutcome("refuse", intent, list(fragments),
+                                   f"листов типа {labels} в базе нет")
+        nearest_kind, nearest_index = _nearest_kind(kinds)
+        nearest_page = getattr(fragments[nearest_index], "page", "?")
+        note = (f"Описания назначения не нашёл. Ближайшее — "
+                f"{page_kind_refusal_label(nearest_kind)}, "
+                f"лист {nearest_page}")
+        return PageKindOutcome("annotate", intent, list(fragments), note)
+    for index, kind in enumerate(kinds):
+        if kind in allowed:
+            promoted = [fragments[index]] + [
+                fragment for position, fragment in enumerate(fragments)
+                if position != index]
+            reason = (f"лидер не того типа: поднят лист "
+                      f"{fragments[index].page} ({page_kind_label(kind)})")
+            return PageKindOutcome("promote", intent, promoted, reason)
+    # Процедура/дефект/поиск карты/назначение: тип есть в корпусе —
+    # показываем то, что нашли (без отказа); отказ — только когда типа
+    # нет вовсе.
+    if _page_kind_in_corpus(store, allowed):
+        return PageKindOutcome("ok", intent, list(fragments))
+    labels = ", ".join(page_kind_refusal_label(kind) for kind in allowed)
+    return PageKindOutcome("refuse", intent, list(fragments),
+                           f"листов типа {labels} в базе нет")
+
+
+def _apply_page_kind_promotion(answer: Answer, fragments: list) -> None:
+    """Переставить выдачу и claims под поднятый лист (Д1б).
+
+    ``Claim.evidence`` пересчитывается по старому порядку фрагментов.
+    Если старый фрагмент заменён фрагментом того же листа (каталожный
+    срез вместо окна поиска), evidence переезжает по (документ, лист),
+    а дословный текст цитаты заменяется новым срезом того же листа.
+    Экстрактивные claims сортируются по новому индексу, чтобы первый
+    claim соответствовал лидеру; синтезированные claims (у них заполнен
+    ``answer_text``) не переставляются — прозу двигать нельзя, evidence
+    лишь пересчитывается.
+    """
+    old = answer.fragments
+    index_map: dict[int, int] = {}
+    for new_index, fragment in enumerate(fragments):
+        for old_index, candidate in enumerate(old):
+            if candidate is fragment:
+                index_map[old_index] = new_index
+                break
+    by_location: dict[tuple[str, int], int] = {}
+    for new_index, fragment in enumerate(fragments):
+        by_location.setdefault((fragment.document, fragment.page), new_index)
+    for claim in answer.claims:
+        remapped: list[int] = []
+        for index in claim.evidence:
+            new_index = index_map.get(index)
+            if new_index is None and 0 <= index < len(old):
+                new_index = by_location.get(
+                    (old[index].document, old[index].page))
+            if new_index is not None:
+                remapped.append(new_index)
+        claim.evidence = remapped
+    answer.fragments = fragments
+    if not any(claim.answer_text for claim in answer.claims):
+        # Цитата с того же листа, но из прежнего окна поиска: показываем
+        # новый дословный срез (каталожную строку обозначения).
+        for claim in answer.claims:
+            if not claim.evidence:
+                continue
+            fragment = fragments[claim.evidence[0]]
+            if (fragment.kind == "catalog" and claim.text
+                    and claim.text not in fragment.snippet):
+                claim.text = fragment.snippet
+        # Поднятый лист обязан иметь claim: иначе первая цитата ответа
+        # осталась бы от прежнего лидера.
+        if not any(0 in claim.evidence for claim in answer.claims):
+            answer.claims.insert(
+                0, Claim(text=fragments[0].snippet, evidence=[0]))
+        answer.claims.sort(
+            key=lambda claim: min(claim.evidence) if claim.evidence
+            else 1 << 30)
+        del answer.claims[3:]
 
 
 def _value_leader_state(store: Store, question: str,
@@ -993,6 +1361,24 @@ def build_answer(
     answer = _build_answer_core(
         store, question, aircraft_type, answerer, min_score,
         use_rag_fusion, use_synthesis, llm_settings, search_mode)
+    # Д1б: интент вопроса ↔ тип листа — поверх готовой выдачи. Существующие
+    # отказ и уточнение (гейты Ф1.3б/Ф1.4) не переопределяются; поиск,
+    # веса и проверка цитат не затрагиваются.
+    if not answer.refusal and not answer.clarification:
+        page_outcome = page_kind_verdict(store, question, answer.fragments)
+        if page_outcome.decision == "refuse":
+            answer = Answer(question=question, claims=[],
+                            fragments=page_outcome.fragments,
+                            refusal=True, reason=page_outcome.reason)
+        elif page_outcome.decision == "clarify":
+            answer = Answer(question=question, claims=[],
+                            fragments=page_outcome.fragments,
+                            reason=page_outcome.reason,
+                            clarification=page_outcome.clarification)
+        elif page_outcome.decision == "promote":
+            _apply_page_kind_promotion(answer, page_outcome.fragments)
+        elif page_outcome.decision == "annotate":
+            answer.page_kind_missing = page_outcome.reason
     reason, warning = applicability_verdict(store, question,
                                             answer.fragments)
     if reason and not answer.refusal:

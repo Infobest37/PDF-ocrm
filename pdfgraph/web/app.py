@@ -325,6 +325,10 @@ def create_app(store_path: str, pdf_dir: str | None = None,
                 # (строкой, не цитатой; при отказе дублирует reason).
                 "param_norm_missing": getattr(
                     answer, "param_norm_missing", ""),
+                # Д1б: «Описания назначения не нашёл. Ближайшее — …» —
+                # строка-статус, не цитата; ответ при этом выдан.
+                "page_kind_missing": getattr(
+                    answer, "page_kind_missing", ""),
                 # Ф1.29: состояние ответа «full»/«mention»/"" — интерфейс
                 # помечает «найдено упоминание, значение не указано».
                 "answer_state": getattr(answer, "answer_state", ""),

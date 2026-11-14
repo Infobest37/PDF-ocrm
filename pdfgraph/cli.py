@@ -291,6 +291,9 @@ def _print_json(answer: Answer, rows: list[dict], verified: bool) -> None:
     # его же в reason).
     if getattr(answer, "param_norm_missing", ""):
         payload["param_norm_missing"] = answer.param_norm_missing
+    # Д1б: пометка «Описания назначения не нашёл…» — строкой, не цитатой.
+    if getattr(answer, "page_kind_missing", ""):
+        payload["page_kind_missing"] = answer.page_kind_missing
     # Ф1.9: запрошенные карты, которых нет в базе; строкой, не цитатой —
     # в claims/citations не попадает (печатается и при отказе).
     if getattr(answer, "techcard_missing", None):
@@ -302,7 +305,9 @@ def _print_json(answer: Answer, rows: list[dict], verified: bool) -> None:
     if getattr(answer, "techcard", None):
         payload["techcard"] = [dataclasses.asdict(card)
                                for card in answer.techcard]
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    # Д1б: в вариантах уточнения есть «▸» — консоль cp1251 её не кодирует;
+    # _safe_print меняет только вывод консоли, JSON-данные не трогаются.
+    _safe_print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def _continuation_sheet_label(store: Store, fragment, cited: set) -> str:
@@ -440,6 +445,9 @@ def _print_text(answer: Answer, rows: list[dict], verified: bool,
     # отказе-конверсии он же напечатан в reason ниже — не дублируется.
     if getattr(answer, "param_norm_missing", "") and not answer.refusal:
         print(answer.param_norm_missing)
+    # Д1б: честная пометка о ненайденном описании назначения; ответ выдан.
+    if getattr(answer, "page_kind_missing", "") and not answer.refusal:
+        _safe_print(answer.page_kind_missing)
     # Ф1.9б: карты раздела, не попавшие в выдачу после лимита десяти.
     more = getattr(answer, "techcard_more", 0)
     if more:

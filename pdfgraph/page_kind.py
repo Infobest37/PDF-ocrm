@@ -399,6 +399,251 @@ def classify_page(text: str) -> str:
     return "other"
 
 
+# --- Д1б: интент вопроса и чертёжный номер -------------------------------
+
+#: Интент вопроса → разрешённые типы листов. ``неполный`` уходит в
+#: clarify и типов не имеет.
+PAGE_KIND_FOR_INTENT: dict[str, tuple[str, ...]] = {
+    "назначение": ("purpose",),
+    # В таблицах лежат допуски (люфты, зазоры), поэтому table тоже.
+    "значение": ("purpose", "techcard", "table"),
+    "процедура": ("techcard",),
+    "дефект": ("faults",),
+    "поиск_карты": ("techcard",),
+    "обозначение": ("catalog",),
+}
+
+#: Подписи для фразы отказа Д1б (отличаются от отчётных).
+PAGE_KIND_REFUSAL_LABELS: dict[str, str] = {
+    **PAGE_KIND_LABELS,
+    "catalog": "каталог деталей",
+    "title": "титульный лист",
+    "contents": "содержание",
+}
+
+#: Родительный падеж для начала фразы «… в найденных листах нет» (Д1б).
+PAGE_KIND_ABSENT_PHRASES: dict[str, str] = {
+    "purpose": "Описания назначения",
+    "techcard": "Технологической карты",
+    "faults": "Отыскания и устранения неисправностей",
+    "contents": "Содержания",
+    "table": "Таблицы",
+    "list": "Перечня",
+    "scheme": "Схемы",
+    "title": "Титульного листа",
+    "catalog": "Каталога деталей",
+    "blank": "Пустого листа",
+    "service": "Листа со служебным штампом",
+    "other": "Прочих листов",
+}
+
+#: Стандарты: «ГОСТ 10054-82», «ОСТ 1 31241-86», «ТУ 38.101».
+_STANDARD_RE = re.compile(
+    r"\b(?:ГОСТ|ОСТ|ТУ)\s*\d+(?:[.\s-]\d+)*(?:-\d+)?\b", re.I)
+
+#: Токен с точкой — кандидат в чертёжный номер.
+_DESIGNATOR_TOKEN_RE = re.compile(
+    r"(?<![\w.\-])"
+    r"([A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9.\-]*\.[A-Za-zА-Яа-я0-9.\-]*)"
+    r"(?![\w.\-])")
+_DATE_RE = re.compile(
+    r"^(?:19|20)\d{2}\.(?:0[1-9]|1[0-2])\.(?:0[1-9]|[12]\d|3[01])$")
+
+#: «Вопрос о номере», а не просто номер внутри вопроса.
+_DESIGNATOR_ABOUT_RE = re.compile(
+    r"что\s+за\s+(?:деталь|узел|агрегат|сборк|издели|блок|клапан|"
+    r"механизм|прибор|устройств|элемент)|"
+    r"какой\s+(?:номер|чертёж|обозначение)|"
+    r"найди\s+(?:по\s+)?обозначени|"
+    r"обозначение\s+|номер\s+у",
+    re.I,
+)
+
+#: Дефект: причина/симптом.
+_DEFECT_RE = re.compile(
+    r"почему\s+не|"
+    r"не\s+(?:работает|запускается|держит|исправен|включается|крутится|"
+    r"тянет|разгоняется)|"
+    r"трещит|течёт|течет|перегревается|неисправност|отказ|"
+    r"стучит|вибрирует|дымит",
+    re.I,
+)
+
+#: Процедура: действие/порядок.
+_PROCEDURE_RE = re.compile(
+    r"как\s+(?:заменить|проверить|выполнить|отрегулировать|снять|"
+    r"установить|разобрать|собрать|пользоваться|заправить|прокачать)|"
+    r"порядок|последовательность|технология|инструкция|регламент",
+    re.I,
+)
+
+#: Параметры, у которых спрашивают число.
+_PARAMETER_RE = re.compile(
+    r"\b(?:высот\w*|давлени\w*|зазор\w*|люфт\w*|момент\w*|размер\w*|"
+    r"температур\w*|расход\w*|оборот\w*|напряжени\w*|ток\w*|масс\w*|"
+    r"вес\w*|длин\w*|диаметр\w*|сечени\w*|усили\w*|частот\w*|"
+    r"объ[её]м\w*|ресурс\w*|срок\w*|врем\w*|скорост\w*|угол\w*|"
+    r"перепад\w*|биени\w*|неплоскостност\w*|шероховатост\w*|"
+    r"тв[её]рдост\w*|толщин\w*|ширин\w*|радиус\w*|конусност\w*|"
+    r"овальност\w*)\b",
+    re.I,
+)
+#: Единицы, по которым видно вопрос о величине.
+_UNIT_RE = re.compile(
+    r"(?<!\w)(?:мм|см|м|кгс/см[²2]?|мпа|кг|г|н·м|кгс·м|°c|"
+    r"об/мин|л/мин|в|а|гц|%|мин|ч)(?!\w)",
+    re.I,
+)
+_VALUE_QWORD_RE = re.compile(
+    r"\b(?:какая|какое|какой|каков|сколько|чему\s+равн\w*)\b", re.I)
+_VALUE_DEFINITION_RE = re.compile(r"\bчто\s+такое\b", re.I)
+_VALUE_NAMED_RE = re.compile(r"\b(?:назови|укажи)(?:те)?\b", re.I)
+#: Назначение/определение.
+_PURPOSE_RE = re.compile(
+    r"для\s+чего|зачем|что\s+делает|что\s+такое|назначени|"
+    r"с\s+какой\s+целью|\bроль\b|\bфункци\w*|"
+    r"как\s+устроен|как\s+работает|из\s+чего\s+состоит|что\s+входит",
+    re.I,
+)
+#: Ссылка на пункт/раздел — не неполный вопрос.
+_REFERENCE_RE = re.compile(
+    r"^\s*(?:пункт|раздел|глава|стр\.?|страница)\b", re.I)
+#: Вопросительное слово: вопрос полный, «неполным» не считается.
+_QUESTION_WORD_RE = re.compile(
+    r"\b(?:как|что|почему|зачем|где|когда|какой|какая|какое|какие|"
+    r"сколько|чей|чему|для\s+чего)\b",
+    re.I,
+)
+
+
+def is_designator(token: str) -> bool:
+    """Строгий чертёжный номер, а не число/код раздела/дата.
+
+    Нужна хотя бы одна точка и цифра до первой точки; дополнительно —
+    компонент из 4+ цифр, буква или дефис. Так отсекаются ``13,5``,
+    ``2.3.16``, ``072.00.00`` и дата ``2024.11.14``.
+    """
+    token = (token or "").strip(".,;:()[]")
+    if token.count(".") < 1 or _DATE_RE.fullmatch(token):
+        return False
+    if not token[0].isdigit() and not token[0].isalpha():
+        return False
+    parts = token.split(".")
+    if not any(ch.isdigit() for ch in parts[0]):
+        return False
+    has_letter = any(ch.isalpha() for ch in token)
+    has_hyphen = "-" in token
+    has_long = any(sum(ch.isdigit() for ch in part) >= 4 for part in parts)
+    return has_letter or has_hyphen or has_long
+
+
+def extract_designator(question: str) -> str | None:
+    """Первый стандарт или строгий чертёжный номер из вопроса."""
+    standard = _STANDARD_RE.search(question or "")
+    if standard is not None:
+        return standard.group(0).strip()
+    for match in _DESIGNATOR_TOKEN_RE.finditer(question or ""):
+        token = match.group(1).strip(".,;:()[]")
+        if is_designator(token):
+            return token
+    return None
+
+
+#: Служебные слова вопроса, не входящие в имя детали.
+_NAME_STOPWORDS = {
+    "что", "за", "деталь", "детали", "какой", "какая", "какое", "номер",
+    "у", "найди", "найдите", "обозначение", "обозначения", "клапан",
+    "клапана", "узел", "узла", "агрегат", "агрегата", "блок", "блока",
+    "механизм", "механизма", "прибор", "прибора", "устройство",
+    "устройства", "элемент", "элемента", "для", "чего", "нужен", "нужна",
+    "делает", "такое", "как", "проверить", "заменить", "почему", "не",
+    "на", "в", "и", "с", "по",
+}
+
+
+def extract_question_name(question: str) -> str:
+    """Имя детали из вопроса без служебных слов (для поиска по каталогу)."""
+    tokens = re.findall(
+        r"[A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9\-]*", question or "")
+    return " ".join(token for token in tokens
+                    if token.lower() not in _NAME_STOPWORDS)
+
+
+def _value_intent(lowered: str) -> bool:
+    """Вопрос просит число: «какая высота», «сколько», «что такое высота»."""
+    if re.search(r"\bсколько\b|\bчему\s+равн", lowered):
+        return True
+    parameter = bool(_PARAMETER_RE.search(lowered)
+                     or _UNIT_RE.search(lowered))
+    if parameter and _VALUE_QWORD_RE.search(lowered):
+        return True
+    if parameter and (_VALUE_DEFINITION_RE.search(lowered)
+                      or _VALUE_NAMED_RE.search(lowered)):
+        return True
+    return False
+
+
+def question_intent(question: str) -> str:
+    """Интент вопроса (Д1б); пустая строка — интент не определён.
+
+    Приоритет — от конкретного к общему:
+    ``поиск_карты > обозначение > дефект > процедура > значение >
+    назначение > неполный``. «Что такое» + параметр — значение;
+    «что такое» без параметра — назначение.
+    """
+    text = (question or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    # 1. Карта: существующий разбор, поведение не меняется.
+    from pdfgraph.query import parse_techcard_query
+    if parse_techcard_query(text) is not None:
+        return "поиск_карты"
+    # 2. Обозначение: стандарт, «вопрос о номере» или голый номер.
+    designator = extract_designator(text)
+    if (_STANDARD_RE.search(text) is not None
+            or _DESIGNATOR_ABOUT_RE.search(text) is not None
+            or (designator is not None and text == designator)):
+        return "обозначение"
+    # 3-6. Конкретное действие/симптом важнее параметра.
+    if _DEFECT_RE.search(lowered):
+        return "дефект"
+    if _PROCEDURE_RE.search(lowered):
+        return "процедура"
+    if _value_intent(lowered):
+        return "значение"
+    if _PURPOSE_RE.search(lowered):
+        return "назначение"
+    # 7. Неполный: только имя/буквенный код без глагола-намерения и без
+    #    вопросительного слова («как устроен автопилот» — полный вопрос).
+    if _REFERENCE_RE.search(lowered) or _QUESTION_WORD_RE.search(lowered):
+        return ""
+    tokens = re.findall(
+        r"[A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9\-]*", text)
+    if 1 <= len(tokens) <= 4 and any(
+            re.search(r"[A-Za-zА-Яа-я]", token) for token in tokens):
+        return "неполный"
+    return ""
+
+
+def page_kind_refusal_label(kind: str) -> str:
+    """Подпись типа для фразы отказа Д1б."""
+    return PAGE_KIND_REFUSAL_LABELS.get(kind, kind)
+
+
+def page_kind_absent_phrase(kinds: tuple[str, ...] | list[str]) -> str:
+    """Начало фразы отказа Д1б: «Описания назначения … в … листах нет».
+
+    Для одного требуемого типа берётся родительный падеж из
+    :data:`PAGE_KIND_ABSENT_PHRASES`; для нескольких (``значение`` —
+    purpose/techcard/table) — нейтральное «Листов нужного типа».
+    """
+    unique = tuple(dict.fromkeys(kind for kind in kinds if kind))
+    if len(unique) == 1:
+        return PAGE_KIND_ABSENT_PHRASES.get(unique[0], "Листов нужного типа")
+    return "Листов нужного типа"
+
+
 def page_kind_label(kind: str) -> str:
     """Подпись типа листа; неизвестный тип возвращается как есть."""
     return PAGE_KIND_LABELS.get(kind, kind)
@@ -410,6 +655,15 @@ __all__ = [
     "SPECIAL_KINDS",
     "ALL_KINDS",
     "PAGE_KIND_LABELS",
+    "PAGE_KIND_FOR_INTENT",
+    "PAGE_KIND_REFUSAL_LABELS",
+    "PAGE_KIND_ABSENT_PHRASES",
     "classify_page",
     "page_kind_label",
+    "page_kind_refusal_label",
+    "page_kind_absent_phrase",
+    "question_intent",
+    "is_designator",
+    "extract_designator",
+    "extract_question_name",
 ]
