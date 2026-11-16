@@ -45,3 +45,8 @@ models/
 *.db.backup*
 feedback.jsonl
 errors.log
+
+# Одноразовые пробники диагностики в корне (tmp_*): не коммитить.
+# tmp_*.txt уже покрыт правилом /*.txt, reports/ — правилом выше; дубли не добавлены.
+tmp_*.py
+tmp_*.txt
