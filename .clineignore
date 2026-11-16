@@ -28,3 +28,12 @@ graph.db*
 *.db.backup*
 *.db-wal
 *.db-shm
+
+# Документация и рабочие каталоги — вне контекста Cline
+PROGRESS.md
+docs/HISTORY.md
+docs/AUDIT_FOR_PLANNER.md
+data/
+dist/
+reports/
+tmp_*
