@@ -7,6 +7,10 @@
 окно анализа. Колонтитул ищется только в первых :data:`HEADER_CHARS`
 символах, затем анализируются следующие :data:`HEADER_CHARS` символов:
 маркер, стоящий сразу после длинной шапки, снова попадает в окно.
+Исключение — маркеры ``purpose``: заголовок описания назначения часто
+стоит после перечня в шапке листа, поэтому они ищутся в расширенном
+окне :data:`PURPOSE_CHARS` (Д1в-1-А). Прочие типы остаются в окне
+:data:`HEADER_CHARS` — их приоритет и барьер техкарты не меняются.
 Однострочная книга работает так же — окно режется по символам, а не по
 строкам.
 
@@ -72,6 +76,13 @@ import re
 #: анализ идёт по следующим 400 символам (однострочная книга режется по
 #: символам, поэтому маркер в конце такой строки всё равно виден).
 HEADER_CHARS = 400
+
+#: Окно поиска маркеров ``purpose``: 800 символов (Д1в-1-А). Заголовок
+#: «ОПИСАНИЕ И РАБОТА» на листе, который начинается перечнем, уезжает за
+#: :data:`HEADER_CHARS`; расширение только для ``purpose`` аддитивно —
+#: маркер раньше 400 символов всегда побеждает по позиции, поэтому
+#: techcard/catalog и приоритет бланка не меняются.
+PURPOSE_CHARS = 800
 
 #: Содержательные типы листа.
 PAGE_KINDS: tuple[str, ...] = (
@@ -371,6 +382,9 @@ def classify_page(text: str) -> str:
         return "title"
     start = _header_end(text)
     analysis = text[start:start + HEADER_CHARS]
+    # Д1в-1-А: у purpose своё окно — заголовок назначения может стоять
+    # после перечня в шапке листа. Остальные типы ищутся в analysis.
+    purpose_analysis = text[start:start + PURPOSE_CHARS]
     catalog_positions = _catalog_candidates(window, analysis)
     analysis_head = "\n".join(
         line for _offset, line in _first_lines(analysis, 2))
@@ -382,8 +396,9 @@ def classify_page(text: str) -> str:
         (position, "catalog") for position in catalog_positions
     ]
     for kind, patterns in _CONTENT_MARKERS:
+        kind_window = purpose_analysis if kind == "purpose" else analysis
         for pattern in patterns:
-            for match in pattern.finditer(analysis):
+            for match in pattern.finditer(kind_window):
                 if kind == "techcard" and not _is_techcard_match(
                         match, analysis):
                     continue
@@ -651,6 +666,7 @@ def page_kind_label(kind: str) -> str:
 
 __all__ = [
     "HEADER_CHARS",
+    "PURPOSE_CHARS",
     "PAGE_KINDS",
     "SPECIAL_KINDS",
     "ALL_KINDS",

@@ -17,6 +17,7 @@ from pdfgraph.page_kind import (
     HEADER_CHARS,
     PAGE_KINDS,
     PAGE_KIND_LABELS,
+    PURPOSE_CHARS,
     SPECIAL_KINDS,
     classify_page,
     page_kind_label,
@@ -201,8 +202,73 @@ def test_one_line_book_header_window():
     text = "x" * 380 + "ОПИСАНИЕ И РАБОТА"
     assert len(text) <= HEADER_CHARS
     assert classify_page(text) == "purpose"
+    # Д1в-1-А: маркеры purpose ищутся в расширенном окне PURPOSE_CHARS,
+    # поэтому на позиции 400 назначение ещё видно; за окном — other.
     beyond = "x" * HEADER_CHARS + "ОПИСАНИЕ И РАБОТА"
-    assert classify_page(beyond) == "other"
+    assert classify_page(beyond) == "purpose"
+    assert classify_page("x" * PURPOSE_CHARS + "ОПИСАНИЕ И РАБОТА") == "other"
+
+
+def test_purpose_marker_in_extended_window_d1v1a():
+    """Д1в-1-А: маркер назначения на позиции 400–800 даёт purpose."""
+    assert PURPOSE_CHARS == 800
+    assert classify_page("x" * 500 + "2. Описание и работа") == "purpose"
+    assert classify_page("x" * 600 + "В состав входят") == "purpose"
+    assert classify_page("x" * 700 + "Общие сведения") == "purpose"
+    # Ровно на границе расширенного окна маркер уже не виден.
+    assert classify_page("x" * PURPOSE_CHARS + "ОБЩИЕ СВЕДЕНИЯ") == "other"
+
+
+def test_purpose_marker_in_first_window_kept_d1v1a():
+    """Д1в-1-А: маркеры в первых 400 символах работают как раньше."""
+    assert classify_page("ОПИСАНИЕ И РАБОТА") == "purpose"
+    assert classify_page("x" * 350 + " НАЗНАЧЕНИЕ") == "purpose"
+    assert classify_page("МИ-8МТВ-1\nСИСТЕМА ОБОГРЕВА - ОПИСАНИЕ И РАБОТА\n"
+                         "1. Общие сведения") == "purpose"
+
+
+def test_extended_window_does_not_steal_techcard_d1v1a():
+    """Д1в-1-А: расширенное окно не отбирает лист у технологической карты."""
+    blank = ("ТЕХНОЛОГИЧЕСКАЯ КАРТА № 5\n"
+             "Наименование работы: ПРОВЕРКА ВСУ\n" + "x" * 400
+             + " ОПИСАНИЕ И РАБОТА")
+    assert classify_page(blank) == "techcard"
+    continuation = ("Содержание операции и технические требования (ТТ)\n"
+                    "Работы, выполняемые при отклонениях от ТТ\n" + "x" * 400
+                    + " ОБЩИЕ СВЕДЕНИЯ")
+    assert classify_page(continuation) == "techcard"
+
+
+def test_extended_window_does_not_steal_techcard_list_d1v1a():
+    """Д1в-1-А: лист «Перечень технологических карт» остаётся other."""
+    text = (
+        "Ми-8МТВ-1 ДОПОЛНЕНИЕ К РУКОВОДСТВУ ПО ТЕХНИЧЕСКОЙ "
+        "ЭКСПЛУАТАЦИИ ДЕЙСТВИТЕЛЬНО ДЛЯ ВЕРТОЛЕТА №96555 "
+        "БОРТОВЫЕ АВТОМАТИЧЕСКИЕ СРЕДСТВА КОНТРОЛЯ И СИСТЕМА "
+        "РЕГИСТРАЦИИ ОСНОВНЫХ ПАРАМЕТРОВ ПОЛЕТА. ТЕХНОЛОГИЯ "
+        "ОБСЛУЖИВАНИЯ 1. Общие указания "
+        + "x" * 450 + " 2. Перечень технологических карт."
+    )
+    assert classify_page(text) == "other"
+
+
+def test_control_pages_d1v1a():
+    """Д1в-1-А: контрольные листы Д-1263 ч. 2 на позициях реального текста."""
+    # л.138: «2. Описание и работа» на позиции 406 после колонтитула.
+    assert classify_page("x" * 406 + "2. Описание и работа" + "x" * 50
+                         + "В состав входят") == "purpose"
+    # л.141: только «предназначен» — не маркер, других маркеров нет.
+    assert classify_page("x" * 468 + "Датчик ДАС предназначен"
+                         + "x" * 400) == "other"
+    # л.142: нумерованный подраздел и «предназначен» — не маркер.
+    assert classify_page("2.5.2. Два датчика МУ-615А" + "x" * 700
+                         + "предназначен для выдачи") == "other"
+    # л.150: перечень технологических карт без purpose-маркеров.
+    assert classify_page("x" * 451 + "2. Перечень технологических карт."
+                         ) == "other"
+    # л.156: бланк технологической карты побеждает по позиции.
+    assert classify_page("ТЕХНОЛОГИЧЕСКАЯ КАРТА № 5\nНа странице 1"
+                         ) == "techcard"
 
 
 def test_store_migration_adds_page_kind(tmp_path):
